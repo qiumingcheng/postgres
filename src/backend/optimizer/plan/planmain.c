@@ -26,6 +26,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/placeholder.h"
 #include "optimizer/planmain.h"
+#include "optimizer/cascades.h"
 #include "optimizer/tlist.h"
 #include "utils/selfuncs.h"
 
@@ -434,4 +435,185 @@ canonicalize_all_pathkeys(PlannerInfo *root)
 	root->window_pathkeys = canonicalize_pathkeys(root, root->window_pathkeys);
 	root->distinct_pathkeys = canonicalize_pathkeys(root, root->distinct_pathkeys);
 	root->sort_pathkeys = canonicalize_pathkeys(root, root->sort_pathkeys);
+}
+
+
+/*
+ * prepare_query_planner_inputs
+ *		Extract the prepare phase from query_planner so Cascades can reuse it.
+ *
+ * This does all the PlannerInfo initialization, relation setup, equivalence
+ * class building, and pathkey canonicalization that query_planner normally does
+ * before calling make_one_rel().
+ *
+ * Returns a struct with joinlist, trivial info, etc.
+ * Does NOT call make_one_rel() — that's left to the caller.
+ */
+QueryPlannerPrepResult *
+prepare_query_planner_inputs(PlannerInfo *root, List *tlist,
+							 double tuple_fraction, double limit_tuples)
+{
+	Query	   *parse = root->parse;
+	QueryPlannerPrepResult *prep;
+	List	   *joinlist;
+	Index		rti;
+	double		total_pages;
+
+	prep = (QueryPlannerPrepResult *) palloc0(sizeof(QueryPlannerPrepResult));
+
+	/* Make tuple_fraction, limit_tuples accessible to lower-level routines */
+	root->tuple_fraction = tuple_fraction;
+	root->limit_tuples = limit_tuples;
+
+	/* Handle trivial case: empty FROM */
+	if (parse->jointree->fromlist == NIL)
+	{
+		prep->trivial_result = true;
+		prep->trivial_path = (Path *)
+			create_result_path((List *) parse->jointree->quals);
+		prep->joinlist = NIL;
+
+		root->canon_pathkeys = NIL;
+		canonicalize_all_pathkeys(root);
+		return prep;
+	}
+
+	/* Init planner lists */
+	root->join_rel_list = NIL;
+	root->join_rel_hash = NULL;
+	root->join_rel_level = NULL;
+	root->join_cur_level = 0;
+	root->canon_pathkeys = NIL;
+	root->left_join_clauses = NIL;
+	root->right_join_clauses = NIL;
+	root->full_join_clauses = NIL;
+	root->join_info_list = NIL;
+	root->placeholder_list = NIL;
+	root->initial_rels = NIL;
+
+	/* Setup simple rel arrays */
+	setup_simple_rel_arrays(root);
+
+	/* Add base rels */
+	add_base_rels_to_query(root, (Node *) parse->jointree);
+
+	/* Build targetlists and placeholders */
+	build_base_rel_tlists(root, tlist);
+	find_placeholders_in_jointree(root);
+
+	/* Deconstruct jointree */
+	joinlist = deconstruct_jointree(root);
+
+	/* Reconsider outer-join quals */
+	reconsider_outer_join_clauses(root);
+
+	/* Generate implied equalities */
+	generate_base_implied_equalities(root);
+
+	/* Canonicalize pathkeys */
+	canonicalize_all_pathkeys(root);
+
+	/* Fix placeholder input levels */
+	fix_placeholder_input_needed_levels(root);
+
+	/* Remove useless joins */
+	joinlist = remove_useless_joins(root, joinlist);
+
+	/* Distribute placeholders */
+	add_placeholders_to_base_rels(root);
+
+	/* Compute total_table_pages */
+	total_pages = 0;
+	for (rti = 1; rti < root->simple_rel_array_size; rti++)
+	{
+		RelOptInfo *brel = root->simple_rel_array[rti];
+		if (brel == NULL)
+			continue;
+		if (brel->reloptkind == RELOPT_BASEREL ||
+			brel->reloptkind == RELOPT_OTHER_MEMBER_REL)
+			total_pages += (double) brel->pages;
+	}
+	root->total_table_pages = total_pages;
+
+	prep->trivial_result = false;
+	prep->trivial_path = NULL;
+	prep->joinlist = joinlist;
+	prep->total_table_pages = total_pages;
+	prep->lower_paths_built = false;
+	prep->final_rel = NULL;
+
+	return prep;
+}
+
+/*
+ * finish_query_planner_after_prepare
+ *		Complete query_planner after prepare phase: make_one_rel + cost/group
+ *		estimation.  This is the "second half" of the original query_planner.
+ */
+void
+finish_query_planner_after_prepare(PlannerInfo *root,
+								   QueryPlannerPrepResult *prep,
+								   List *tlist,
+								   double tuple_fraction,
+								   double limit_tuples,
+								   Path **cheapest_path,
+								   Path **sorted_path,
+								   double *num_groups)
+{
+	Query	   *parse = root->parse;
+	RelOptInfo *final_rel;
+	Path	   *sortedpath;
+
+	*num_groups = 1;
+
+	if (prep->trivial_result)
+	{
+		*cheapest_path = prep->trivial_path;
+		*sorted_path = NULL;
+		return;
+	}
+
+	/* Reuse previously built final_rel, or build now */
+	if (prep->lower_paths_built)
+		final_rel = prep->final_rel;
+	else
+	{
+		final_rel = make_one_rel(root, prep->joinlist);
+		prep->lower_paths_built = true;
+		prep->final_rel = final_rel;
+	}
+
+	if (!final_rel || !final_rel->cheapest_total_path)
+		elog(ERROR, "failed to construct the join relation");
+
+	/* Group/distinct estimation — same as original query_planner */
+	if (parse->groupClause)
+	{
+		List *groupExprs = get_sortgrouplist_exprs(parse->groupClause,
+												   parse->targetList);
+		*num_groups = estimate_num_groups(root, groupExprs, final_rel->rows);
+		if (tuple_fraction >= 1.0)
+			tuple_fraction /= *num_groups;
+	}
+	else if (parse->hasAggs || root->hasHavingQual)
+		tuple_fraction = 0.0;
+	else if (parse->distinctClause)
+	{
+		List *distinctExprs = get_sortgrouplist_exprs(parse->distinctClause,
+													  parse->targetList);
+		*num_groups = estimate_num_groups(root, distinctExprs,
+										  final_rel->rows);
+		if (tuple_fraction >= 1.0)
+			tuple_fraction /= *num_groups;
+	}
+
+	*cheapest_path = final_rel->cheapest_total_path;
+
+	sortedpath = get_cheapest_fractional_path_for_pathkeys(
+		final_rel->pathlist, root->query_pathkeys, NULL, tuple_fraction);
+
+	if (sortedpath == *cheapest_path)
+		sortedpath = NULL;
+
+	*sorted_path = sortedpath;
 }

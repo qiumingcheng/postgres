@@ -31,6 +31,7 @@
 #include "optimizer/plancat.h"
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
+#include "optimizer/cascades.h"
 #include "optimizer/prep.h"
 #include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
@@ -1217,9 +1218,94 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		 * note there may not be any presorted path).  query_planner will also
 		 * estimate the number of groups in the query, and canonicalize all
 		 * the pathkeys.
+		 *
+		 * ---- Cascades branch ----
 		 */
+		if (enable_cascades_planner)
+		{
+			PgCascadesUpperInfo upper_info;
+			QueryPlannerPrepResult *prep = NULL;
+			PgCascadesStatus cascades_status;
+
+			MemSet(&upper_info, 0, sizeof(PgCascadesUpperInfo));
+			upper_info.tlist        = tlist;
+			upper_info.sub_tlist    = sub_tlist;
+			upper_info.groupColIdx  = groupColIdx;
+			upper_info.need_tlist_eval = need_tlist_eval;
+			upper_info.agg_costs    = agg_costs;
+			upper_info.numGroupCols = numGroupCols;
+			upper_info.dNumGroups   = dNumGroups;
+			upper_info.tuple_fraction   = tuple_fraction;
+			upper_info.limit_tuples     = limit_tuples;
+			upper_info.sub_limit_tuples = sub_limit_tuples;
+			upper_info.offset_est       = offset_est;
+			upper_info.count_est        = count_est;
+			upper_info.activeWindows    = activeWindows;
+			upper_info.hasAggs          = parse->hasAggs;
+			upper_info.groupClause      = parse->groupClause;
+			upper_info.distinctClause   = parse->distinctClause;
+			upper_info.sortClause       = parse->sortClause;
+			upper_info.havingQual       = parse->havingQual;
+			upper_info.hasDistinctOn    = parse->hasDistinctOn;
+
+			cascades_status = pg_cascades_supported_query_precheck(root,
+																   &upper_info);
+			if (cascades_status == PG_CASCADES_OK)
+			{
+				prep = prepare_query_planner_inputs(root,
+													sub_tlist,
+													tuple_fraction,
+													sub_limit_tuples);
+				if (prep != NULL)
+				{
+					upper_info.group_pathkeys    = root->group_pathkeys;
+					upper_info.sort_pathkeys     = root->sort_pathkeys;
+					upper_info.distinct_pathkeys = root->distinct_pathkeys;
+					if (parse->groupClause)
+						upper_info.groupOperators =
+							extract_grouping_ops(parse->groupClause);
+
+					cascades_status = pg_cascades_supported_query(root,
+																 &upper_info);
+				}
+			}
+
+			if (cascades_status == PG_CASCADES_OK)
+			{
+				Plan *cascades_plan = NULL;
+
+				cascades_status = pg_cascades_try_grouping_planner(
+					root, prep, &upper_info, &cascades_plan);
+
+				if (cascades_status == PG_CASCADES_OK && cascades_plan != NULL)
+				{
+					/* query_pathkeys set by pg_cascades_extract_best_plan */
+					return cascades_plan;
+				}
+			}
+
+			pg_cascades_handle_status_or_error(cascades_status,
+											   cascades_planner_debug);
+
+			/* fallback: use finish function if prepare already done */
+			if (prep != NULL)
+			{
+				finish_query_planner_after_prepare(root, prep,
+												   sub_tlist,
+												   tuple_fraction,
+												   sub_limit_tuples,
+												   &cheapest_path,
+												   &sorted_path,
+												   &dNumGroups);
+				goto cascades_done;
+			}
+		}
+
+		/* ---- Original PG query_planner ---- */
 		query_planner(root, sub_tlist, tuple_fraction, sub_limit_tuples,
 					  &cheapest_path, &sorted_path, &dNumGroups);
+
+	cascades_done:
 
 		/*
 		 * Extract rowcount and width estimates for possible use in grouping

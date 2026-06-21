@@ -46,6 +46,7 @@
 #include "optimizer/geqo.h"
 #include "optimizer/paths.h"
 #include "optimizer/planmain.h"
+#include "optimizer/cascades.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_type.h"
 #include "parser/parser.h"
@@ -763,6 +764,33 @@ static struct config_bool ConfigureNamesBool[] =
 		},
 		&enable_hashjoin,
 		true,
+		NULL, NULL, NULL
+	},
+	{
+		{"enable_cascades_planner", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Enables the Cascades query planner."),
+			NULL
+		},
+		&enable_cascades_planner,
+		false,
+		NULL, NULL, NULL
+	},
+	{
+		{"cascades_planner_debug", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Enables debug output from the Cascades planner."),
+			NULL
+		},
+		&cascades_planner_debug,
+		false,
+		NULL, NULL, NULL
+	},
+	{
+		{"cascades_planner_fallback_on_error", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Fall back to standard planner on Cascades internal errors."),
+			NULL
+		},
+		&cascades_planner_fallback_on_error,
+		false,
 		NULL, NULL, NULL
 	},
 	{
@@ -2377,6 +2405,34 @@ static struct config_int ConfigureNamesInt[] =
 		},
 		&pgstat_track_activity_query_size,
 		1024, 100, 102400,
+		NULL, NULL, NULL
+	},
+	{
+		{"cascades_planner_timeout_ms", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Sets the Cascades planner timeout in milliseconds."),
+			NULL,
+			GUC_UNIT_MS
+		},
+		&cascades_planner_timeout_ms,
+		0, 0, INT_MAX,
+		NULL, NULL, NULL
+	},
+	{
+		{"cascades_planner_max_groups", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Sets the maximum number of Cascades memo groups."),
+			NULL
+		},
+		&cascades_planner_max_groups,
+		10000, 0, INT_MAX,
+		NULL, NULL, NULL
+	},
+	{
+		{"cascades_planner_max_tasks", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Sets the maximum number of Cascades optimizer tasks."),
+			NULL
+		},
+		&cascades_planner_max_tasks,
+		100000, 0, INT_MAX,
 		NULL, NULL, NULL
 	},
 
