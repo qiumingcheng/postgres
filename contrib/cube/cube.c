@@ -27,7 +27,7 @@ PG_MODULE_MAGIC;
 #define ARRNELEMS(x)  ArrayGetNItems( ARR_NDIM(x), ARR_DIMS(x))
 
 extern int	cube_yyparse();
-extern void cube_yyerror(const char *message);
+extern void cube_yyerror(void *result, const char *message);
 extern void cube_scanner_init(const char *str);
 extern void cube_scanner_finish(void);
 
@@ -163,7 +163,7 @@ cube_in(PG_FUNCTION_ARGS)
 	cube_scanner_init(str);
 
 	if (cube_yyparse(&result) != 0)
-		cube_yyerror("bogus input");
+		cube_yyerror(NULL, "bogus input");
 
 	cube_scanner_finish();
 

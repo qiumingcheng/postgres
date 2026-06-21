@@ -28,7 +28,7 @@ extern int cube_yylex(void);
 static char *scanbuf;
 static int	scanbuflen;
 
-void cube_yyerror(const char *message);
+void cube_yyerror(void *result, const char *message);
 int cube_yyparse(void *result);
 
 static int delim_count(char *s, char delim);
@@ -40,6 +40,7 @@ static NDBOX * write_point_as_box(char *s, int dim);
 /* BISON Declarations */
 %expect 0
 %name-prefix="cube_yy"
+%parse-param {void *result}
 
 %token CUBEFLOAT O_PAREN C_PAREN O_BRACKET C_BRACKET COMMA
 %start box

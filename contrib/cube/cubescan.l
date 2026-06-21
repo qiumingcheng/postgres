@@ -55,8 +55,10 @@ float        ({integer}|{real})([eE]{integer})?
 %%
 
 void
-yyerror(const char *message)
+yyerror(void *result, const char *message)
 {
+	(void) result;
+
 	if (*yytext == YY_END_OF_BUFFER_CHAR)
 	{
 		ereport(ERROR,

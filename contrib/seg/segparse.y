@@ -24,7 +24,7 @@ extern int seg_yylex(void);
 
 extern int significant_digits(char *str);		/* defined in seg.c */
 
-void seg_yyerror(const char *message);
+void seg_yyerror(void *result, const char *message);
 int seg_yyparse(void *result);
 
 static float seg_atof(char *value);
@@ -42,6 +42,7 @@ static char strbuf[25] = {
 /* BISON Declarations */
 %expect 0
 %name-prefix="seg_yy"
+%parse-param {void *result}
 
 %union {
 	struct BND {

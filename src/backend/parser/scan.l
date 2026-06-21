@@ -1,3 +1,15 @@
+%top{
+/*
+ * flex 2.6.x emits its prefix remapping before the user prologue below.  When
+ * this scanner is included from a modern bison gram.c, bison has already
+ * defined yylex as base_yylex; clear that so %option prefix still produces
+ * core_yylex as expected by parser.c.
+ */
+#ifdef yylex
+#undef yylex
+#endif
+}
+
 %{
 /*-------------------------------------------------------------------------
  *
