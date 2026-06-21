@@ -52,6 +52,26 @@ typedef enum PgCascadesOpKind
     PG_CASCADES_PHYSICAL_PROJECT
 } PgCascadesOpKind;
 
+/*
+ * Phase 4: Per-rule bit indices for BitSet tracking.
+ *    explored_rules: which rules have been tried on this expression
+ *    applied_rules:  which rules produced this expression (lineage)
+ */
+#define PG_RULE_BIT_AGG_TO_HASHAGG         0
+#define PG_RULE_BIT_AGG_TO_GROUPAGG        1
+#define PG_RULE_BIT_SORT_TO_SORT           2
+#define PG_RULE_BIT_DISTINCT_TO_UNIQUE     3
+#define PG_RULE_BIT_LIMIT_TO_LIMIT         4
+#define PG_RULE_BIT_PROJECT_TO_PROJECT     5
+#define PG_RULE_BIT_SCAN_TO_SEQSCAN        6
+#define PG_RULE_BIT_SCAN_TO_INDEXSCAN      7
+#define PG_RULE_BIT_SCAN_TO_BITMAPSCAN     8
+#define PG_RULE_BIT_JOIN_TO_NESTLOOP       9
+#define PG_RULE_BIT_JOIN_TO_HASHJOIN      10
+#define PG_RULE_BIT_JOIN_TO_MERGEJOIN     11
+#define PG_RULE_BIT_JOIN_COMMUTATIVITY    12
+#define PG_RULE_BIT_MAX                   13
+
 /* Physical expression 模式：导入的完整 Path vs 可组合算子 */
 typedef enum PgPhysicalExprMode
 {
@@ -136,6 +156,8 @@ struct PgGroupExpr
     PgPhysicalExprMode mode;        /* IMPORTED_PATH or COMPOSABLE_OP */
     List       *inputs;             /* List<PgMemoGroup *>，子 Group */
     Bitmapset  *applied_rules;      /* 已应用规则位图 */
+    Bitmapset  *explored_rules;     /* Phase 4: 已尝试探索规则 */
+    uint32      expr_hash;           /* Phase 4: hash for dedup */
     bool        stats_derived;      /* 统计信息是否已推导 */
 
     void       *op_private;         /* Path*, RTE, RestrictInfo list, Agg info 等 */
@@ -177,6 +199,16 @@ struct PgMemo
     PgMemoGroup *root_group;
 };
 
+/* Phase 4: Enforcer state machine states */
+typedef enum PgEnforceState
+{
+    ENFORCE_INIT,              /* 初始化：确定 output property */
+    ENFORCE_OPTIMIZE_CHILDREN, /* 优化子节点（逐个） */
+    ENFORCE_COMPUTE_COST,      /* 所有子节点完成 → 计算总代价 */
+    ENFORCE_ENFORCE_PROPERTY,  /* 属性不满足 → 应用 Enforcer */
+    ENFORCE_COMPLETE            /* 完成 */
+} PgEnforceState;
+
 /* OptimizerTask: task scheduler 栈中的任务 */
 struct PgOptimizerTask
 {
@@ -189,6 +221,14 @@ struct PgOptimizerTask
     bool        is_resume;          /* true: 因 child 未就绪而暂停 */
     int         resume_child_idx;
     List       *child_best_results;
+
+    /* Phase 4: Enforcer state machine */
+    PgEnforceState enforce_state;   /* current state */
+    int         cur_child_index;    /* current child being optimized */
+    PgOutputProperty output_property; /* derived output */
+    List       *child_required_props; /* per-child required properties */
+    double      total_cost;         /* accumulated cost */
+    double      startup_cost;       /* startup cost */
 };
 
 /* Rule: 一条变换规则 */
@@ -203,7 +243,54 @@ struct PgRule
     bool        is_implementation;  /* true=implementation, false=transformation */
     PgCascadesOpKind from_op;       /* 匹配的 logical op kind */
     PgCascadesOpKind to_op;        /* 目标 op kind */
+    int         rule_bit;          /* Phase 4: rule index for BitSet */
+    double      promise;           /* Phase 4: expected benefit 0..1 */
 };
+
+/* ========================================================================
+ * Phase 4: Pattern Matching Engine
+ * ======================================================================== */
+
+typedef enum PgPatternNodeType
+{
+    PG_PATTERN_LEAF,         /* 匹配任意 Group (通配) */
+    PG_PATTERN_MULTI_LEAF,   /* 匹配多个 Group (用于 n-ary Join) */
+    PG_PATTERN_OPERATOR,     /* 匹配特定算子类型 */
+    PG_PATTERN_TREE           /* 匹配子树（递归） */
+} PgPatternNodeType;
+
+typedef struct PgPattern
+{
+    PgPatternNodeType type;
+    PgCascadesOpKind  op;           /* 仅 PATTERN_OPERATOR 有效 */
+    List             *children;     /* List<PgPattern *>，PATTERN_TREE 的子模式 */
+} PgPattern;
+
+typedef struct PgBinder
+{
+    PgPattern   *pattern;       /* 匹配的 pattern 节点 */
+    PgGroupExpr *expr;          /* 匹配到的 expression */
+    PgMemoGroup *group;         /* expression 所在的 group */
+    List        *child_matches; /* List<PgBinder *>，子匹配 */
+} PgBinder;
+
+/* Phase 4: CombinationRule — 一组相关规则的聚合 */
+typedef struct PgCombinationRule
+{
+    const char *name;
+    int        *rule_ids;       /* array of rule_bit indices, terminated by -1 */
+    bool        iterate;         /* iterate until convergence */
+} PgCombinationRule;
+
+/* Pattern 构造函数 */
+PgPattern *pg_pattern_leaf(void);
+PgPattern *pg_pattern_multi_leaf(void);
+PgPattern *pg_pattern_op(PgCascadesOpKind op);
+PgPattern *pg_pattern_tree(PgCascadesOpKind op, List *children);
+
+/* Pattern 匹配 */
+List *pg_pattern_match_root_only(PgPattern *pattern, PgGroupExpr *root);
+List *pg_pattern_match_full(PgPattern *pattern, PgGroupExpr *root);
 
 /* ========================================================================
  * 上下文结构
@@ -282,6 +369,8 @@ struct PgPlannerCascadesContext
     bool         debug;
     List        *fallback_reasons;
 
+    double       upper_bound_cost;       /* Phase 4: pruning bound */
+
     /* 内存 */
     MemoryContext memo_cxt;
     MemoryContext task_cxt;
@@ -354,6 +443,7 @@ extern void pg_group_update_best(PgMemoGroup *group,
 extern PgRule *pg_cascades_get_impl_rules(int *num_rules);
 extern PgRule *pg_cascades_get_trans_rules(int *num_rules);
 extern PgRule *pg_cascades_get_impl_rules_phase2(int *num_rules);
+extern PgRule *pg_cascades_get_rules_sorted(int *num_rules);
 
 /* pg_adapter.c */
 extern PgGroupExpr *pg_cascades_build_logical_root(
