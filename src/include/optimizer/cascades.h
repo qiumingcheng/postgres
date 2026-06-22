@@ -282,6 +282,28 @@ typedef struct PgCombinationRule
     bool        iterate;         /* iterate until convergence */
 } PgCombinationRule;
 
+/* Phase 4a: Rewrite Stage — 分阶段规则重写 pipeline */
+typedef enum PgRewriteStage
+{
+    REWRITE_CTE_INLINE,
+    REWRITE_SUBQUERY,
+    REWRITE_PREDICATE_PUSHDOWN,
+    REWRITE_COLUMN_PRUNE,
+    REWRITE_JOIN_REORDER,
+    REWRITE_LIMIT_PUSH,
+    REWRITE_AGG_PUSHDOWN,
+    REWRITE_SEMIJOIN_DEDUP,
+    REWRITE_NUM_STAGES
+} PgRewriteStage;
+
+typedef struct PgRewriteStageDef
+{
+    PgRewriteStage stage;
+    const char    *name;
+    bool           iterate;      /* iterate until convergence */
+    /* Future: List *rules for this stage */
+} PgRewriteStageDef;
+
 /* Pattern 构造函数 */
 PgPattern *pg_pattern_leaf(void);
 PgPattern *pg_pattern_multi_leaf(void);
@@ -457,6 +479,10 @@ extern Plan *pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx);
 extern void pg_cascades_validate_plan(Plan *plan);
 extern Plan *pg_cascades_physical_rewrite(PgPlannerCascadesContext *ctx,
                                            Plan *plan);
+
+/* rewrite.c */
+extern PgCascadesStatus pg_cascades_logical_rewrite(
+    PgPlannerCascadesContext *ctx);
 
 /* debug.c */
 extern void debug_print_cascades_memo(PgPlannerCascadesContext *ctx);

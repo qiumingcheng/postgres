@@ -263,6 +263,18 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     /* 7. Derive logical property */
     pg_memo_derive_logical_property(ctx.memo, ctx.memo->root_group, &ctx);
 
+    /* 7b. Phase 4a: Logical rewrite pipeline (pre-search) */
+    {
+        PgCascadesStatus rw_status;
+        rw_status = pg_cascades_logical_rewrite(&ctx);
+        if (rw_status != PG_CASCADES_OK)
+        {
+            MemoryContextSwitchTo(old_cxt);
+            MemoryContextDelete(ctx.memo_cxt);
+            return rw_status;
+        }
+    }
+
     /* 8. Run task scheduler */
     {
         PgOptimizerTask *root_task;
