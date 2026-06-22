@@ -191,16 +191,25 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     ctx.fallback_reasons = NIL;
     ctx.upper_bound_cost = 0;  /* Phase 4 */
 
-    /* 3. Set up rules */
+    /* 3. Set up rules (Phase 4: sorted by promise descending) */
     {
         int num_impl, num_trans;
 
         rules = pg_cascades_get_impl_rules(&num_impl);
-        ctx.impl_rules = rules;
+        ctx.impl_rules = pg_cascades_get_rules_sorted(rules, &num_impl);
         ctx.num_impl_rules = num_impl;
 
-        ctx.trans_rules = pg_cascades_get_trans_rules(&num_trans);
-        ctx.num_trans_rules = num_trans;
+        rules = pg_cascades_get_trans_rules(&num_trans);
+        if (num_trans > 0)
+        {
+            ctx.trans_rules = pg_cascades_get_rules_sorted(rules, &num_trans);
+            ctx.num_trans_rules = num_trans;
+        }
+        else
+        {
+            ctx.trans_rules = NULL;
+            ctx.num_trans_rules = 0;
+        }
     }
 
     /* 4. Handle trivial_result */

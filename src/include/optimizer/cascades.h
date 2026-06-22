@@ -443,7 +443,7 @@ extern void pg_group_update_best(PgMemoGroup *group,
 extern PgRule *pg_cascades_get_impl_rules(int *num_rules);
 extern PgRule *pg_cascades_get_trans_rules(int *num_rules);
 extern PgRule *pg_cascades_get_impl_rules_phase2(int *num_rules);
-extern PgRule *pg_cascades_get_rules_sorted(int *num_rules);
+extern PgRule *pg_cascades_get_rules_sorted(PgRule *rules, int *num_rules);
 
 /* pg_adapter.c */
 extern PgGroupExpr *pg_cascades_build_logical_root(

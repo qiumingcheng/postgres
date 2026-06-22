@@ -393,7 +393,27 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
 }
 
 /* ========================================================================
- * EnforceAndCostTask
+ * Phase 4: Clone helper for EnforceAndCostTask resume
+ * ======================================================================== */
+
+static PgOptimizerTask *
+pg_task_clone(PgOptimizerTask *src)
+{
+    PgOptimizerTask *dst = (PgOptimizerTask *) palloc(sizeof(PgOptimizerTask));
+    memcpy(dst, src, sizeof(PgOptimizerTask));
+    return dst;
+}
+
+/* ========================================================================
+ * EnforceAndCostTask — Phase 4 state machine with Clone+Resume
+ *
+ * States:
+ *   ENFORCE_INIT              — derive child properties, set up iteration
+ *   ENFORCE_OPTIMIZE_CHILDREN — optimize children one by one (clone+resume)
+ *   ENFORCE_COMPUTE_COST      — accumulate costs, check pruning, check
+ *                                property satisfaction
+ *   ENFORCE_ENFORCE_PROPERTY  — apply Sort enforcer when output mismatches
+ *   ENFORCE_COMPLETE          — done
  * ======================================================================== */
 
 static PgCascadesStatus
@@ -401,23 +421,26 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
 {
     PgGroupExpr *expr = task->expr;
     PgRequiredProperty *required = task->required;
-    PgOutputProperty output;
-    PgGroupBestEntry *entry;
 
     CHECK_FOR_INTERRUPTS();
 
-    /* Default required if NULL: no pathkeys */
+    /* Default required if NULL */
     if (required == NULL)
     {
         required = (PgRequiredProperty *) palloc0(sizeof(PgRequiredProperty));
         required->pathkeys = NIL;
         required->required_outer = NULL;
+        task->required = required;
     }
 
-    /* IMPORTED_PATH mode: cost from Path directly */
+    /* ================================================================
+     * IMPORTED_PATH: fast path — no children, cost from Path directly
+     * ================================================================ */
     if (expr->mode == PG_PHYS_EXPR_IMPORTED_PATH)
     {
         Path *path = (Path *) expr->op_private;
+        PgOutputProperty output;
+        PgGroupBestEntry *entry;
 
         output.pathkeys = path->pathkeys;
         output.required_outer = (path->param_info != NULL) ?
@@ -442,81 +465,230 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         entry->output = output;
 
         pg_group_update_best(expr->owner_group, entry);
+
+        /* Update global upper bound */
+        if (ctx->upper_bound_cost == 0 ||
+            path->total_cost < ctx->upper_bound_cost)
+            ctx->upper_bound_cost = path->total_cost;
+
         return PG_CASCADES_OK;
     }
 
-    /* COMPOSABLE_OP mode: derive child properties, need recursive cost */
+    /* ================================================================
+     * COMPOSABLE_OP: state-machine driven
+     * ================================================================ */
+
+    switch (task->enforce_state)
     {
-        List *child_required_props;
-        PgGroupBestEntry *child_best;
-        Cost total_cost = 0;
-        Cost startup_cost = 0;
-        ListCell *lc;
-
-        pg_derive_child_properties(ctx, expr, required,
-                                    &child_required_props, &output);
-
-        /* Add small base cost so competing implementations are differentiated */
-        switch (expr->op)
+        /* ------------------------------------------------------------
+         * ENFORCE_INIT: derive child required properties + output
+         * ------------------------------------------------------------ */
+        case ENFORCE_INIT:
         {
-            case PG_CASCADES_PHYSICAL_HASHAGG:
-                startup_cost = 0.01; total_cost = 0.01; break;
-            case PG_CASCADES_PHYSICAL_GROUPAGG:
-                startup_cost = 0.02; total_cost = 0.02; break;
-            case PG_CASCADES_PHYSICAL_SORT:
-                startup_cost = 1.0; total_cost = 1.0; break;
-            default:
-                startup_cost = 0.1; total_cost = 0.1; break;
-        }
+            pg_derive_child_properties(ctx, expr, required,
+                                        &task->child_required_props,
+                                        &task->output_property);
+            task->cur_child_index = 0;
+            task->total_cost = 0;
+            task->startup_cost = 0;
 
-        /* For each child, find best under required property */
-        /* First version: only handle single-child upper ops */
-        if (list_length(expr->inputs) == 1 &&
-            list_length(child_required_props) == 1)
-        {
-            PgMemoGroup *child_group = (PgMemoGroup *) linitial(expr->inputs);
-            PgRequiredProperty *child_req = (PgRequiredProperty *)
-                linitial(child_required_props);
-
-            /* Find child best */
-            child_best = NULL;
-            foreach(lc, child_group->best_entries)
+            /* Add local/base cost */
+            switch (expr->op)
             {
-                PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
-                if (pg_required_property_equal(e->required, child_req))
-                {
-                    child_best = e;
-                    break;
-                }
+                case PG_CASCADES_PHYSICAL_HASHAGG:
+                    task->startup_cost = 0.01; task->total_cost = 0.01; break;
+                case PG_CASCADES_PHYSICAL_GROUPAGG:
+                    task->startup_cost = 0.02; task->total_cost = 0.02; break;
+                case PG_CASCADES_PHYSICAL_SORT:
+                    task->startup_cost = 1.0; task->total_cost = 1.0; break;
+                default:
+                    task->startup_cost = 0.1; task->total_cost = 0.1; break;
             }
 
-            if (child_best == NULL)
+            task->enforce_state = ENFORCE_OPTIMIZE_CHILDREN;
+            /* fall through */
+        }
+
+        /* ------------------------------------------------------------
+         * ENFORCE_OPTIMIZE_CHILDREN: process children one by one
+         * Clone+Resume: if child not ready, push clone + child task
+         * ------------------------------------------------------------ */
+        case ENFORCE_OPTIMIZE_CHILDREN:
+        {
+            int n_children = list_length(expr->inputs);
+            int n_reqs = list_length(task->child_required_props);
+
+            while (task->cur_child_index < n_children &&
+                   task->cur_child_index < n_reqs)
             {
-                /* No matching child best for this required property.
-                 * For COMPOSABLE_OP, this means we can't satisfy this
-                 * required property via this expression. Skip gracefully. */
+                PgMemoGroup *child_group;
+                PgRequiredProperty *child_req;
+                PgGroupBestEntry *child_best = NULL;
+                ListCell *lc;
+
+                child_group = (PgMemoGroup *)
+                    list_nth(expr->inputs, task->cur_child_index);
+                child_req = (PgRequiredProperty *)
+                    list_nth(task->child_required_props,
+                             task->cur_child_index);
+
+                /* Search for matching best entry in child group */
+                foreach(lc, child_group->best_entries)
+                {
+                    PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
+                    if (pg_required_property_equal(e->required, child_req))
+                    {
+                        child_best = e;
+                        break;
+                    }
+                }
+
+                if (child_best == NULL)
+                {
+                    /*
+                     * Child not ready for this required property.
+                     * Clone self to resume after child is optimized,
+                     * then push OptimizeGroupTask for child.
+                     */
+                    PgOptimizerTask *clone = pg_task_clone(task);
+                    PgOptimizerTask *child_task;
+
+                    clone->cur_child_index++; /* next time, try next */
+                    task_stack_push(ctx, clone);
+
+                    child_task = (PgOptimizerTask *)
+                        palloc0(sizeof(PgOptimizerTask));
+                    child_task->type = PG_TASK_OPTIMIZE_GROUP;
+                    child_task->group = child_group;
+                    task_stack_push(ctx, child_task);
+
+                    return PG_CASCADES_OK; /* pause */
+                }
+
+                /* Child ready: accumulate costs */
+                task->startup_cost += child_best->startup_cost;
+                task->total_cost += child_best->total_cost;
+                task->cur_child_index++;
+            }
+
+            task->enforce_state = ENFORCE_COMPUTE_COST;
+            /* fall through */
+        }
+
+        /* ------------------------------------------------------------
+         * ENFORCE_COMPUTE_COST: check pruning + property satisfaction
+         * ------------------------------------------------------------ */
+        case ENFORCE_COMPUTE_COST:
+        {
+            /* Phase 4: upper-bound pruning */
+            if (ctx->upper_bound_cost > 0 &&
+                task->total_cost >= ctx->upper_bound_cost)
+                return PG_CASCADES_OK;
+
+            /* Check if output satisfies required property */
+            if (!pg_output_satisfies_required(&task->output_property,
+                                              required))
+            {
+                /*
+                 * Property mismatch (e.g. required has pathkeys but
+                 * child output doesn't). Try enforcer.
+                 */
+                task->enforce_state = ENFORCE_ENFORCE_PROPERTY;
+                /* fall through */
+            }
+            else
+            {
+                /* Create best entry */
+                PgGroupBestEntry *entry;
+
+                entry = (PgGroupBestEntry *)
+                    palloc0(sizeof(PgGroupBestEntry));
+                entry->required = pg_required_property_copy(ctx, required);
+                entry->expr = expr;
+                entry->startup_cost = task->startup_cost;
+                entry->total_cost = task->total_cost;
+                entry->child_required_props = task->child_required_props;
+                entry->output = task->output_property;
+
+                pg_group_update_best(expr->owner_group, entry);
+
+                /* Update global upper bound */
+                if (ctx->upper_bound_cost == 0 ||
+                    task->total_cost < ctx->upper_bound_cost)
+                    ctx->upper_bound_cost = task->total_cost;
+
                 return PG_CASCADES_OK;
             }
-
-            /* Add child cost on top of base cost */
-            startup_cost += child_best->startup_cost;
-            total_cost += child_best->total_cost;
         }
 
-        /* Phase 4: upper-bound pruning */
-        if (ctx->upper_bound_cost > 0 &&
-            total_cost >= ctx->upper_bound_cost)
+        /* ------------------------------------------------------------
+         * ENFORCE_ENFORCE_PROPERTY: apply Sort enforcer rule
+         * ------------------------------------------------------------ */
+        case ENFORCE_ENFORCE_PROPERTY:
+        {
+            /*
+             * Phase 4: Enforcer Task.
+             *
+             * When required property has pathkeys but child output
+             * doesn't satisfy them, insert a PhysicalSort on top
+             * of the child group.
+             *
+             * Strategy: for each single-child COMPOSABLE_OP,
+             * create a Sort enforcer expression, push its
+             * EnforceAndCostTask, and let LIFO handle it.
+             * The enforcer's best entry will then be available
+             * when we resume.
+             */
+            if (list_length(expr->inputs) == 1 &&
+                required->pathkeys != NIL)
+            {
+                PgMemoGroup *child_group;
+                PgGroupExpr *sort_expr;
+                PgOptimizerTask *enforcer_task;
+
+                child_group = (PgMemoGroup *) linitial(expr->inputs);
+
+                /* Build PhysicalSort on child group */
+                sort_expr = pg_memo_new_group_expr(ctx,
+                                    PG_CASCADES_PHYSICAL_SORT);
+                sort_expr->mode = PG_PHYS_EXPR_COMPOSABLE_OP;
+                sort_expr->inputs = list_make1(child_group);
+                sort_expr->op_private = ctx->upper;
+
+                /* Insert into child group */
+                pg_memo_add_physical_expr(child_group, sort_expr);
+
+                /* Clone self to resume after enforcer is costed */
+                {
+                    PgOptimizerTask *clone = pg_task_clone(task);
+                    clone->enforce_state = ENFORCE_COMPUTE_COST;
+                    /* Reset: will re-derive after enforcer is ready */
+                    clone->child_required_props = NIL;
+                    task_stack_push(ctx, clone);
+                }
+
+                /* Push EnforceAndCostTask for the Sort enforcer */
+                enforcer_task = (PgOptimizerTask *)
+                    palloc0(sizeof(PgOptimizerTask));
+                enforcer_task->type = PG_TASK_ENFORCE_AND_COST;
+                enforcer_task->expr = sort_expr;
+                enforcer_task->required =
+                    pg_required_property_copy(ctx, required);
+                task_stack_push(ctx, enforcer_task);
+
+                return PG_CASCADES_OK; /* pause, enforcer runs first */
+            }
+
+            /* Can't enforce — skip */
             return PG_CASCADES_OK;
+        }
 
-        entry = (PgGroupBestEntry *) palloc0(sizeof(PgGroupBestEntry));
-        entry->required = pg_required_property_copy(ctx, required);
-        entry->expr = expr;
-        entry->startup_cost = startup_cost;
-        entry->total_cost = total_cost;
-        entry->child_required_props = child_required_props;
-        entry->output = output;
-
-        pg_group_update_best(expr->owner_group, entry);
+        /* ------------------------------------------------------------
+         * ENFORCE_COMPLETE: no-op
+         * ------------------------------------------------------------ */
+        case ENFORCE_COMPLETE:
+        default:
+            return PG_CASCADES_OK;
     }
 
     return PG_CASCADES_OK;

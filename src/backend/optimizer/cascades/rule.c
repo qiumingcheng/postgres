@@ -245,6 +245,54 @@ static PgRule g_impl_rules_phase2[] = {
 };
 
 /* ========================================================================
+ * Phase 4: Rule sorting by promise
+ * ======================================================================== */
+
+static int
+pg_rule_promise_compare(const void *a, const void *b)
+{
+    const PgRule *ra = (const PgRule *) a;
+    const PgRule *rb = (const PgRule *) b;
+
+    /* Sort descending: higher promise first */
+    if (ra->promise > rb->promise)
+        return -1;
+    if (ra->promise < rb->promise)
+        return 1;
+    return 0;
+}
+
+PgRule *
+pg_cascades_get_rules_sorted(PgRule *rules, int *num_rules)
+{
+    PgRule *sorted;
+    int n = 0;
+    int i;
+
+    /* Count rules (exclude sentinel) */
+    while (rules[n].name != NULL)
+        n++;
+
+    if (n == 0)
+    {
+        *num_rules = 0;
+        return NULL;
+    }
+
+    /* Allocate and copy */
+    sorted = (PgRule *) palloc(sizeof(PgRule) * (n + 1));
+    memcpy(sorted, rules, sizeof(PgRule) * n);
+    /* Sentinel */
+    MemSet(&sorted[n], 0, sizeof(PgRule));
+
+    /* Sort by promise descending */
+    qsort(sorted, n, sizeof(PgRule), pg_rule_promise_compare);
+
+    *num_rules = n;
+    return sorted;
+}
+
+/* ========================================================================
  * 公开接口
  * ======================================================================== */
 
