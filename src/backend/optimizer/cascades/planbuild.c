@@ -274,6 +274,13 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
                 if (result != NULL)
                 {
                     ctx->root->query_pathkeys = entry->output.pathkeys;
+
+                    /* Phase 4h: validate plan structure */
+                    pg_cascades_validate_plan(result);
+
+                    /* Phase 4g: post-optimization physical rewrite */
+                    result = pg_cascades_physical_rewrite(ctx, result);
+
                     return result;
                 }
             }
@@ -285,7 +292,11 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
      */
     result = pg_cascades_build_logical_plan(ctx, root_group);
     if (result != NULL)
+    {
+        pg_cascades_validate_plan(result);
+        result = pg_cascades_physical_rewrite(ctx, result);
         return result;
+    }
 
     if (cascades_planner_debug)
         elog(WARNING, "Cascades: no plan found");
