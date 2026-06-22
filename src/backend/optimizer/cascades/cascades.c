@@ -189,6 +189,7 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     ctx.debug = cascades_planner_debug;
     ctx.task_stack = NIL;
     ctx.fallback_reasons = NIL;
+    ctx.upper_bound_cost = 0;  /* Phase 4 */
 
     /* 3. Set up rules */
     {

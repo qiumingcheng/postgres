@@ -149,6 +149,7 @@ pg_task_optimize_group(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
 
     /* Step 1: push EnforceAndCostTask for physical exprs FIRST.
      * LIFO means they execute last (after children and rule application). */
+    CHECK_FOR_INTERRUPTS();
     foreach(lc, group->physical_exprs)
     {
         PgGroupExpr *expr = (PgGroupExpr *) lfirst(lc);
@@ -361,6 +362,8 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         PgGroupExpr *new_expr = (PgGroupExpr *) lfirst(lc);
         PgMemoGroup *group;
 
+        CHECK_FOR_INTERRUPTS();
+
         group = pg_memo_insert_expression(ctx, ctx->memo, new_expr,
                                            expr->owner_group);
 
@@ -398,6 +401,8 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
     PgOutputProperty output;
     PgGroupBestEntry *entry;
 
+    CHECK_FOR_INTERRUPTS();
+
     /* Default required if NULL: no pathkeys */
     if (required == NULL)
     {
@@ -418,6 +423,11 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         output.width = path->parent->width;
 
         if (!pg_output_satisfies_required(&output, required))
+            return PG_CASCADES_OK;
+
+        /* Phase 4: upper-bound pruning */
+        if (ctx->upper_bound_cost > 0 &&
+            path->total_cost >= ctx->upper_bound_cost)
             return PG_CASCADES_OK;
 
         entry = (PgGroupBestEntry *) palloc0(sizeof(PgGroupBestEntry));
@@ -489,6 +499,11 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             startup_cost += child_best->startup_cost;
             total_cost += child_best->total_cost;
         }
+
+        /* Phase 4: upper-bound pruning */
+        if (ctx->upper_bound_cost > 0 &&
+            total_cost >= ctx->upper_bound_cost)
+            return PG_CASCADES_OK;
 
         entry = (PgGroupBestEntry *) palloc0(sizeof(PgGroupBestEntry));
         entry->required = pg_required_property_copy(ctx, required);

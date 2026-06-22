@@ -38,6 +38,7 @@ pg_memo_new_group_expr(PgPlannerCascadesContext *ctx, PgCascadesOpKind op)
     expr->mode = PG_PHYS_EXPR_COMPOSABLE_OP;
     expr->inputs = NIL;
     expr->applied_rules = NULL;
+    expr->explored_rules = NULL;
     expr->stats_derived = false;
     expr->op_private = NULL;
     expr->owner_group = NULL;
