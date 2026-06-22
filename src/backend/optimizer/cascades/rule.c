@@ -193,42 +193,55 @@ pg_rule_join_commutativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 /* Phase 1: Upper ops (first phase enabled) */
 static PgRule g_impl_rules_phase1[] = {
     {"LogicalAgg->PhysicalHashAgg", NULL, pg_rule_agg_to_hashagg,
-     true, PG_CASCADES_LOGICAL_AGG, PG_CASCADES_PHYSICAL_HASHAGG},
+     true, PG_CASCADES_LOGICAL_AGG, PG_CASCADES_PHYSICAL_HASHAGG,
+     PG_RULE_BIT_AGG_TO_HASHAGG, 0.8},
     {"LogicalAgg->PhysicalGroupAgg", NULL, pg_rule_agg_to_groupagg,
-     true, PG_CASCADES_LOGICAL_AGG, PG_CASCADES_PHYSICAL_GROUPAGG},
+     true, PG_CASCADES_LOGICAL_AGG, PG_CASCADES_PHYSICAL_GROUPAGG,
+     PG_RULE_BIT_AGG_TO_GROUPAGG, 0.7},
     {"LogicalSort->PhysicalSort", NULL, pg_rule_sort_to_physical_sort,
-     true, PG_CASCADES_LOGICAL_SORT, PG_CASCADES_PHYSICAL_SORT},
+     true, PG_CASCADES_LOGICAL_SORT, PG_CASCADES_PHYSICAL_SORT,
+     PG_RULE_BIT_SORT_TO_SORT, 1.0},
     {"LogicalDistinct->PhysicalUnique", NULL, pg_rule_distinct_to_unique,
-     true, PG_CASCADES_LOGICAL_DISTINCT, PG_CASCADES_PHYSICAL_UNIQUE},
+     true, PG_CASCADES_LOGICAL_DISTINCT, PG_CASCADES_PHYSICAL_UNIQUE,
+     PG_RULE_BIT_DISTINCT_TO_UNIQUE, 1.0},
     {"LogicalLimit->PhysicalLimit", NULL, pg_rule_limit_to_physical_limit,
-     true, PG_CASCADES_LOGICAL_LIMIT, PG_CASCADES_PHYSICAL_LIMIT},
+     true, PG_CASCADES_LOGICAL_LIMIT, PG_CASCADES_PHYSICAL_LIMIT,
+     PG_RULE_BIT_LIMIT_TO_LIMIT, 1.0},
     {"LogicalProject->PhysicalProject", NULL, pg_rule_project_to_physical_project,
-     true, PG_CASCADES_LOGICAL_PROJECT, PG_CASCADES_PHYSICAL_PROJECT},
-    {NULL, NULL, NULL, false, 0, 0}  /* sentinel */
+     true, PG_CASCADES_LOGICAL_PROJECT, PG_CASCADES_PHYSICAL_PROJECT,
+     PG_RULE_BIT_PROJECT_TO_PROJECT, 1.0},
+    {NULL, NULL, NULL, false, 0, 0, 0, 0.0}  /* sentinel */
 };
 
 /* Phase 3: Transformation rules */
 static PgRule g_trans_rules_phase3[] = {
     {"JoinCommutativity", NULL, pg_rule_join_commutativity,
-     false, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_LOGICAL_JOIN},
-    {NULL, NULL, NULL, false, 0, 0}  /* sentinel */
+     false, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_LOGICAL_JOIN,
+     PG_RULE_BIT_JOIN_COMMUTATIVITY, 0.5},
+    {NULL, NULL, NULL, false, 0, 0, 0, 0.0}  /* sentinel */
 };
 
 /* Phase 2: Scan/Join (second phase enabled) */
 static PgRule g_impl_rules_phase2[] = {
     {"LogicalScan->PhysicalSeqScan", NULL, pg_rule_scan_to_seqscan,
-     true, PG_CASCADES_LOGICAL_SCAN, PG_CASCADES_PHYSICAL_SEQSCAN},
+     true, PG_CASCADES_LOGICAL_SCAN, PG_CASCADES_PHYSICAL_SEQSCAN,
+     PG_RULE_BIT_SCAN_TO_SEQSCAN, 0.5},
     {"LogicalScan->PhysicalIndexScan", NULL, pg_rule_scan_to_indexscan,
-     true, PG_CASCADES_LOGICAL_SCAN, PG_CASCADES_PHYSICAL_INDEXSCAN},
+     true, PG_CASCADES_LOGICAL_SCAN, PG_CASCADES_PHYSICAL_INDEXSCAN,
+     PG_RULE_BIT_SCAN_TO_INDEXSCAN, 0.8},
     {"LogicalScan->PhysicalBitmapHeapScan", NULL, pg_rule_scan_to_bitmapheapscan,
-     true, PG_CASCADES_LOGICAL_SCAN, PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN},
+     true, PG_CASCADES_LOGICAL_SCAN, PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN,
+     PG_RULE_BIT_SCAN_TO_BITMAPSCAN, 0.7},
     {"LogicalJoin->PhysicalNestLoop", NULL, pg_rule_join_to_nestloop,
-     true, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_NESTLOOP},
+     true, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_NESTLOOP,
+     PG_RULE_BIT_JOIN_TO_NESTLOOP, 0.5},
     {"LogicalJoin->PhysicalHashJoin", NULL, pg_rule_join_to_hashjoin,
-     true, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_HASHJOIN},
+     true, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_HASHJOIN,
+     PG_RULE_BIT_JOIN_TO_HASHJOIN, 0.8},
     {"LogicalJoin->PhysicalMergeJoin", NULL, pg_rule_join_to_mergejoin,
-     true, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_MERGEJOIN},
-    {NULL, NULL, NULL, false, 0, 0}  /* sentinel */
+     true, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_MERGEJOIN,
+     PG_RULE_BIT_JOIN_TO_MERGEJOIN, 0.6},
+    {NULL, NULL, NULL, false, 0, 0, 0, 0.0}  /* sentinel */
 };
 
 /* ========================================================================

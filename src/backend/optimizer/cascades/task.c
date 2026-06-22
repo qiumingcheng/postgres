@@ -346,12 +346,12 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
     if (expr->op != rule->from_op)
         return PG_CASCADES_OK;
 
-    /* implementation rule: apply once */
-    if (rule->is_implementation)
-    {
-        if (bms_is_member(0, expr->applied_rules))
-            return PG_CASCADES_OK;
-    }
+    /* Dual BitSet: skip if this rule already explored on this expression */
+    if (bms_is_member(rule->rule_bit, expr->explored_rules))
+        return PG_CASCADES_OK;
+
+    /* mark rule as explored before transform */
+    expr->explored_rules = bms_add_member(expr->explored_rules, rule->rule_bit);
 
     /* transform */
     new_exprs = rule->transform(ctx, expr);
@@ -363,6 +363,10 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         PgMemoGroup *group;
 
         CHECK_FOR_INTERRUPTS();
+
+        /* lineage: new_expr inherits parent's applied_rules + this rule */
+        new_expr->applied_rules = bms_add_member(expr->applied_rules,
+                                                   rule->rule_bit);
 
         group = pg_memo_insert_expression(ctx, ctx->memo, new_expr,
                                            expr->owner_group);
@@ -385,7 +389,6 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         }
     }
 
-    expr->applied_rules = bms_add_member(expr->applied_rules, 0);
     return PG_CASCADES_OK;
 }
 

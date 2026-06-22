@@ -7,6 +7,74 @@
 #include "postgres.h"
 #include "optimizer/cascades.h"
 #include "utils/memutils.h"
+#include "utils/hsearch.h"
+
+/* ========================================================================
+ * Hash Table for GroupExpression Dedup
+ * ======================================================================== */
+
+#define PG_MEMO_HASH_MAX_INPUTS 4
+
+typedef struct PgExprHashKey
+{
+    PgCascadesOpKind op;
+    int32           num_inputs;
+    int32           group_ids[PG_MEMO_HASH_MAX_INPUTS];
+} PgExprHashKey;
+
+static uint32
+pg_memo_hash_key(const void *key_ptr, Size keysize)
+{
+    const PgExprHashKey *key = (const PgExprHashKey *) key_ptr;
+    uint32 h = (uint32) key->op;
+    int i;
+
+    for (i = 0; i < key->num_inputs && i < PG_MEMO_HASH_MAX_INPUTS; i++)
+    {
+        h = (h << 5) | (h >> 27);
+        h ^= (uint32) key->group_ids[i];
+    }
+    return h;
+}
+
+static int
+pg_memo_match_key(const void *key1, const void *key2, Size keysize)
+{
+    const PgExprHashKey *a = (const PgExprHashKey *) key1;
+    const PgExprHashKey *b = (const PgExprHashKey *) key2;
+    int i;
+
+    if (a->op != b->op || a->num_inputs != b->num_inputs)
+        return 1;
+    for (i = 0; i < a->num_inputs && i < PG_MEMO_HASH_MAX_INPUTS; i++)
+    {
+        if (a->group_ids[i] != b->group_ids[i])
+            return 1;
+    }
+    return 0;
+}
+
+static void
+pg_memo_build_hash_key(PgExprHashKey *key, PgGroupExpr *expr)
+{
+    ListCell *lc;
+    int i = 0;
+
+    MemSet(key, 0, sizeof(PgExprHashKey));
+    key->op = expr->op;
+    key->num_inputs = list_length(expr->inputs);
+    foreach(lc, expr->inputs)
+    {
+        if (i >= PG_MEMO_HASH_MAX_INPUTS)
+            break;
+        key->group_ids[i++] = ((PgMemoGroup *) lfirst(lc))->id;
+    }
+    /* Pad with -1 so unused slots don't match by accident */
+    while (i < PG_MEMO_HASH_MAX_INPUTS)
+        key->group_ids[i++] = -1;
+    /* Update expr hash for quick comparison */
+    expr->expr_hash = pg_memo_hash_key(key, sizeof(PgExprHashKey));
+}
 
 /* ========================================================================
  * Group 操作
@@ -81,58 +149,45 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
                           PgMemoGroup *parent_group)
 {
     PgMemoGroup *group;
+    PgExprHashKey key;
+    bool found;
 
     /*
-     * If the expression was created by a rule transform, it should be
-     * inserted into the same group as the source expression (parent_group).
-     * If parent_group is provided, add to it; otherwise create a new group.
+     * Build hash key from op + input group IDs.
+     * This also sets expr->expr_hash.
+     */
+    pg_memo_build_hash_key(&key, expr);
+
+    /*
+     * Phase 4: Global hash table dedup for logical expressions.
+     * Check if an equivalent expression already exists in any group.
+     */
+    if ((int)expr->op < PG_CASCADES_PHYSICAL_SEQSCAN &&
+        expr->mode != PG_PHYS_EXPR_IMPORTED_PATH &&
+        memo->group_expr_table != NULL)
+    {
+        (void) hash_search(memo->group_expr_table, &key, HASH_ENTER, &found);
+        if (found)
+            return NULL;  /* Duplicate — skip */
+    }
+
+    /*
+     * Determine target group:
+     * - If parent_group is provided (rule transform), use it.
+     * - Otherwise create a new group (pg_adapter building logical tree).
      */
     if (parent_group != NULL)
-    {
         group = parent_group;
-
-        /* Dedup: check if an equivalent logical expression already exists.
-         * We compare op and input groups by pointer (PG's equal() doesn't
-         * understand our PgMemoGroup type). */
-        if ((int)expr->op < PG_CASCADES_PHYSICAL_SEQSCAN &&
-            expr->mode != PG_PHYS_EXPR_IMPORTED_PATH)
-        {
-            ListCell *lc;
-            foreach(lc, group->logical_exprs)
-            {
-                PgGroupExpr *existing = (PgGroupExpr *) lfirst(lc);
-                if (existing->op == expr->op &&
-                    list_length(existing->inputs) == list_length(expr->inputs))
-                {
-                    ListCell *a, *b;
-                    bool same = true;
-                    forboth(a, existing->inputs, b, expr->inputs)
-                    {
-                        if (lfirst(a) != lfirst(b))
-                        {
-                            same = false;
-                            break;
-                        }
-                    }
-                    if (same)
-                        return NULL;  /* Duplicate — skip */
-                }
-            }
-        }
-    }
     else
-    {
         group = pg_memo_new_group(ctx);
-    }
 
-    /* Add as logical (from pg_adapter) or physical (from rule transform) */
+    /* Add as logical or physical */
     if (expr->mode == PG_PHYS_EXPR_IMPORTED_PATH ||
         (int)expr->op >= PG_CASCADES_PHYSICAL_SEQSCAN)
         pg_memo_add_physical_expr(group, expr);
     else
         pg_memo_add_logical_expr(group, expr);
 
-    /* inputs already contain PgMemoGroup * — no recursion needed */
     return group;
 }
 
@@ -149,11 +204,24 @@ pg_memo_init(PgPlannerCascadesContext *ctx, PgGroupExpr *logical_root)
 
     old_cxt = MemoryContextSwitchTo(ctx->memo_cxt);
 
+    HASHCTL hash_ctl;
+
     memo = (PgMemo *) palloc0(sizeof(PgMemo));
     memo->context = ctx->memo_cxt;
     memo->groups = NIL;
-    memo->group_expr_table = NULL;
     memo->root_group = NULL;
+
+    /* Phase 4: Create hash table for GroupExpression dedup */
+    MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+    hash_ctl.keysize = sizeof(PgExprHashKey);
+    hash_ctl.entrysize = sizeof(PgExprHashKey);
+    hash_ctl.hash = pg_memo_hash_key;
+    hash_ctl.match = pg_memo_match_key;
+    hash_ctl.hcxt = ctx->memo_cxt;
+    memo->group_expr_table = hash_create("Memo GroupExpr Table", 256,
+                                          &hash_ctl,
+                                          HASH_ELEM | HASH_FUNCTION |
+                                          HASH_COMPARE | HASH_CONTEXT);
 
     ctx->memo = memo;
 
