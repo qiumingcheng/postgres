@@ -94,10 +94,10 @@ static PgRewriteStageDef g_rewrite_pipeline[REWRITE_NUM_STAGES] = {
     {REWRITE_JOIN_REORDER,        "Join Reorder",         false,
      g_rules_join_reorder,
      sizeof(g_rules_join_reorder) / sizeof(PgRewriteRule) - 1},
-    {REWRITE_LIMIT_PUSH,          "Limit Push/Optimize",  false,
+    {REWRITE_LIMIT_PUSH,          "Limit Push/Optimize",  true,
      g_rules_limit_push,
      sizeof(g_rules_limit_push) / sizeof(PgRewriteRule) - 1},
-    {REWRITE_AGG_PUSHDOWN,        "Aggregate Pushdown",   false,
+    {REWRITE_AGG_PUSHDOWN,        "Aggregate Pushdown",   true,
      g_rules_agg_pushdown,
      sizeof(g_rules_agg_pushdown) / sizeof(PgRewriteRule) - 1},
     /* Phase 7: disabled - modifies LogicalJoin inputs */

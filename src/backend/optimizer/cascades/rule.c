@@ -2494,7 +2494,7 @@ static PgCombinationRule g_combination_rules[] = {
      * GP_PRUNE_EMPTY: Empty set pruning group.
      *   PruneEmptyJoin, PruneEmptyScan, PruneEmptyUnion
      */
-    {"GP_PRUNE_EMPTY", NULL, false},
+    {"GP_PRUNE_EMPTY", NULL, true},
 
     {NULL, NULL, false}  /* sentinel */
 };
