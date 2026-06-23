@@ -100,8 +100,9 @@ static PgRewriteStageDef g_rewrite_pipeline[REWRITE_NUM_STAGES] = {
     {REWRITE_AGG_PUSHDOWN,        "Aggregate Pushdown",   true,
      g_rules_agg_pushdown,
      sizeof(g_rules_agg_pushdown) / sizeof(PgRewriteRule) - 1},
-    /* Phase 7: disabled - modifies LogicalJoin inputs */
-    {REWRITE_SEMIJOIN_DEDUP,      "Semi-Join Dedup",      false,
+    /* Phase 7: previously disabled due to InnerToSemi input corruption.
+     * Enabled now with safety guards in individual rules. */
+    {REWRITE_SEMIJOIN_DEDUP,      "Semi-Join Dedup",      true,
      g_rules_semijoin_dedup,
      sizeof(g_rules_semijoin_dedup) / sizeof(PgRewriteRule) - 1},
 };
