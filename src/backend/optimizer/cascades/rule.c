@@ -130,34 +130,80 @@ pg_rule_scan_to_bitmapheapscan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 static List *
 pg_rule_join_to_nestloop(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
-    PgGroupExpr *result = pg_memo_new_group_expr(ctx,
-                                                  PG_CASCADES_PHYSICAL_NESTLOOP);
-    result->mode = PG_PHYS_EXPR_COMPOSABLE_OP;
-    result->inputs = expr->inputs;
-    result->op_private = expr->op_private;
-    return list_make1(result);
+    PgMemoGroup *outer_grp, *inner_grp;
+
+    if (list_length(expr->inputs) != 2)
+        return NIL;
+    outer_grp = (PgMemoGroup *) linitial(expr->inputs);
+    inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
+
+    /* Safety: skip if either child is empty (pruned by rewrite) */
+    if (outer_grp == NULL || inner_grp == NULL)
+        return NIL;
+    if ((outer_grp->rows == 0 && outer_grp->width == 0) ||
+        (inner_grp->rows == 0 && inner_grp->width == 0))
+        return NIL;
+
+    {
+        PgGroupExpr *result = pg_memo_new_group_expr(ctx,
+                                                      PG_CASCADES_PHYSICAL_NESTLOOP);
+        result->mode = PG_PHYS_EXPR_COMPOSABLE_OP;
+        result->inputs = expr->inputs;
+        result->op_private = expr->op_private;
+        return list_make1(result);
+    }
 }
 
 static List *
 pg_rule_join_to_hashjoin(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
-    PgGroupExpr *result = pg_memo_new_group_expr(ctx,
-                                                  PG_CASCADES_PHYSICAL_HASHJOIN);
-    result->mode = PG_PHYS_EXPR_COMPOSABLE_OP;
-    result->inputs = expr->inputs;
-    result->op_private = expr->op_private;
-    return list_make1(result);
+    PgMemoGroup *outer_grp, *inner_grp;
+
+    if (list_length(expr->inputs) != 2)
+        return NIL;
+    outer_grp = (PgMemoGroup *) linitial(expr->inputs);
+    inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
+
+    if (outer_grp == NULL || inner_grp == NULL)
+        return NIL;
+    if ((outer_grp->rows == 0 && outer_grp->width == 0) ||
+        (inner_grp->rows == 0 && inner_grp->width == 0))
+        return NIL;
+
+    {
+        PgGroupExpr *result = pg_memo_new_group_expr(ctx,
+                                                      PG_CASCADES_PHYSICAL_HASHJOIN);
+        result->mode = PG_PHYS_EXPR_COMPOSABLE_OP;
+        result->inputs = expr->inputs;
+        result->op_private = expr->op_private;
+        return list_make1(result);
+    }
 }
 
 static List *
 pg_rule_join_to_mergejoin(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
-    PgGroupExpr *result = pg_memo_new_group_expr(ctx,
-                                                  PG_CASCADES_PHYSICAL_MERGEJOIN);
-    result->mode = PG_PHYS_EXPR_COMPOSABLE_OP;
-    result->inputs = expr->inputs;
-    result->op_private = expr->op_private;
-    return list_make1(result);
+    PgMemoGroup *outer_grp, *inner_grp;
+
+    if (list_length(expr->inputs) != 2)
+        return NIL;
+    outer_grp = (PgMemoGroup *) linitial(expr->inputs);
+    inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
+
+    if (outer_grp == NULL || inner_grp == NULL)
+        return NIL;
+    if ((outer_grp->rows == 0 && outer_grp->width == 0) ||
+        (inner_grp->rows == 0 && inner_grp->width == 0))
+        return NIL;
+
+    {
+        PgGroupExpr *result = pg_memo_new_group_expr(ctx,
+                                                      PG_CASCADES_PHYSICAL_MERGEJOIN);
+        result->mode = PG_PHYS_EXPR_COMPOSABLE_OP;
+        result->inputs = expr->inputs;
+        result->op_private = expr->op_private;
+        return list_make1(result);
+    }
 }
 
 /* ========================================================================
@@ -289,6 +335,21 @@ static PgRule g_impl_rules_phase2[] = {
      PG_RULE_BIT_JOIN_TO_MERGEJOIN_PHASE4, 0.9},
     {NULL, NULL, NULL, 0, NULL, 0, 0, 0, 0.0}  /* sentinel */
 };
+
+/* Phase 2: Join-only rules (safe for tree-based Memo) */
+static PgRule g_impl_rules_phase2_join[] = {
+    {"LogicalJoin->PhysicalNestLoop", NULL, pg_rule_join_to_nestloop,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_NESTLOOP,
+     PG_RULE_BIT_JOIN_TO_NESTLOOP, 0.5},
+    {"LogicalJoin->PhysicalHashJoin", NULL, pg_rule_join_to_hashjoin,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_HASHJOIN,
+     PG_RULE_BIT_JOIN_TO_HASHJOIN, 0.8},
+    {"LogicalJoin->PhysicalMergeJoin", NULL, pg_rule_join_to_mergejoin,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_MERGEJOIN,
+     PG_RULE_BIT_JOIN_TO_MERGEJOIN, 0.6},
+    {NULL, NULL, NULL, 0, NULL, 0, 0, 0, 0.0}
+};
+
 
 /* ========================================================================
  * Phase 5: Transformation rule transform functions
@@ -2144,6 +2205,17 @@ pg_cascades_get_impl_rules_phase2_scan(int *num_rules)
         i++;
     *num_rules = i;
     return g_impl_rules_phase2_scan;
+}
+
+/* Phase 2: Join-only rules (safe for tree-based Memo with PG Path import) */
+PgRule *
+pg_cascades_get_impl_rules_phase2_join(int *num_rules)
+{
+    int i = 0;
+    while (g_impl_rules_phase2_join[i].name != NULL)
+        i++;
+    *num_rules = i;
+    return g_impl_rules_phase2_join;
 }
 
 /* Phase 5: Transformation rules (26 rules) */

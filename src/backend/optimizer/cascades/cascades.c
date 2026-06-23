@@ -252,18 +252,24 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
         rules = pg_cascades_get_impl_rules(&num_impl);
         {
             PgRule *enf_rules;
+            PgRule *join_rules;
+            int     num_enforcer, num_join;
             int     total_p1_enforcer;
             PgRule *merged_p1_enforcer;
 
-            /* Merge: Phase 1 + Enforcer */
+            /* Merge: Phase 1 + Phase 2 join + Enforcer */
             enf_rules = pg_cascades_get_enforcer_rules(&num_enforcer);
-            total_p1_enforcer = num_impl + num_enforcer;
+            join_rules = pg_cascades_get_impl_rules_phase2_join(&num_join);
+            total_p1_enforcer = num_impl + num_enforcer + num_join;
             merged_p1_enforcer = (PgRule *) palloc(sizeof(PgRule) * (total_p1_enforcer + 1));
 
             if (num_impl > 0)
                 memcpy(merged_p1_enforcer, rules, sizeof(PgRule) * num_impl);
+            if (num_join > 0)
+                memcpy(&merged_p1_enforcer[num_impl], join_rules,
+                       sizeof(PgRule) * num_join);
             if (num_enforcer > 0)
-                memcpy(&merged_p1_enforcer[num_impl], enf_rules,
+                memcpy(&merged_p1_enforcer[num_impl + num_join], enf_rules,
                        sizeof(PgRule) * num_enforcer);
             MemSet(&merged_p1_enforcer[total_p1_enforcer], 0, sizeof(PgRule));
 

@@ -607,6 +607,7 @@ extern PgRule *pg_cascades_get_impl_rules(int *num_rules);
 extern PgRule *pg_cascades_get_trans_rules(int *num_rules);
 extern PgRule *pg_cascades_get_impl_rules_phase2(int *num_rules);
 extern PgRule *pg_cascades_get_impl_rules_phase2_scan(int *num_rules);
+extern PgRule *pg_cascades_get_impl_rules_phase2_join(int *num_rules);
 extern PgRule *pg_cascades_get_trans_rules_phase5(int *num_rules);
 extern PgRule *pg_cascades_get_enforcer_rules(int *num_rules);
 extern PgRule *pg_cascades_get_rules_sorted(PgRule *rules, int *num_rules);
