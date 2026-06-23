@@ -421,6 +421,12 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     (PgMemoGroup *) linitial(expr->inputs),
                     (PgRequiredProperty *) linitial(best->child_required_props),
                     child_best, &child_out);
+                if (child == NULL)
+                {
+                    if (cascades_planner_debug)
+                        elog(WARNING, "planbuild HashAgg: child plan is NULL");
+                    return NULL;
+                }
 
                 result = (Plan *) make_agg(ctx->root,
                     ctx->upper->tlist,
@@ -460,6 +466,8 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     (PgMemoGroup *) linitial(expr->inputs),
                     (PgRequiredProperty *) linitial(best->child_required_props),
                     child_best, &child_out);
+                if (child == NULL)
+                    return NULL;
 
                 if (ctx->upper->hasAggs)
                 {

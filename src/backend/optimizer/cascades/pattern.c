@@ -365,8 +365,12 @@ pg_pattern_match_full(PgPattern *pattern, PgGroupExpr *root)
                     }
                 }
 
-                /* Free old combinations (but not the binders inside them) */
-                list_free_deep(child_combinations);
+                /*
+                 * Free old combinations list structure only.
+                 * The PgBinder* data inside is still referenced by
+                 * new_combinations (shallow-copied via list_copy).
+                 */
+                list_free(child_combinations);
                 child_combinations = new_combinations;
             }
         }

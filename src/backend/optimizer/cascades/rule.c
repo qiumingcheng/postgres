@@ -12,6 +12,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/cost.h"
+#include "utils/memutils.h"
 
 /* ========================================================================
  * Phase 1 Implementation Rule Transform Functions (Upper Ops)
@@ -393,10 +394,17 @@ pg_memo_group_first_logical(PgMemoGroup *group, PgCascadesOpKind op)
 static List *
 pg_rule_merge_project_with_child(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
-    PgMemoGroup *child_group = (PgMemoGroup *) linitial(expr->inputs);
+    PgMemoGroup *child_group;
     PgGroupExpr *inner = NULL;
     PgGroupExpr *new_proj;
     ListCell   *lc;
+
+    if (expr->inputs == NIL)
+        return NIL;
+
+    child_group = (PgMemoGroup *) linitial(expr->inputs);
+    if (child_group == NULL || child_group->logical_exprs == NIL)
+        return NIL;
 
     /* Find LogicalProject in child group's logical expressions */
     foreach(lc, child_group->logical_exprs)
@@ -2302,10 +2310,20 @@ pg_cascades_init_rule_patterns(void)
 {
     int i;
     int num_rules;
+    MemoryContext old_cxt;
 
     /* Already initialized */
     if (g_pat_leaf1 != NULL)
         return;
+
+    /*
+     * Allocate pattern objects in TopMemoryContext so they survive
+     * the lifecycle of the Cascades memo context.  Without this,
+     * g_pat_leaf1 becomes a dangling pointer when the memo context
+     * is deleted, and the idempotency guard above sees != NULL,
+     * causing use-after-free on subsequent planner calls.
+     */
+    old_cxt = MemoryContextSwitchTo(TopMemoryContext);
 
     /* Create shared leaf patterns */
     g_pat_leaf1 = pg_pattern_leaf();
@@ -2424,6 +2442,8 @@ pg_cascades_init_rule_patterns(void)
             rule->pattern = g_pat_join_filter_leaf_leaf;
         /* Other rules use from_op (pattern stays NULL) */
     }
+
+    MemoryContextSwitchTo(old_cxt);
 }
 
 /* ========================================================================

@@ -10,7 +10,7 @@
 SET enable_cascades_planner = on;
 SET cascades_planner_fallback_on_error = on;
 SET cascades_planner_debug = off;
-SET cascades_planner_max_tasks = 50000;
+SET cascades_planner_max_tasks = 200000;
 SET client_min_messages = warning;
 
 -- ============================================================================
