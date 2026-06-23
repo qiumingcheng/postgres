@@ -9,6 +9,7 @@
 #include "optimizer/cascades.h"
 #include "optimizer/paths.h"
 #include "optimizer/pathnode.h"
+#include "optimizer/var.h"
 #include "utils/memutils.h"
 
 /* ========================================================================
@@ -112,6 +113,20 @@ pg_output_satisfies_required(const PgOutputProperty *out,
  * Root Required Property
  * ======================================================================== */
 
+/*
+ * Helper: collect Var varattnos from a target list into a Bitmapset.
+ */
+static void
+pg_collect_tlist_varattnos(List *tlist, Bitmapset **set)
+{
+    ListCell *lc;
+    foreach(lc, tlist)
+    {
+        TargetEntry *te = (TargetEntry *) lfirst(lc);
+        pull_varattnos((Node *) te->expr, 1, set);
+    }
+}
+
 PgRequiredProperty *
 pg_cascades_root_required_property(PgPlannerCascadesContext *ctx)
 {
@@ -130,6 +145,10 @@ pg_cascades_root_required_property(PgPlannerCascadesContext *ctx)
     req->required_outer = NULL;
     req->tuple_fraction = upper->tuple_fraction;
     req->limit_tuples = upper->limit_tuples;
+
+    /* Phase 5: populate required_columns from sub_tlist (the plan target list) */
+    if (upper->sub_tlist != NIL)
+        pg_collect_tlist_varattnos(upper->sub_tlist, &req->required_columns);
 
     return req;
 }
@@ -155,6 +174,8 @@ pg_derive_child_properties(PgPlannerCascadesContext *ctx,
         case PG_CASCADES_PHYSICAL_HASHAGG:
             child_req = pg_required_property_copy(ctx, required);
             child_req->pathkeys = NIL;
+            if (required->required_columns != NULL)
+                child_req->required_columns = bms_copy(required->required_columns);
             *child_required_props = list_make1(child_req);
             output->pathkeys = NIL;
             output->rows = ctx->upper->dNumGroups;
@@ -163,6 +184,8 @@ pg_derive_child_properties(PgPlannerCascadesContext *ctx,
         case PG_CASCADES_PHYSICAL_GROUPAGG:
             child_req = pg_required_property_copy(ctx, required);
             child_req->pathkeys = ctx->upper->group_pathkeys;
+            if (required->required_columns != NULL)
+                child_req->required_columns = bms_copy(required->required_columns);
             *child_required_props = list_make1(child_req);
             output->pathkeys = ctx->upper->group_pathkeys;
             output->rows = ctx->upper->dNumGroups;
@@ -171,6 +194,8 @@ pg_derive_child_properties(PgPlannerCascadesContext *ctx,
         case PG_CASCADES_PHYSICAL_SORT:
             child_req = pg_required_property_copy(ctx, required);
             child_req->pathkeys = NIL;
+            if (required->required_columns != NULL)
+                child_req->required_columns = bms_copy(required->required_columns);
             *child_required_props = list_make1(child_req);
             output->pathkeys = required->pathkeys;
             break;
@@ -179,6 +204,8 @@ pg_derive_child_properties(PgPlannerCascadesContext *ctx,
             child_req = pg_required_property_copy(ctx, required);
             child_req->pathkeys = required->pathkeys;
             child_req->limit_tuples = ctx->upper->limit_tuples;
+            if (required->required_columns != NULL)
+                child_req->required_columns = bms_copy(required->required_columns);
             *child_required_props = list_make1(child_req);
             output->pathkeys = required->pathkeys;
             output->rows = ctx->upper->limit_tuples;
@@ -187,6 +214,8 @@ pg_derive_child_properties(PgPlannerCascadesContext *ctx,
         case PG_CASCADES_PHYSICAL_UNIQUE:
             child_req = pg_required_property_copy(ctx, required);
             child_req->pathkeys = ctx->upper->distinct_pathkeys;
+            if (required->required_columns != NULL)
+                child_req->required_columns = bms_copy(required->required_columns);
             *child_required_props = list_make1(child_req);
             output->pathkeys = ctx->upper->distinct_pathkeys;
             output->rows = ctx->upper->dNumGroups;
@@ -195,6 +224,8 @@ pg_derive_child_properties(PgPlannerCascadesContext *ctx,
         case PG_CASCADES_PHYSICAL_PROJECT:
             child_req = pg_required_property_copy(ctx, required);
             child_req->pathkeys = required->pathkeys;
+            if (required->required_columns != NULL)
+                child_req->required_columns = bms_copy(required->required_columns);
             *child_required_props = list_make1(child_req);
             output->pathkeys = NIL;  /* 保守：Project 不保证 pathkeys */
             break;

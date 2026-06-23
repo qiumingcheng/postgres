@@ -437,3 +437,80 @@ pg_cascades_build_logical_root(PgPlannerCascadesContext *ctx)
     }
     return NULL;
 }
+
+/*
+ * pg_cascades_build_initial_tree:
+ *    Phase 4: Build a standalone OptExpression tree from the PG parse tree.
+ *    This tree is NOT inserted into Memo — it's used for pre-Memo rewrite.
+ *
+ *    Returns the root PgGroupExpr (logical tree).
+ *    After rewrite, the caller converts it to Memo via pg_memo_init().
+ *
+ *    Structure:  LogicalLimit → LogicalSort → LogicalDistinct →
+ *                LogicalAgg → LogicalProject → LogicalJoin → LogicalScan
+ *
+ *    First version: use path-import approach (make_one_rel already done),
+ *    wrap the lower group with upper logical ops as a standalone tree.
+ */
+PgGroupExpr *
+pg_cascades_build_initial_tree(PgPlannerCascadesContext *ctx)
+{
+    PgCascadesUpperInfo *upper = ctx->upper;
+    PgGroupExpr *current = NULL;
+
+    /*
+     * Build the lower Scan node: represents the entire FROM/JOIN/WHERE result.
+     * Use a dummy LogicalScan whose op_private is the final_rel pointer
+     * — rewrite rules use this to access relation info.
+     */
+    current = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_SCAN);
+    current->inputs = NIL;
+    current->op_private = ctx->prep->final_rel;
+
+    /* LogicalProject */
+    {
+        PgGroupExpr *proj = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_PROJECT);
+        proj->inputs = list_make1(current);
+        proj->op_private = upper->tlist;
+        current = proj;
+    }
+
+    /* LogicalAggregation (if applicable) */
+    if (upper->groupClause != NIL || upper->hasAggs)
+    {
+        PgGroupExpr *agg = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_AGG);
+        agg->inputs = list_make1(current);
+        agg->op_private = upper;
+        current = agg;
+    }
+
+    /* LogicalDistinct (if applicable) */
+    if (upper->distinctClause != NIL)
+    {
+        PgGroupExpr *dist = pg_memo_new_group_expr(ctx,
+                                PG_CASCADES_LOGICAL_DISTINCT);
+        dist->inputs = list_make1(current);
+        dist->op_private = upper->distinctClause;
+        current = dist;
+    }
+
+    /* LogicalSort (if applicable) */
+    if (upper->sortClause != NIL)
+    {
+        PgGroupExpr *sort = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_SORT);
+        sort->inputs = list_make1(current);
+        sort->op_private = upper->sort_pathkeys;
+        current = sort;
+    }
+
+    /* LogicalLimit (always present — D3 may eliminate it) */
+    {
+        PgGroupExpr *limit = pg_memo_new_group_expr(ctx,
+                                PG_CASCADES_LOGICAL_LIMIT);
+        limit->inputs = list_make1(current);
+        limit->op_private = upper;
+        current = limit;
+    }
+
+    return current;
+}

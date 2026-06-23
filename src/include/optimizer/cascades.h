@@ -34,6 +34,7 @@ typedef enum PgCascadesOpKind
     PG_CASCADES_LOGICAL_DISTINCT,
     PG_CASCADES_LOGICAL_SORT,
     PG_CASCADES_LOGICAL_LIMIT,
+    PG_CASCADES_LOGICAL_UNION,      /* Phase 5: UNION ALL / UNION */
 
     /* Physical operators */
     PG_CASCADES_PHYSICAL_SEQSCAN,
@@ -70,7 +71,47 @@ typedef enum PgCascadesOpKind
 #define PG_RULE_BIT_JOIN_TO_HASHJOIN      10
 #define PG_RULE_BIT_JOIN_TO_MERGEJOIN     11
 #define PG_RULE_BIT_JOIN_COMMUTATIVITY    12
-#define PG_RULE_BIT_MAX                   13
+
+/* Phase 5: Transformation rules (27 rules) */
+#define PG_RULE_BIT_MERGE_PROJECT          13  /* H2 */
+#define PG_RULE_BIT_PRUNE_EMPTY_SCAN       14  /* E2 */
+#define PG_RULE_BIT_ELIMINATE_PROJECT      15  /* H3 */
+#define PG_RULE_BIT_PUSHDOWN_PRED_SCAN     16  /* A1 */
+#define PG_RULE_BIT_MERGE_LIMIT_SORT       17  /* D1 */
+#define PG_RULE_BIT_ELIM_SORT_CONST_KEY    18  /* H1 */
+#define PG_RULE_BIT_MERGE_FILTER_JOIN      19  /* H4 */
+#define PG_RULE_BIT_PRUNE_EMPTY_UNION      20  /* E3 */
+#define PG_RULE_BIT_MERGE_TWO_AGG          21  /* F2 */
+#define PG_RULE_BIT_MERGE_JOIN_PROJ        22  /* G4 */
+#define PG_RULE_BIT_PRUNE_AGG_COLS         23  /* B3 */
+#define PG_RULE_BIT_PRUNE_PROJ_COLS        24  /* B4 */
+#define PG_RULE_BIT_PRUNE_SORT_COLS        25  /* B5 */
+#define PG_RULE_BIT_PRUNE_EMPTY_JOIN       26  /* E1 */
+#define PG_RULE_BIT_PRUNE_SCAN_COLS        27  /* B1 */
+#define PG_RULE_BIT_PRUNE_JOIN_COLS        28  /* B2 */
+#define PG_RULE_BIT_PUSHDOWN_PRED_PROJ     29  /* A4 */
+#define PG_RULE_BIT_PUSHDOWN_LIMIT_JOIN    30  /* D2 */
+#define PG_RULE_BIT_PUSHDOWN_PRED_AGG      31  /* A3 */
+#define PG_RULE_BIT_PUSHDOWN_AGG_LIMIT     32  /* F3 */
+#define PG_RULE_BIT_ELIM_JOIN_CONST        33  /* G1 */
+#define PG_RULE_BIT_OUTER_JOIN_ELIM        34  /* G2 */
+#define PG_RULE_BIT_PUSHDOWN_PRED_JOIN     35  /* A2 */
+#define PG_RULE_BIT_INNER_TO_SEMI          36  /* G3 */
+#define PG_RULE_BIT_JOIN_ASSOCIATIVITY     37  /* C2 */
+#define PG_RULE_BIT_JOIN_LEFT_ASSCOM       38  /* C3 */
+#define PG_RULE_BIT_ELIMINATE_LIMIT        39  /* D3 */
+#define PG_RULE_BIT_ELIMINATE_AGG          40  /* F1 */
+#define PG_RULE_BIT_PUSHDOWN_PRED_UNION    41  /* A5 */
+
+/* Enforcer rule */
+#define PG_RULE_BIT_ENFORCE_SORT           42  /* Sort enforcer */
+
+/* Phase 4: Path-generation join rules (call make_join_rel internally) */
+#define PG_RULE_BIT_JOIN_TO_HASHJOIN_PHASE4  43  /* Phase4 HashJoin */
+#define PG_RULE_BIT_JOIN_TO_NESTLOOP_PHASE4  44  /* Phase4 NestLoop */
+#define PG_RULE_BIT_JOIN_TO_MERGEJOIN_PHASE4 45  /* Phase4 MergeJoin */
+
+#define PG_RULE_BIT_MAX                   46
 
 /* Physical expression 模式：导入的完整 Path vs 可组合算子 */
 typedef enum PgPhysicalExprMode
@@ -150,6 +191,19 @@ struct PgOutputProperty
     int         width;              /* 估算输出宽度 */
 };
 
+/*
+ * PgLogicalProperty: Phase 4 logical property per group.
+ * Derived bottom-up before cost-based search.
+ */
+typedef struct PgLogicalProperty
+{
+    Relids      relids;             /* base rel OIDs in this group */
+    double      rows;               /* estimated row count */
+    int         width;              /* estimated row width */
+    Bitmapset  *output_columns;     /* columns this group outputs */
+    bool        has_subquery;       /* contains correlated subquery */
+} PgLogicalProperty;
+
 /* GroupExpression: Memo 中的一种计算方式 */
 struct PgGroupExpr
 {
@@ -189,6 +243,7 @@ struct PgMemoGroup
 
     List       *best_entries;       /* List<PgGroupBestEntry *> */
     RelOptInfo *rel;               /* 仅当此 group 映射到一个 PG 关系时 */
+    PgLogicalProperty logical_prop; /* Phase 4: derived logical property */
 };
 
 /* Memo: Cascades 搜索空间 */
@@ -498,6 +553,10 @@ extern void pg_memo_add_physical_expr(PgMemoGroup *group, PgGroupExpr *expr);
 extern void pg_memo_add_logical_expr(PgMemoGroup *group, PgGroupExpr *expr);
 extern PgMemoGroup *pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
     PgMemo *memo, PgGroupExpr *expr, PgMemoGroup *parent_group);
+extern PgMemoGroup *pg_memo_insert_expression_tree(PgPlannerCascadesContext *ctx,
+    PgGroupExpr *tree_root);
+extern void pg_memo_merge_group(PgPlannerCascadesContext *ctx,
+                                 PgMemoGroup *target, PgMemoGroup *source);
 extern void pg_memo_derive_logical_property(PgMemo *memo, PgMemoGroup *group,
                                              PgPlannerCascadesContext *ctx);
 
@@ -529,7 +588,9 @@ extern void pg_group_update_best(PgMemoGroup *group,
 extern PgRule *pg_cascades_get_impl_rules(int *num_rules);
 extern PgRule *pg_cascades_get_trans_rules(int *num_rules);
 extern PgRule *pg_cascades_get_impl_rules_phase2(int *num_rules);
+extern PgRule *pg_cascades_get_impl_rules_phase2_scan(int *num_rules);
 extern PgRule *pg_cascades_get_trans_rules_phase5(int *num_rules);
+extern PgRule *pg_cascades_get_enforcer_rules(int *num_rules);
 extern PgRule *pg_cascades_get_rules_sorted(PgRule *rules, int *num_rules);
 extern void pg_cascades_init_rule_patterns(void);
 
@@ -561,6 +622,22 @@ extern bool pg_cascades_decorrelate_subqueries(PlannerInfo *root);
 /* rewrite.c */
 extern PgCascadesStatus pg_cascades_logical_rewrite(
     PgPlannerCascadesContext *ctx);
+
+/* Phase 4: Tree-based rewrite operating on OptExpression tree */
+extern PgCascadesStatus pg_cascades_logical_rewrite_v2(
+    PgPlannerCascadesContext *ctx, PgGroupExpr *tree_root);
+
+/* Phase 4: OptExpression tree for pre-Memo rewrite */
+extern PgGroupExpr *pg_cascades_build_initial_tree(
+    PgPlannerCascadesContext *ctx);
+
+/* Phase 4: logical property derivation per operator */
+extern void pg_memo_derive_logical_property_v2(PgMemo *memo,
+    PgPlannerCascadesContext *ctx);
+
+/* Phase 4: combination rule registration */
+extern void pg_cascades_init_combination_rules(void);
+extern PgCombinationRule *pg_cascades_get_combination_rules(int *num_rules);
 
 /* debug.c */
 extern void debug_print_cascades_memo(PgPlannerCascadesContext *ctx);

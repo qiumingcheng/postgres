@@ -234,14 +234,47 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
 
     /* 3. Set up rules (Phase 4: sorted by promise descending) */
     {
-        int num_impl, num_trans;
+        int num_impl, num_trans, num_enforcer;
 
+        /*
+         * Merge: Phase 1 impl + Enforcer rules.
+         *
+         * Note: Phase 2 scan rules (bits 6-8) are NOT merged here.
+         * In the tree-based Memo (Phase 6), LogicalScan groups already
+         * have IMPORTED_PATH physical expressions (with real PG Path*).
+         * Re-running scan impl rules would create COMPOSABLE_OP scan
+         * expressions whose op_private is RelOptInfo* (not Path*),
+         * causing SIGSEGV in pg_derive_child_properties.
+         *
+         * Phase 2 join rules (bits 9-11) + Phase 4 path-generation join
+         * rules (bits 43-45) remain deferred to Phase 6.
+         */
         rules = pg_cascades_get_impl_rules(&num_impl);
-        ctx.impl_rules = pg_cascades_get_rules_sorted(rules, &num_impl);
-        ctx.num_impl_rules = num_impl;
+        {
+            PgRule *enf_rules;
+            int     total_p1_enforcer;
+            PgRule *merged_p1_enforcer;
 
+            /* Merge: Phase 1 + Enforcer */
+            enf_rules = pg_cascades_get_enforcer_rules(&num_enforcer);
+            total_p1_enforcer = num_impl + num_enforcer;
+            merged_p1_enforcer = (PgRule *) palloc(sizeof(PgRule) * (total_p1_enforcer + 1));
+
+            if (num_impl > 0)
+                memcpy(merged_p1_enforcer, rules, sizeof(PgRule) * num_impl);
+            if (num_enforcer > 0)
+                memcpy(&merged_p1_enforcer[num_impl], enf_rules,
+                       sizeof(PgRule) * num_enforcer);
+            MemSet(&merged_p1_enforcer[total_p1_enforcer], 0, sizeof(PgRule));
+
+            ctx.impl_rules = pg_cascades_get_rules_sorted(
+                merged_p1_enforcer, &total_p1_enforcer);
+            ctx.num_impl_rules = total_p1_enforcer;
+            pfree(merged_p1_enforcer);
+        }
+
+        /* Merge Phase 3 + Phase 5 transformation rules */
         rules = pg_cascades_get_trans_rules(&num_trans);
-        /* Phase 5: also include Phase 5 transformation rules */
         {
             PgRule *phase5_rules;
             int     num_phase5;
@@ -249,7 +282,6 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
             phase5_rules = pg_cascades_get_trans_rules_phase5(&num_phase5);
             if (num_phase5 > 0)
             {
-                /* Merge Phase 3 + Phase 5 trans rules, then sort */
                 int total = num_trans + num_phase5;
                 PgRule *merged = (PgRule *) palloc(sizeof(PgRule) * (total + 1));
 
@@ -313,8 +345,48 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
         return PG_CASCADES_INTERNAL_NO_PLAN;
     }
 
-    /* 6. Build Memo (logical root + import paths) */
-    pg_cascades_build_logical_root(&ctx);
+    /*
+     * 6. Build Memo from OptExpression tree (Phase 6).
+     *
+     * The standalone tree (from pg_cascades_build_initial_tree) has a
+     * multi-level logical structure: Limit → Sort → Agg → Project → Scan.
+     * pg_memo_insert_expression_tree converts it to proper Memo groups,
+     * and for LogicalScan nodes with valid RelOptInfo* op_private, imports
+     * PG paths as physical candidates and sets group->rel to avoid SIGSEGV.
+     *
+     * Previous Phase 2/3 path-import approach (pg_cascades_build_logical_root)
+     * is replaced — the tree-based Memo gives rewrite rules a structured
+     * multi-level logical tree to walk and transform.
+     */
+    {
+        PgMemo     *memo;
+        HASHCTL     hash_ctl;
+        PgGroupExpr *opt_tree;
+
+        /* Create minimal Memo shell */
+        {
+            MemoryContext old_cxt2 = MemoryContextSwitchTo(ctx.memo_cxt);
+
+            memo = (PgMemo *) palloc0(sizeof(PgMemo));
+            memo->context = ctx.memo_cxt;
+            memo->groups = NIL;
+
+            MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+            hash_ctl.keysize = sizeof(PgExprHashKey);
+            hash_ctl.entrysize = sizeof(PgExprHashKey);
+            hash_ctl.hcxt = ctx.memo_cxt;
+            memo->group_expr_table = hash_create("Memo GroupExpr Table", 256,
+                                                  &hash_ctl,
+                                                  HASH_ELEM | HASH_CONTEXT);
+
+            ctx.memo = memo;
+            MemoryContextSwitchTo(old_cxt2);
+        }
+
+        /* Build tree and insert into Memo */
+        opt_tree = pg_cascades_build_initial_tree(&ctx);
+        pg_memo_insert_expression_tree(&ctx, opt_tree);
+    }
 
     if (ctx.memo->root_group == NULL)
     {
@@ -326,17 +398,14 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     /* 7. Derive logical property */
     pg_memo_derive_logical_property(ctx.memo, ctx.memo->root_group, &ctx);
 
-    /* 7b. Phase 4a: Logical rewrite pipeline (pre-search) */
-    {
-        PgCascadesStatus rw_status;
-        rw_status = pg_cascades_logical_rewrite(&ctx);
-        if (rw_status != PG_CASCADES_OK)
-        {
-            MemoryContextSwitchTo(old_cxt);
-            MemoryContextDelete(ctx.memo_cxt);
-            return rw_status;
-        }
-    }
+    /*
+     * 7c. Phase 4: Run staged + combination-rule rewrite on Memo groups.
+     * Operates on ctx->memo->root_group.
+     */
+    pg_cascades_logical_rewrite(&ctx);
+
+    /* Re-derive logical properties after rewrite */
+    pg_memo_derive_logical_property_v2(ctx.memo, &ctx);
 
     /* 8. Run task scheduler */
     {

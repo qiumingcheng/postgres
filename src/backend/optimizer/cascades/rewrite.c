@@ -13,55 +13,10 @@
 #include "optimizer/cascades.h"
 
 /* ========================================================================
- * Forward declarations of rule transform functions (from rule.c)
- *
- * These are declared static in rule.c; we re-declare them here as extern
- * so the rewrite pipeline can call them directly on the OptExpression tree
- * before Memo search begins.
+ * Rule lookup: the rewrite pipeline uses name-based lookup via
+ * pg_rewrite_lookup_transform() to find rule transform functions
+ * from g_trans_rules_phase5[].  No extern declarations needed.
  * ======================================================================== */
-
-/* Predicate Pushdown (A group) */
-extern List *pg_rule_pushdown_predicate_scan_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_pushdown_predicate_join_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_pushdown_predicate_agg_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_pushdown_predicate_project_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-
-/* Column Pruning (B group) */
-extern List *pg_rule_prune_scan_columns_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_prune_join_columns_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_prune_agg_columns_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_prune_project_columns_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_prune_sort_columns_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-
-/* Join Reorder (C group) */
-extern List *pg_rule_join_commutativity_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_join_associativity_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_join_left_asscom_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-
-/* Limit Optimization (D group) */
-extern List *pg_rule_merge_limit_with_sort_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_pushdown_limit_join_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-
-/* Empty Set Pruning (E group) */
-extern List *pg_rule_prune_empty_scan_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_prune_empty_join_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_prune_empty_union_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-
-/* Aggregate Rewrite (F group) */
-extern List *pg_rule_merge_two_agg_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_pushdown_agg_limit_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-
-/* Join Simplification (G group) */
-extern List *pg_rule_eliminate_join_with_constant_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_outer_join_elimination_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_inner_to_semi_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_merge_join_with_child_project_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-
-/* Final Cleanup (H group) */
-extern List *pg_rule_merge_project_with_child_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_eliminate_project_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_eliminate_sort_with_constant_key_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
-extern List *pg_rule_merge_filter_with_join_wrapper(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
 
 /* ========================================================================
  * Rewrite Pipeline Definition — 8 stages with actual rules
@@ -72,6 +27,7 @@ static PgRewriteRule g_rules_predicate_pushdown[] = {
     {"PushDownPredicateJoin",    PG_CASCADES_LOGICAL_FILTER, NULL, 0, 0.4},
     {"PushDownPredicateProject", PG_CASCADES_LOGICAL_FILTER, NULL, 0, 0.5},
     {"PushDownPredicateAgg",     PG_CASCADES_LOGICAL_FILTER, NULL, 0, 0.3},
+    {"PushDownPredicateUnion",   PG_CASCADES_LOGICAL_FILTER, NULL, 0, 0.4},
     {NULL, 0, NULL, 0, 0.0}  /* sentinel */
 };
 
@@ -119,6 +75,8 @@ static PgRewriteRule g_rules_final_cleanup[] = {
     {"EliminateProject",             PG_CASCADES_LOGICAL_PROJECT, NULL, 0, 0.6},
     {"EliminateSortWithConstKey",    PG_CASCADES_LOGICAL_SORT,    NULL, 0, 0.5},
     {"PruneEmptyScan",               PG_CASCADES_LOGICAL_SCAN,    NULL, 0, 0.9},
+    {"EliminateLimit",               PG_CASCADES_LOGICAL_LIMIT,   NULL, 0, 0.6},
+    {"EliminateAgg",                 PG_CASCADES_LOGICAL_AGG,     NULL, 0, 0.6},
     {NULL, 0, NULL, 0, 0.0}
 };
 
@@ -428,6 +386,322 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
         elog(NOTICE, "Cascades rewrite pipeline: %d stages with rules, "
              "%d stages without rules (total %d)",
              stages_with_rules, stages_without_rules, REWRITE_NUM_STAGES);
+
+    /*
+     * Phase 4: Also apply CombinationRules after the staged pipeline.
+     *
+     * Phase 6: DEFERRED.  Combination rules iterate all Phase 5
+     * transformation rules on Memo groups, but those rules were written
+     * for standalone OptExpression trees (inputs = PgGroupExpr*).
+     * In Memo groups, inputs are PgMemoGroup* — several rules cast
+     * inputs incorrectly and need per-rule fixes.  3 rules (H2, H3, A1)
+     * have been fixed; ~10 more still need the same treatment.
+     * Skipping combination rules is safe: the task scheduler still
+     * applies all implementation rules via OptimizeExpressionTask.
+     */
+    if (true)  /* Phase 6: CombinationRules enabled */
+    {
+        int num_combo;
+        PgCombinationRule *combo_rules;
+        int ci;
+
+        combo_rules = pg_cascades_get_combination_rules(&num_combo);
+
+        for (ci = 0; ci < num_combo; ci++)
+        {
+            PgCombinationRule *cr = &combo_rules[ci];
+            PgRewriteRule *combo_stage_rules;
+            int combo_num;
+            int iteration;
+            int max_iterations = cr->iterate ? 10 : 1;
+
+            /* Build rule list from combination rule's name-based lookup.
+             * We scan all known transformation rules and include those
+             * whose names match the combination rule's group. */
+            combo_stage_rules = (PgRewriteRule *)
+                palloc0(sizeof(PgRewriteRule) * 32); /* generous upper bound */
+            combo_num = 0;
+
+            {
+                PgRule *phase5;
+                int num_phase5;
+                int ri;
+
+                phase5 = pg_cascades_get_trans_rules_phase5(&num_phase5);
+                for (ri = 0; ri < num_phase5; ri++)
+                {
+                    PgRewriteRule *rr = &combo_stage_rules[combo_num];
+                    rr->name = phase5[ri].name;
+                    rr->match_op = phase5[ri].from_op;
+                    rr->transform = phase5[ri].transform;
+                    rr->rule_bit = phase5[ri].rule_bit;
+                    rr->promise = phase5[ri].promise;
+                    combo_num++;
+                }
+            }
+
+            /* Sentinel */
+            MemSet(&combo_stage_rules[combo_num], 0, sizeof(PgRewriteRule));
+
+            if (combo_num == 0)
+            {
+                pfree(combo_stage_rules);
+                continue;
+            }
+
+            for (iteration = 0; iteration < max_iterations; iteration++)
+            {
+                bool changed;
+
+                changed = pg_rewrite_apply_rules_recursive(ctx,
+                    ctx->memo->root_group, combo_stage_rules, combo_num);
+
+                if (ctx->debug)
+                    elog(NOTICE, "Cascades combo rule '%s' iteration %d: %s",
+                         cr->name, iteration,
+                         changed ? "changed" : "converged");
+
+                if (!changed)
+                    break;
+            }
+
+            pfree(combo_stage_rules);
+        }
+    }
+
+    return PG_CASCADES_OK;
+}
+
+/* ========================================================================
+ * Phase 4: OptExpression Tree Rewrite (v2)
+ *
+ *   Operates on a standalone PgGroupExpr * tree (not Memo groups).
+ *   Recursively walks expr->inputs to apply rules top-down or bottom-up.
+ *   Results are inserted into Memo via pg_memo_insert_expression.
+ * ======================================================================== */
+
+/*
+ * pg_rewrite_tree_node:
+ *   Apply rules to a single OptExpression tree node, then recurse to children.
+ *   Bottom-up: children first, then current node.
+ *   Returns true if any expression was modified.
+ */
+static bool
+pg_rewrite_tree_node(PgPlannerCascadesContext *ctx,
+                     PgGroupExpr *expr,
+                     PgRewriteRule *rules,
+                     int num_rules)
+{
+    ListCell *lc;
+    bool changed = false;
+    int i;
+
+    if (expr == NULL)
+        return false;
+
+    /* Step 1: Recurse to children first (bottom-up) */
+    foreach(lc, expr->inputs)
+    {
+        PgGroupExpr *child = (PgGroupExpr *) lfirst(lc);
+        if (pg_rewrite_tree_node(ctx, child, rules, num_rules))
+            changed = true;
+    }
+
+    /* Step 2: Apply rules to this node */
+    for (i = 0; i < num_rules; i++)
+    {
+        PgRewriteRule *rr = &rules[i];
+        PgRuleTransformFn transform;
+        PgCascadesOpKind match_op;
+        List *new_exprs;
+        ListCell *rlc;
+
+        if (rr->name == NULL)
+            continue;
+
+        /* Look up the transform function */
+        transform = pg_rewrite_lookup_transform(rr->name, &match_op);
+        if (transform == NULL)
+            continue;
+
+        /* Check match */
+        if (expr->op != match_op)
+            continue;
+
+        /* Check explored_rules to avoid re-application */
+        if (rr->rule_bit > 0 &&
+            bms_is_member(rr->rule_bit, expr->explored_rules))
+            continue;
+
+        /* Apply rule */
+        new_exprs = transform(ctx, expr);
+        if (new_exprs == NIL)
+            continue;
+
+        /* Insert results into Memo */
+        foreach(rlc, new_exprs)
+        {
+            PgGroupExpr *new_expr = (PgGroupExpr *) lfirst(rlc);
+            PgMemoGroup *new_group;
+
+            new_group = pg_memo_insert_expression(ctx, ctx->memo,
+                                                   new_expr, NULL);
+            if (new_group != NULL)
+            {
+                changed = true;
+                if (ctx->debug)
+                    elog(NOTICE, "Cascades tree rewrite: rule '%s' "
+                         "produced new group %d", rr->name, new_group->id);
+            }
+        }
+
+        /* Mark explored */
+        if (rr->rule_bit > 0)
+            expr->explored_rules =
+                bms_add_member(expr->explored_rules, rr->rule_bit);
+    }
+
+    return changed;
+}
+
+/*
+ * pg_cascades_logical_rewrite_v2:
+ *   Execute the rewrite pipeline on a standalone OptExpression tree.
+ *   First inserts the tree into Memo, then applies combination rules
+ *   by recursively walking the tree structure.
+ *
+ *   This is the Phase 4 integrated entry point: combination rules
+ *   drive the rewrite, operating on the OptExpression tree before
+ *   cost-based Memo search begins.
+ */
+PgCascadesStatus
+pg_cascades_logical_rewrite_v2(PgPlannerCascadesContext *ctx,
+                                PgGroupExpr *tree_root)
+{
+    int total_rules_applied = 0;
+    int num_combo;
+    PgCombinationRule *combo_rules;
+    int ci;
+
+    if (tree_root == NULL)
+        return PG_CASCADES_OK;
+
+    /*
+     * Step 1: Insert the OptExpression tree into Memo.
+     * This creates PgMemoGroup entries for each node in the tree.
+     */
+    {
+        PgMemoGroup *root_group;
+
+        root_group = pg_memo_insert_expression(ctx, ctx->memo,
+                                                tree_root, NULL);
+        if (root_group == NULL)
+            return PG_CASCADES_OK;
+
+        ctx->memo->root_group = root_group;
+    }
+
+    /* Step 2: Derive logical properties on the tree */
+    pg_memo_derive_logical_property_v2(ctx->memo, ctx);
+
+    /*
+     * Step 3: Apply combination rules iteratively.
+     * Each combination rule group is applied to convergence.
+     */
+    combo_rules = pg_cascades_get_combination_rules(&num_combo);
+
+    for (ci = 0; ci < num_combo; ci++)
+    {
+        PgCombinationRule *cr = &combo_rules[ci];
+        int max_iterations = cr->iterate ? 10 : 1;
+        int iteration;
+
+        /* Build rule list from all known transformation rules */
+        PgRewriteRule *stage_rules;
+        int stage_num;
+        PgRule *phase5;
+        int num_phase5;
+        int ri;
+
+        stage_rules = (PgRewriteRule *)
+            palloc0(sizeof(PgRewriteRule) * 64);
+        stage_num = 0;
+
+        phase5 = pg_cascades_get_trans_rules_phase5(&num_phase5);
+        for (ri = 0; ri < num_phase5; ri++)
+        {
+            PgRewriteRule *rr = &stage_rules[stage_num];
+            rr->name = phase5[ri].name;
+            rr->match_op = phase5[ri].from_op;
+            rr->transform = phase5[ri].transform;
+            rr->rule_bit = phase5[ri].rule_bit;
+            rr->promise = phase5[ri].promise;
+            stage_num++;
+        }
+
+        /* Also include Phase 3 rules */
+        {
+            PgRule *phase3;
+            int num_phase3;
+
+            phase3 = pg_cascades_get_trans_rules(&num_phase3);
+            for (ri = 0; ri < num_phase3; ri++)
+            {
+                PgRewriteRule *rr = &stage_rules[stage_num];
+                rr->name = phase3[ri].name;
+                rr->match_op = phase3[ri].from_op;
+                rr->transform = phase3[ri].transform;
+                rr->rule_bit = phase3[ri].rule_bit;
+                rr->promise = phase3[ri].promise;
+                stage_num++;
+            }
+        }
+
+        MemSet(&stage_rules[stage_num], 0, sizeof(PgRewriteRule));
+
+        if (stage_num == 0)
+        {
+            pfree(stage_rules);
+            continue;
+        }
+
+        for (iteration = 0; iteration < max_iterations; iteration++)
+        {
+            bool changed;
+
+            /* Walk the root group's logical expressions as the tree root */
+            changed = false;
+            if (ctx->memo->root_group != NULL)
+            {
+                ListCell *elc;
+                foreach(elc, ctx->memo->root_group->logical_exprs)
+                {
+                    PgGroupExpr *root_expr = (PgGroupExpr *) lfirst(elc);
+                    if (pg_rewrite_tree_node(ctx, root_expr,
+                                              stage_rules, stage_num))
+                        changed = true;
+                }
+            }
+
+            if (ctx->debug)
+                elog(NOTICE, "Cascades tree rewrite combo '%s' iter %d: %s",
+                     cr->name, iteration,
+                     changed ? "changed" : "converged");
+
+            if (!changed)
+                break;
+        }
+
+        total_rules_applied++;
+        pfree(stage_rules);
+    }
+
+    /* Step 4: Re-derive logical properties after rewrite */
+    pg_memo_derive_logical_property_v2(ctx->memo, ctx);
+
+    if (ctx->debug)
+        elog(NOTICE, "Cascades tree rewrite: %d combination rule groups applied",
+             total_rules_applied);
 
     return PG_CASCADES_OK;
 }

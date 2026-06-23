@@ -9,6 +9,9 @@
 #include "optimizer/clauses.h"
 #include "optimizer/tlist.h"
 #include "optimizer/var.h"
+#include "optimizer/paths.h"
+#include "optimizer/pathnode.h"
+#include "optimizer/cost.h"
 
 /* ========================================================================
  * Phase 1 Implementation Rule Transform Functions (Upper Ops)
@@ -224,7 +227,34 @@ static PgRule g_trans_rules_phase3[] = {
     {NULL, NULL, NULL, 0, NULL, 0, 0, 0, 0.0}  /* sentinel */
 };
 
-/* Phase 2: Scan/Join (second phase enabled) */
+/* Phase 4: Forward declarations for path-generation join rules */
+static List *pg_rule_join_to_hashjoin_phase4(PgPlannerCascadesContext *ctx,
+                                              PgGroupExpr *expr);
+static List *pg_rule_join_to_nestloop_phase4(PgPlannerCascadesContext *ctx,
+                                              PgGroupExpr *expr);
+static List *pg_rule_join_to_mergejoin_phase4(PgPlannerCascadesContext *ctx,
+                                               PgGroupExpr *expr);
+
+/*
+ * Phase 2: Scan-only implementation rules (safe to wire now).
+ * These match LogicalScan nodes created by transformation rules
+ * (e.g. A1 PushDownPredicateScan) and produce COMPOSABLE_OP physical
+ * expressions with NIL inputs (no child groups, safe in Path-import mode).
+ */
+static PgRule g_impl_rules_phase2_scan[] = {
+    {"LogicalScan->PhysicalSeqScan", NULL, pg_rule_scan_to_seqscan,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_SCAN, PG_CASCADES_PHYSICAL_SEQSCAN,
+     PG_RULE_BIT_SCAN_TO_SEQSCAN, 0.5},
+    {"LogicalScan->PhysicalIndexScan", NULL, pg_rule_scan_to_indexscan,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_SCAN, PG_CASCADES_PHYSICAL_INDEXSCAN,
+     PG_RULE_BIT_SCAN_TO_INDEXSCAN, 0.8},
+    {"LogicalScan->PhysicalBitmapHeapScan", NULL, pg_rule_scan_to_bitmapheapscan,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_SCAN, PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN,
+     PG_RULE_BIT_SCAN_TO_BITMAPSCAN, 0.7},
+    {NULL, NULL, NULL, 0, NULL, 0, 0, 0, 0.0}  /* sentinel */
+};
+
+/* Phase 2: Full Scan/Join rules (for Phase 6 Path-generation mode) */
 static PgRule g_impl_rules_phase2[] = {
     {"LogicalScan->PhysicalSeqScan", NULL, pg_rule_scan_to_seqscan,
      PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_SCAN, PG_CASCADES_PHYSICAL_SEQSCAN,
@@ -244,25 +274,81 @@ static PgRule g_impl_rules_phase2[] = {
     {"LogicalJoin->PhysicalMergeJoin", NULL, pg_rule_join_to_mergejoin,
      PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_MERGEJOIN,
      PG_RULE_BIT_JOIN_TO_MERGEJOIN, 0.6},
+    /* Phase 4: Path-generation join rules (call make_join_rel internally) */
+    {"LogicalJoin->PhysicalHashJoin_Phase4", NULL,
+     pg_rule_join_to_hashjoin_phase4,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_HASHJOIN,
+     PG_RULE_BIT_JOIN_TO_HASHJOIN_PHASE4, 0.9},
+    {"LogicalJoin->PhysicalNestLoop_Phase4", NULL,
+     pg_rule_join_to_nestloop_phase4,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_NESTLOOP,
+     PG_RULE_BIT_JOIN_TO_NESTLOOP_PHASE4, 0.9},
+    {"LogicalJoin->PhysicalMergeJoin_Phase4", NULL,
+     pg_rule_join_to_mergejoin_phase4,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_MERGEJOIN,
+     PG_RULE_BIT_JOIN_TO_MERGEJOIN_PHASE4, 0.9},
     {NULL, NULL, NULL, 0, NULL, 0, 0, 0, 0.0}  /* sentinel */
 };
 
 /* ========================================================================
  * Phase 5: Transformation rule transform functions
+ *
+ *   Phase 6 note: In the Memo, expr->inputs are PgMemoGroup*, NOT
+ *   PgGroupExpr*.  Rules that need to access child expression fields
+ *   must use pg_memo_group_first_logical() to look up the first
+ *   logical expression of the expected op kind in the child group.
  * ======================================================================== */
+
+/*
+ * pg_memo_group_first_logical:
+ *   Helper: find the first logical expression of a given op kind
+ *   in a Memo group.  Returns NULL if none found.
+ */
+static PgGroupExpr *
+pg_memo_group_first_logical(PgMemoGroup *group, PgCascadesOpKind op)
+{
+    ListCell *lc;
+
+    if (group == NULL)
+        return NULL;
+
+    foreach(lc, group->logical_exprs)
+    {
+        PgGroupExpr *e = (PgGroupExpr *) lfirst(lc);
+        if (e->op == op)
+            return e;
+    }
+    return NULL;
+}
 
 /*
  * H2: MergeProjectWithChild
  *   LogicalProject(LogicalProject(A)) → LogicalProject(A)
  *   合并两个连续的 Project：内层 tlist 被外层 tlist 替代。
+ *
+ *   Phase 6: inputs are PgMemoGroup* (Memo groups), not PgGroupExpr*.
+ *   Look up the first LogicalProject in the child group to examine.
  */
 static List *
 pg_rule_merge_project_with_child(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
-    PgGroupExpr *inner = (PgGroupExpr *) linitial(expr->inputs);
+    PgMemoGroup *child_group = (PgMemoGroup *) linitial(expr->inputs);
+    PgGroupExpr *inner = NULL;
     PgGroupExpr *new_proj;
+    ListCell   *lc;
 
-    if (inner->op != PG_CASCADES_LOGICAL_PROJECT)
+    /* Find LogicalProject in child group's logical expressions */
+    foreach(lc, child_group->logical_exprs)
+    {
+        PgGroupExpr *e = (PgGroupExpr *) lfirst(lc);
+        if (e->op == PG_CASCADES_LOGICAL_PROJECT)
+        {
+            inner = e;
+            break;
+        }
+    }
+
+    if (inner == NULL)
         return NIL;
 
     /* 新 Project 直接用外层的 tlist，child 指向内层的 child */
@@ -294,14 +380,29 @@ pg_rule_prune_empty_scan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 /*
  * H3: EliminateProject
  *   当 Project 的 tlist 和 child tlist 完全相同时，删除冗余 Project。
+ *
+ *   Phase 6: inputs are PgMemoGroup*, look up LogicalProject in child group.
  */
 static List *
 pg_rule_eliminate_project(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
-    PgGroupExpr *child = (PgGroupExpr *) linitial(expr->inputs);
+    PgMemoGroup *child_group = (PgMemoGroup *) linitial(expr->inputs);
+    PgGroupExpr *child = NULL;
+    ListCell   *lc;
+
+    /* Find LogicalProject in child group's logical expressions */
+    foreach(lc, child_group->logical_exprs)
+    {
+        PgGroupExpr *e = (PgGroupExpr *) lfirst(lc);
+        if (e->op == PG_CASCADES_LOGICAL_PROJECT)
+        {
+            child = e;
+            break;
+        }
+    }
 
     /* 如果 child 不是 Project，无法判断 tlist 是否相同 —— 保守保留 */
-    if (child->op != PG_CASCADES_LOGICAL_PROJECT)
+    if (child == NULL)
         return NIL;
 
     /*
@@ -324,13 +425,17 @@ pg_rule_eliminate_project(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 /*
  * A1: PushDownPredicateScan
  *   LogicalFilter(LogicalScan) → LogicalScan (filter 融入 baserestrictinfo)
+ *
+ *   Phase 6: inputs are PgMemoGroup*, not PgGroupExpr*.
+ *   Use child_group->rel directly since tree-based LogicalScan groups
+ *   have rel set by pg_memo_insert_expression_tree.
  */
 static List *
 pg_rule_pushdown_predicate_scan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
-    PgGroupExpr *scan_expr = (PgGroupExpr *) linitial(expr->inputs);
+    PgMemoGroup *child_group = (PgMemoGroup *) linitial(expr->inputs);
     List        *filter_quals = (List *) expr->op_private;
-    RelOptInfo  *rel = scan_expr->owner_group->rel;
+    RelOptInfo  *rel = child_group->rel;
     ListCell    *lc;
     List        *pushable = NIL;
     List        *remain   = NIL;
@@ -368,9 +473,12 @@ pg_rule_pushdown_predicate_scan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
     if (remain == NIL)
     {
         /* 所有 qual 都推完了 → 返回裸 LogicalScan */
+        PgGroupExpr *scan_logical = pg_memo_group_first_logical(child_group,
+                                        PG_CASCADES_LOGICAL_SCAN);
         PgGroupExpr *new_scan = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_SCAN);
         new_scan->inputs = NIL;
-        new_scan->op_private = scan_expr->op_private;
+        new_scan->op_private = (scan_logical != NULL) ?
+            scan_logical->op_private : NULL;
         return list_make1(new_scan);
     }
     else
@@ -399,8 +507,9 @@ pg_rule_merge_limit_with_sort(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     if (list_length(expr->inputs) != 1)
         return NIL;
 
-    sort_expr = (PgGroupExpr *) linitial(expr->inputs);
-    if (sort_expr->op != PG_CASCADES_LOGICAL_SORT)
+    sort_expr = pg_memo_group_first_logical(
+        (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_SORT);
+    if (sort_expr == NULL)
         return NIL;
 
     limit_tuples = ctx->upper->limit_tuples;
@@ -465,10 +574,11 @@ pg_rule_merge_filter_with_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     if (join_priv == NULL || join_priv->jointype != JOIN_INNER)
         return NIL;
 
-    outer_input = (PgGroupExpr *) linitial(expr->inputs);
+    outer_input = pg_memo_group_first_logical(
+        (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_FILTER);
 
     /* 只处理 outer 侧有 Filter 的情况 */
-    if (outer_input->op != PG_CASCADES_LOGICAL_FILTER)
+    if (outer_input == NULL)
         return NIL;
 
     {
@@ -563,8 +673,9 @@ pg_rule_merge_two_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 
     if (list_length(expr->inputs) != 1)
         return NIL;
-    inner = (PgGroupExpr *) linitial(expr->inputs);
-    if (inner->op != PG_CASCADES_LOGICAL_AGG)
+    inner = pg_memo_group_first_logical(
+        (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_AGG);
+    if (inner == NULL)
         return NIL;
 
     /*
@@ -600,11 +711,13 @@ pg_rule_merge_join_with_child_project(PgPlannerCascadesContext *ctx,
     if (list_length(expr->inputs) != 2)
         return NIL;
 
-    outer_input = (PgGroupExpr *) linitial(expr->inputs);
-    inner_input = (PgGroupExpr *) lsecond(expr->inputs);
+    outer_input = pg_memo_group_first_logical(
+        (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_PROJECT);
+    inner_input = pg_memo_group_first_logical(
+        (PgMemoGroup *) lsecond(expr->inputs), PG_CASCADES_LOGICAL_PROJECT);
 
-    outer_is_proj = (outer_input->op == PG_CASCADES_LOGICAL_PROJECT);
-    inner_is_proj = (inner_input->op == PG_CASCADES_LOGICAL_PROJECT);
+    outer_is_proj = (outer_input != NULL);
+    inner_is_proj = (inner_input != NULL);
 
     if (!outer_is_proj && !inner_is_proj)
         return NIL;
@@ -627,6 +740,8 @@ pg_rule_merge_join_with_child_project(PgPlannerCascadesContext *ctx,
 /*
  * B3: PruneAggColumns
  *   LogicalAgg(A): keep only GROUP BY columns + Aggref argument columns.
+ *   Sets group->logical_prop.output_columns to the restricted column set.
+ *   B1 (PruneScanColumns) reads this to prune reltargetlist lower down.
  */
 static List *
 pg_rule_prune_agg_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
@@ -650,42 +765,85 @@ pg_rule_prune_agg_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
         }
     }
 
-    /* Always include aggref argument columns (handled by PG's targetlist) */
-    /* First version: side-effect only — mark what's minimally needed.
-     * The actual pruning of child columns happens via required_columns
-     * propagation in pg_derive_child_properties. */
+    /* Collect aggref argument columns from target list */
+    foreach(lc, upper->tlist)
+    {
+        TargetEntry *te = (TargetEntry *) lfirst(lc);
+        if (IsA(te->expr, Aggref))
+        {
+            Aggref *agg = (Aggref *) te->expr;
+            ListCell *alc;
+            foreach(alc, agg->args)
+            {
+                Node *arg = (Node *) lfirst(alc);
+                if (IsA(arg, Var))
+                    needed = bms_add_member(needed, ((Var *) arg)->varattno);
+            }
+        }
+    }
+
     if (needed != NULL)
-        bms_free(needed);
+    {
+        /* Prune: union with existing output_columns so we don't lose parent needs */
+        if (expr->owner_group->logical_prop.output_columns != NULL)
+            needed = bms_union(needed,
+                        expr->owner_group->logical_prop.output_columns);
+        expr->owner_group->logical_prop.output_columns = needed;
+    }
     return NIL;
 }
 
 /*
  * B4: PruneProjectColumns
  *   LogicalProject(A): keep only columns referenced by parent.
- *   Reads required_columns from the group's best entries.
+ *   Reads parent's output_columns from group->logical_prop,
+ *   maps them through the project target list to derive what
+ *   the child needs, and sets the child group's output_columns.
  */
 static List *
 pg_rule_prune_project_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
-    ListCell *lc;
+    PgCascadesUpperInfo *upper = ctx->upper;
+    Bitmapset  *needed = NULL;
+    ListCell   *lc;
 
-    /* Collect union of required_columns from all best entries */
-    foreach(lc, expr->owner_group->best_entries)
+    if (upper == NULL || upper->tlist == NIL)
+        return NIL;
+
+    /* Start from parent-required columns (from logical_prop) */
+    if (expr->owner_group->logical_prop.output_columns != NULL)
+        needed = bms_copy(expr->owner_group->logical_prop.output_columns);
+
+    /* Map each target entry: if parent needs resno X, find what child vars
+     * contribute to that expression.  First version: walk tlist entries
+     * and pull all Var references whose resno is in needed. */
+    foreach(lc, upper->tlist)
     {
-        PgGroupBestEntry *entry = (PgGroupBestEntry *) lfirst(lc);
-        if (entry->required != NULL && entry->required->required_columns != NULL)
-        {
-            /* required_columns tells us what parent needs —
-             * first version: no action, propagation handles it */
-            return NIL;
-        }
+        TargetEntry *te = (TargetEntry *) lfirst(lc);
+        if (needed != NULL && !bms_is_member(te->resno, needed))
+            continue;
+        /* Include all Var references used in this target entry */
+        pull_varattnos((Node *) te->expr, 1, &needed);
     }
+
+    /* Propagate needed columns to child group */
+    if (needed != NULL && list_length(expr->inputs) >= 1)
+    {
+        PgMemoGroup *child = (PgMemoGroup *) linitial(expr->inputs);
+        if (child->logical_prop.output_columns != NULL)
+            needed = bms_union(needed, child->logical_prop.output_columns);
+        child->logical_prop.output_columns = needed;
+    }
+    else if (needed != NULL)
+        bms_free(needed);
+
     return NIL;
 }
 
 /*
  * B5: PruneSortColumns
  *   LogicalSort(A): keep only sort key columns + parent required columns.
+ *   Sets group->logical_prop.output_columns to the restricted set.
  */
 static List *
 pg_rule_prune_sort_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
@@ -710,7 +868,13 @@ pg_rule_prune_sort_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     }
 
     if (needed != NULL)
-        bms_free(needed);
+    {
+        /* Union with parent-required output_columns */
+        if (expr->owner_group->logical_prop.output_columns != NULL)
+            needed = bms_union(needed,
+                        expr->owner_group->logical_prop.output_columns);
+        expr->owner_group->logical_prop.output_columns = needed;
+    }
     return NIL;
 }
 
@@ -743,8 +907,8 @@ pg_rule_prune_empty_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 /*
  * B1: PruneScanColumns
  *   LogicalScan: reduce reltargetlist to columns needed by parent.
- *   First version: conservatively keep all columns that appear in any
- *   upper-level required_columns or baserestrictinfo.
+ *   Uses baserestrictinfo + logical_prop.output_columns from parent
+ *   propagation (B2-B5) + best_entries' required_columns.
  */
 static List *
 pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
@@ -753,9 +917,24 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     ListCell   *lc;
     Bitmapset  *needed = NULL;
     List       *new_tlist = NIL;
+    bool        pruned = false;
 
     if (rel == NULL)
         return NIL;
+
+    /*
+     * Phase 6: Only prune when we have complete column requirement info.
+     * During the rewrite pipeline, best_entries may be empty and
+     * logical_prop.output_columns may not be fully propagated yet.
+     * Pruning prematurely would remove columns needed by upper ops
+     * (target list, GROUP BY, ORDER BY), corrupting PG state.
+     *
+     * We require at least one of:
+     *   - best_entries with required_columns, OR
+     *   - logical_prop.output_columns from parent propagation
+     * to have meaningful column requirements beyond baserestrictinfo.
+     */
+    bool have_requirements = false;
 
     /* Collect columns from baserestrictinfo (quals reference these) */
     foreach(lc, rel->baserestrictinfo)
@@ -764,19 +943,84 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
         pull_varattnos((Node *) ri->clause, rel->relid, &needed);
     }
 
-    /* Also from reltargetlist (parent projections) — keep all for now */
-    if (needed == NULL)
-        return NIL;  /* nothing to prune */
+    /* Always keep columns referenced by the target list (upper->tlist) */
+    if (ctx->upper != NULL && ctx->upper->tlist != NIL)
+    {
+        pull_varattnos((Node *) ctx->upper->tlist, rel->relid, &needed);
+    }
 
-    /* First version: mark but don't modify reltargetlist yet.
-     * Actual reduction happens when required_columns propagation is complete. */
+    /* Also collect from logical_prop.output_columns (B2-B5 propagation) */
+    if (expr->owner_group->logical_prop.output_columns != NULL)
+    {
+        needed = bms_union(needed,
+                    bms_copy(expr->owner_group->logical_prop.output_columns));
+        have_requirements = true;
+    }
+
+    /* Also collect from best entries' required_columns (parent projections) */
+    foreach(lc, expr->owner_group->best_entries)
+    {
+        PgGroupBestEntry *entry = (PgGroupBestEntry *) lfirst(lc);
+        if (entry->required != NULL && entry->required->required_columns != NULL)
+        {
+            needed = bms_union(needed, entry->required->required_columns);
+            have_requirements = true;
+        }
+    }
+
+    /*
+     * Phase 6: Only prune if we have concrete requirements from parent ops
+     * (not just baserestrictinfo).  Without parent requirements, the needed
+     * set is incomplete and pruning would remove columns needed by SELECT,
+     * GROUP BY, ORDER BY, etc.
+     */
+    if (!have_requirements)
+    {
+        bms_free(needed);
+        return NIL;  /* incomplete info — skip pruning */
+    }
+
+    if (needed == NULL)
+    {
+        bms_free(needed);
+        return NIL;
+    }
+
+    /* Build pruned reltargetlist: keep only vars in needed */
+    foreach(lc, rel->reltargetlist)
+    {
+        Var *var = (Var *) lfirst(lc);
+        if (bms_is_member(var->varattno, needed))
+            new_tlist = lappend(new_tlist, var);
+        else
+            pruned = true;
+    }
+
+    /*
+     * Phase 6: Safety check — never reduce to 0 columns.
+     * A scan producing no columns breaks PG's create_plan and executor.
+     */
+    if (pruned && list_length(new_tlist) > 0)
+    {
+        rel->reltargetlist = new_tlist;
+        /* Re-estimate: fewer columns → narrower rows */
+        set_baserel_size_estimates(ctx->root, rel);
+
+        if (ctx->debug)
+            elog(NOTICE, "Cascades: PruneScanColumns reduced reltargetlist "
+                 "for rel %d to %d columns",
+                 rel->relid, list_length(new_tlist));
+    }
+
     bms_free(needed);
-    return NIL;
+    return NIL;  /* side-effect only */
 }
 
 /*
  * B2: PruneJoinColumns
  *   LogicalJoin(A, B): keep only join key columns + parent-required columns.
+ *   Sets group->logical_prop.output_columns to the restricted column set.
+ *   B1 (PruneScanColumns) reads this to prune reltargetlist lower down.
  */
 static List *
 pg_rule_prune_join_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
@@ -788,7 +1032,7 @@ pg_rule_prune_join_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     if (join_priv == NULL)
         return NIL;
 
-    /* Collect columns from join quals */
+    /* Collect columns from join quals (join key columns) */
     foreach(lc, join_priv->restrictlist)
     {
         RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
@@ -796,7 +1040,13 @@ pg_rule_prune_join_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     }
 
     if (needed != NULL)
-        bms_free(needed);
+    {
+        /* Union with parent-required output_columns */
+        if (expr->owner_group->logical_prop.output_columns != NULL)
+            needed = bms_union(needed,
+                        expr->owner_group->logical_prop.output_columns);
+        expr->owner_group->logical_prop.output_columns = needed;
+    }
     return NIL;
 }
 
@@ -816,8 +1066,9 @@ pg_rule_pushdown_predicate_project(PgPlannerCascadesContext *ctx,
     if (list_length(expr->inputs) != 1)
         return NIL;
 
-    proj_expr = (PgGroupExpr *) linitial(expr->inputs);
-    if (proj_expr->op != PG_CASCADES_LOGICAL_PROJECT)
+    proj_expr = pg_memo_group_first_logical(
+        (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_PROJECT);
+    if (proj_expr == NULL)
         return NIL;
 
     filter_quals = (List *) expr->op_private;
@@ -862,8 +1113,9 @@ pg_rule_pushdown_limit_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     if (list_length(expr->inputs) != 1)
         return NIL;
 
-    join_expr = (PgGroupExpr *) linitial(expr->inputs);
-    if (join_expr->op != PG_CASCADES_LOGICAL_JOIN)
+    join_expr = pg_memo_group_first_logical(
+        (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_JOIN);
+    if (join_expr == NULL)
         return NIL;
 
     join_priv = (PgJoinPrivate *) join_expr->op_private;
@@ -883,11 +1135,21 @@ pg_rule_pushdown_limit_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     new_limit_inner->inputs = list_make1(lsecond(join_expr->inputs));
     new_limit_inner->op_private = ctx->upper;
 
-    /* Rebuild Join with limited children */
+    /* Rebuild Join with original children (Limit pushdown is semantic:
+     * the Limit wrappers are inserted into children's groups,
+     * and cost-based search will use them when beneficial.) */
     new_join = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_JOIN);
+    new_join->inputs = list_make2(linitial(join_expr->inputs),
+                                   lsecond(join_expr->inputs));
     new_join->op_private = join_priv;
 
-    return list_make1(new_join);  /* inputs set by engine via pg_memo_insert */
+    /*
+     * Return all three: Limit wrappers get inserted into the group first,
+     * then the new_join references the same child groups.  The engine
+     * processes them sequentially so Limit wrappers exist before new_join
+     * is optimized.
+     */
+    return list_make3(new_limit_outer, new_limit_inner, new_join);
 }
 
 /*
@@ -903,8 +1165,9 @@ pg_rule_pushdown_predicate_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 
     if (list_length(expr->inputs) != 1)
         return NIL;
-    agg_expr = (PgGroupExpr *) linitial(expr->inputs);
-    if (agg_expr->op != PG_CASCADES_LOGICAL_AGG)
+    agg_expr = pg_memo_group_first_logical(
+        (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_AGG);
+    if (agg_expr == NULL)
         return NIL;
 
     filter_quals = (List *) expr->op_private;
@@ -948,8 +1211,9 @@ pg_rule_pushdown_agg_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 
     if (list_length(expr->inputs) != 1)
         return NIL;
-    limit_expr = (PgGroupExpr *) linitial(expr->inputs);
-    if (limit_expr->op != PG_CASCADES_LOGICAL_LIMIT)
+    limit_expr = pg_memo_group_first_logical(
+        (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_LIMIT);
+    if (limit_expr == NULL)
         return NIL;
 
     /* Build: Limit(Agg(A)) */
@@ -1070,8 +1334,9 @@ pg_rule_pushdown_predicate_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
     if (list_length(expr->inputs) != 1)
         return NIL;
 
-    join_expr = (PgGroupExpr *) linitial(expr->inputs);
-    if (join_expr->op != PG_CASCADES_LOGICAL_JOIN)
+    join_expr = pg_memo_group_first_logical(
+        (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_JOIN);
+    if (join_expr == NULL)
         return NIL;
 
     join_priv = (PgJoinPrivate *) join_expr->op_private;
@@ -1387,142 +1652,348 @@ pg_rule_inner_to_semi(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     return list_make1(new_join);
 }
 
+/*
+ * D3: EliminateLimit
+ *   LogicalLimit(A) where no LIMIT/OFFSET → merge child group into parent.
+ *
+ *   When the query has no LIMIT clause (limitCount == NULL && limitOffset == NULL),
+ *   the LogicalLimit node is a no-op.  Instead of creating a passthrough
+ *   expression, we merge the child group's expressions directly into the
+ *   current group — this is the "group merging" pattern.
+ *
+ *   Returns NIL (side effect: calls pg_memo_merge_group).
+ */
+static List *
+pg_rule_eliminate_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
+{
+    Query *parse = ctx->root->parse;
+    PgMemoGroup *child_group;
+
+    if (list_length(expr->inputs) != 1)
+        return NIL;
+
+    /* Only eliminate if there's actually no LIMIT/OFFSET */
+    if (parse->limitCount != NULL || parse->limitOffset != NULL)
+        return NIL;
+
+    child_group = (PgMemoGroup *) linitial(expr->inputs);
+    if (child_group == NULL || child_group == expr->owner_group)
+        return NIL;
+
+    /* Merge child group's expressions into the parent group */
+    pg_memo_merge_group(ctx, expr->owner_group, child_group);
+
+    /*
+     * Phase 6: After merging, remove the eliminated expression (LogicalLimit)
+     * from the target group.  Its inputs still point to the now-empty source
+     * group, and keeping it would cause planbuild failures when the task
+     * scheduler tries to optimize a child with no expressions.
+     */
+    expr->owner_group->logical_exprs = list_delete_ptr(
+        expr->owner_group->logical_exprs, expr);
+
+    /* Return NIL — no new expressions to insert; group merging was a side effect */
+    return NIL;
+}
+
+/*
+ * F1: EliminateAgg
+ *   LogicalAgg(A) where no aggregation + no GROUP BY → merge child into parent.
+ *
+ *   When the query has no aggregate functions (hasAggs == false) and no
+ *   GROUP BY clause, the LogicalAgg node is a no-op.  Merge the child
+ *   group's expressions directly into the current group.
+ *
+ *   Returns NIL (side effect: calls pg_memo_merge_group).
+ */
+static List *
+pg_rule_eliminate_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
+{
+    PgMemoGroup *child_group;
+
+    if (list_length(expr->inputs) != 1)
+        return NIL;
+
+    /* Only eliminate if there's no aggregation and no GROUP BY */
+    if (ctx->root->parse->hasAggs || ctx->root->parse->groupClause != NIL)
+        return NIL;
+
+    child_group = (PgMemoGroup *) linitial(expr->inputs);
+    if (child_group == NULL || child_group == expr->owner_group)
+        return NIL;
+
+    /* Merge child group's expressions into the parent group */
+    pg_memo_merge_group(ctx, expr->owner_group, child_group);
+
+    /*
+     * Phase 6: Remove the eliminated expression from the target group.
+     * See pg_rule_eliminate_limit for rationale.
+     */
+    expr->owner_group->logical_exprs = list_delete_ptr(
+        expr->owner_group->logical_exprs, expr);
+
+    /* Return NIL — no new expressions to insert */
+    return NIL;
+}
+
+/*
+ * EnforceSort (PG_RULE_ENFORCER):
+ *   Insert PhysicalSort on top of a child group when required pathkeys
+ *   are not satisfied by the child's output.
+ *
+ *   This is the canonical enforcer rule.  It is triggered by the
+ *   ENFORCE_ENFORCE_PROPERTY state in EnforceAndCostTask when
+ *   pg_output_satisfies_required() returns false.
+ *
+ *   Pattern: leaf (matches any group)
+ *   Transform: creates PhysicalSort(child) with pathkeys from required property
+ */
+static List *
+pg_rule_enforce_sort(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
+{
+    /*
+     * This transform is a no-op at the rule level.  The actual Sort
+     * enforcer is created by the EnforceAndCostTask state machine in
+     * task.c (ENFORCE_ENFORCE_PROPERTY state), which has access to the
+     * required property's pathkeys that the rule transform cannot see.
+     *
+     * The rule's purpose is to be registered as PG_RULE_ENFORCER so the
+     * framework knows Sort enforcement is available.
+     */
+    (void) expr;
+    return NIL;
+}
+
+/*
+ * A5: PushDownPredicateUnion (Phase 5)
+ *   LogicalFilter(LogicalUnion(A,B,...)) → LogicalUnion(Filter(A), Filter(B), ...)
+ *
+ *   Pushes filter predicates down into both sides of UNION ALL / UNION.
+ *   For now, this is a stub — LogicalUnion is not yet built by pg_adapter
+ *   (UNION queries fall back to standard PG planner).  When UNION support
+ *   is added, this rule will be activated.
+ */
+static List *
+pg_rule_pushdown_predicate_union(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
+{
+    PgGroupExpr *union_expr;
+    List       *filter_quals;
+    ListCell   *lc;
+
+    if (list_length(expr->inputs) != 1)
+        return NIL;
+
+    union_expr = pg_memo_group_first_logical(
+        (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_UNION);
+    if (union_expr == NULL)
+        return NIL;
+
+    filter_quals = (List *) expr->op_private;
+    if (filter_quals == NIL)
+        return NIL;
+
+    /* Check volatile — don't push volatile functions past UNION */
+    foreach(lc, filter_quals)
+    {
+        RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
+        if (contain_volatile_functions((Node *) ri->clause))
+            return NIL;
+    }
+
+    /*
+     * Create Filter wrappers on each child of the UNION and reconstruct.
+     * LogicalFilter(LogicalUnion(A,B)) → LogicalUnion(Filter(A), Filter(B))
+     *
+     * Note: LogicalUnion is not yet built by pg_adapter (UNION queries
+     * fall back to PG standard planner), so this rule body exists but
+     * cannot fire in the current Path-import mode.  It will activate
+     * when UNION support is added to pg_adapter.
+     */
+    {
+        PgGroupExpr *new_union;
+        List       *new_children = NIL;
+        ListCell   *child_lc;
+
+        foreach(child_lc, union_expr->inputs)
+        {
+            PgMemoGroup *child_grp = (PgMemoGroup *) lfirst(child_lc);
+            PgGroupExpr *new_filter;
+
+            new_filter = pg_memo_new_group_expr(ctx,
+                                    PG_CASCADES_LOGICAL_FILTER);
+            new_filter->op_private = filter_quals;
+            /* inputs set by pg_memo_insert_expression */
+            new_children = lappend(new_children, new_filter);
+        }
+
+        new_union = pg_memo_new_group_expr(ctx,
+                                    PG_CASCADES_LOGICAL_UNION);
+        new_union->op_private = union_expr->op_private;
+        /* inputs: new_children — each is Filter(child_grp) */
+        return list_make1(new_union);
+    }
+}
+
 /* ========================================================================
- * Phase 5: Transformation rules (23 → 26 rules)
- *   C2/C3/G3 added.
+ * Phase 5: Transformation rules (29 rules)
+ *   C2/C3/G3/D3/F1/A5 added.
  * ======================================================================== */
 
 static PgRule g_trans_rules_phase5[] = {
     /* H2: MergeProjectWithChild — LogicalProject(LogicalProject(A)) → LogicalProject(A) */
     {"MergeProjectWithChild", NULL, pg_rule_merge_project_with_child,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_PROJECT, 0, 0, 0.5},
+     PG_CASCADES_LOGICAL_PROJECT, 0, PG_RULE_BIT_MERGE_PROJECT, 0.5},
 
     /* E2: PruneEmptyScan — mark empty scan (side-effect only) */
     {"PruneEmptyScan", NULL, pg_rule_prune_empty_scan,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_SCAN, 0, 0, 0.9},
+     PG_CASCADES_LOGICAL_SCAN, 0, PG_RULE_BIT_PRUNE_EMPTY_SCAN, 0.9},
 
     /* H3: EliminateProject — remove no-op Project */
     {"EliminateProject", NULL, pg_rule_eliminate_project,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_PROJECT, 0, 0, 0.6},
+     PG_CASCADES_LOGICAL_PROJECT, 0, PG_RULE_BIT_ELIMINATE_PROJECT, 0.6},
 
     /* A1: PushDownPredicateScan — filter into scan qual */
     {"PushDownPredicateScan", NULL, pg_rule_pushdown_predicate_scan,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_FILTER, 0, 0, 0.6},
+     PG_CASCADES_LOGICAL_FILTER, 0, PG_RULE_BIT_PUSHDOWN_PRED_SCAN, 0.6},
 
     /* D1: MergeLimitWithSort — eliminate redundant Limit on top of Sort */
     {"MergeLimitWithSort", NULL, pg_rule_merge_limit_with_sort,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_LIMIT, 0, 0, 0.7},
+     PG_CASCADES_LOGICAL_LIMIT, 0, PG_RULE_BIT_MERGE_LIMIT_SORT, 0.7},
 
     /* H1: EliminateSortWithConstantKey — remove Sort on constant keys */
     {"EliminateSortWithConstKey", NULL, pg_rule_eliminate_sort_with_constant_key,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_SORT, 0, 0, 0.5},
+     PG_CASCADES_LOGICAL_SORT, 0, PG_RULE_BIT_ELIM_SORT_CONST_KEY, 0.5},
 
     /* H4: MergeFilterWithJoin — merge Filter into Join qual (INNER only) */
     {"MergeFilterWithJoin", NULL, pg_rule_merge_filter_with_join,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_JOIN, 0, 0, 0.4},
+     PG_CASCADES_LOGICAL_JOIN, 0, PG_RULE_BIT_MERGE_FILTER_JOIN, 0.4},
 
     /* E3: PruneEmptyUnion — remove empty branches from Union */
     {"PruneEmptyUnion", NULL, pg_rule_prune_empty_union,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_PROJECT, 0, 0, 0.8},
+     PG_CASCADES_LOGICAL_PROJECT, 0, PG_RULE_BIT_PRUNE_EMPTY_UNION, 0.8},
 
     /* F2: MergeTwoAgg — merge two consecutive Agg operators */
     {"MergeTwoAgg", NULL, pg_rule_merge_two_agg,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_AGG, 0, 0, 0.5},
+     PG_CASCADES_LOGICAL_AGG, 0, PG_RULE_BIT_MERGE_TWO_AGG, 0.5},
 
     /* G4: MergeJoinWithChildProject — eliminate Project under Join */
     {"MergeJoinWithChildProj", NULL, pg_rule_merge_join_with_child_project,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_JOIN, 0, 0, 0.4},
+     PG_CASCADES_LOGICAL_JOIN, 0, PG_RULE_BIT_MERGE_JOIN_PROJ, 0.4},
 
     /* B3: PruneAggColumns — reduce Agg to GROUP BY + aggre cols */
     {"PruneAggColumns", NULL, pg_rule_prune_agg_columns,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_AGG, 0, 0, 0.5},
+     PG_CASCADES_LOGICAL_AGG, 0, PG_RULE_BIT_PRUNE_AGG_COLS, 0.5},
 
     /* B4: PruneProjectColumns — keep only parent-referenced columns */
     {"PruneProjectColumns", NULL, pg_rule_prune_project_columns,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_PROJECT, 0, 0, 0.6},
+     PG_CASCADES_LOGICAL_PROJECT, 0, PG_RULE_BIT_PRUNE_PROJ_COLS, 0.6},
 
     /* B5: PruneSortColumns — keep only sort key + parent columns */
     {"PruneSortColumns", NULL, pg_rule_prune_sort_columns,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_SORT, 0, 0, 0.5},
+     PG_CASCADES_LOGICAL_SORT, 0, PG_RULE_BIT_PRUNE_SORT_COLS, 0.5},
 
     /* E1: PruneEmptyJoin — mark join as empty if either child is empty */
     {"PruneEmptyJoin", NULL, pg_rule_prune_empty_join,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_JOIN, 0, 0, 0.9},
+     PG_CASCADES_LOGICAL_JOIN, 0, PG_RULE_BIT_PRUNE_EMPTY_JOIN, 0.9},
 
     /* B1: PruneScanColumns — reduce scan to needed columns */
     {"PruneScanColumns", NULL, pg_rule_prune_scan_columns,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_SCAN, 0, 0, 0.6},
+     PG_CASCADES_LOGICAL_SCAN, 0, PG_RULE_BIT_PRUNE_SCAN_COLS, 0.6},
 
     /* B2: PruneJoinColumns — reduce join to key + parent columns */
     {"PruneJoinColumns", NULL, pg_rule_prune_join_columns,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_JOIN, 0, 0, 0.5},
+     PG_CASCADES_LOGICAL_JOIN, 0, PG_RULE_BIT_PRUNE_JOIN_COLS, 0.5},
 
     /* A4: PushDownPredicateProject — filter through Project */
     {"PushDownPredicateProject", NULL, pg_rule_pushdown_predicate_project,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_FILTER, 0, 0, 0.5},
+     PG_CASCADES_LOGICAL_FILTER, 0, PG_RULE_BIT_PUSHDOWN_PRED_PROJ, 0.5},
 
     /* D2: PushDownLimitJoin — push Limit into Join children (INNER only) */
     {"PushDownLimitJoin", NULL, pg_rule_pushdown_limit_join,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_LIMIT, 0, 0, 0.4},
+     PG_CASCADES_LOGICAL_LIMIT, 0, PG_RULE_BIT_PUSHDOWN_LIMIT_JOIN, 0.4},
 
     /* A3: PushDownPredicateAgg — filter through Agg (turn into HAVING-like) */
     {"PushDownPredicateAgg", NULL, pg_rule_pushdown_predicate_agg,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_FILTER, 0, 0, 0.3},
+     PG_CASCADES_LOGICAL_FILTER, 0, PG_RULE_BIT_PUSHDOWN_PRED_AGG, 0.3},
 
     /* F3: PushDownAggLimit — swap Agg and Limit */
     {"PushDownAggLimit", NULL, pg_rule_pushdown_agg_limit,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_AGG, 0, 0, 0.4},
+     PG_CASCADES_LOGICAL_AGG, 0, PG_RULE_BIT_PUSHDOWN_AGG_LIMIT, 0.4},
 
     /* G1: EliminateJoinWithConstant — drop join with single-row side */
     {"EliminateJoinWithConst", NULL, pg_rule_eliminate_join_with_constant,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_JOIN, 0, 0, 0.7},
+     PG_CASCADES_LOGICAL_JOIN, 0, PG_RULE_BIT_ELIM_JOIN_CONST, 0.7},
 
     /* G2: OuterJoinElimination — LEFT→INNER conversion */
     {"OuterJoinElimination", NULL, pg_rule_outer_join_elimination,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_JOIN, 0, 0, 0.6},
+     PG_CASCADES_LOGICAL_JOIN, 0, PG_RULE_BIT_OUTER_JOIN_ELIM, 0.6},
 
     /* A2: PushDownPredicateJoin — push WHERE into Join children (INNER only) */
     {"PushDownPredicateJoin", NULL, pg_rule_pushdown_predicate_join,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_FILTER, 0, 0, 0.4},
+     PG_CASCADES_LOGICAL_FILTER, 0, PG_RULE_BIT_PUSHDOWN_PRED_JOIN, 0.4},
 
     /* G3: InnerToSemi — convert INNER JOIN to SEMI JOIN when inner side unique */
     {"InnerToSemi", NULL, pg_rule_inner_to_semi,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_JOIN, 0, 0, 0.3},
+     PG_CASCADES_LOGICAL_JOIN, 0, PG_RULE_BIT_INNER_TO_SEMI, 0.3},
 
     /* C2: JoinAssociativity — (A⋈B)⋈C → A⋈(B⋈C) */
     {"JoinAssociativity", NULL, pg_rule_join_associativity,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_JOIN, 0, 0, 0.2},
+     PG_CASCADES_LOGICAL_JOIN, 0, PG_RULE_BIT_JOIN_ASSOCIATIVITY, 0.2},
 
     /* C3: JoinLeftAsscom — A⋈(B⋈C) → (A⋈B)⋈C */
     {"JoinLeftAsscom", NULL, pg_rule_join_left_asscom,
      PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_JOIN, 0, 0, 0.2},
+     PG_CASCADES_LOGICAL_JOIN, 0, PG_RULE_BIT_JOIN_LEFT_ASSCOM, 0.2},
 
+    /* D3: EliminateLimit — remove no-op Limit when no LIMIT clause */
+    {"EliminateLimit", NULL, pg_rule_eliminate_limit,
+     PG_RULE_TRANS, NULL,
+     PG_CASCADES_LOGICAL_LIMIT, 0, PG_RULE_BIT_ELIMINATE_LIMIT, 0.6},
+
+    /* F1: EliminateAgg — remove no-op Agg when no aggregation */
+    {"EliminateAgg", NULL, pg_rule_eliminate_agg,
+     PG_RULE_TRANS, NULL,
+     PG_CASCADES_LOGICAL_AGG, 0, PG_RULE_BIT_ELIMINATE_AGG, 0.6},
+
+    /* A5: PushDownPredicateUnion — push filter into UNION children */
+    {"PushDownPredicateUnion", NULL, pg_rule_pushdown_predicate_union,
+     PG_RULE_TRANS, NULL,
+     PG_CASCADES_LOGICAL_FILTER, 0, PG_RULE_BIT_PUSHDOWN_PRED_UNION, 0.4},
+
+    {NULL, NULL, NULL, 0, NULL, 0, 0, 0, 0.0}  /* sentinel */
+};
+
+/* Phase 5: Enforcer rules */
+static PgRule g_enforcer_rules[] = {
+    {"EnforceSort", NULL, pg_rule_enforce_sort,
+     PG_RULE_ENFORCER, NULL,
+     0, PG_CASCADES_PHYSICAL_SORT,
+     PG_RULE_BIT_ENFORCE_SORT, 0.0},
     {NULL, NULL, NULL, 0, NULL, 0, 0, 0, 0.0}  /* sentinel */
 };
 
@@ -1607,6 +2078,17 @@ pg_cascades_get_impl_rules_phase2(int *num_rules)
     return g_impl_rules_phase2;
 }
 
+/* Phase 2: Scan-only rules (safe for Path-import mode, no child groups) */
+PgRule *
+pg_cascades_get_impl_rules_phase2_scan(int *num_rules)
+{
+    int i = 0;
+    while (g_impl_rules_phase2_scan[i].name != NULL)
+        i++;
+    *num_rules = i;
+    return g_impl_rules_phase2_scan;
+}
+
 /* Phase 5: Transformation rules (26 rules) */
 PgRule *
 pg_cascades_get_trans_rules_phase5(int *num_rules)
@@ -1616,6 +2098,17 @@ pg_cascades_get_trans_rules_phase5(int *num_rules)
         i++;
     *num_rules = i;
     return g_trans_rules_phase5;
+}
+
+/* Phase 5: Enforcer rules */
+PgRule *
+pg_cascades_get_enforcer_rules(int *num_rules)
+{
+    int i = 0;
+    while (g_enforcer_rules[i].name != NULL)
+        i++;
+    *num_rules = i;
+    return g_enforcer_rules;
 }
 
 /* ========================================================================
@@ -1775,4 +2268,239 @@ pg_cascades_init_rule_patterns(void)
             rule->pattern = g_pat_join_filter_leaf_leaf;
         /* Other rules use from_op (pattern stays NULL) */
     }
+}
+
+/* ========================================================================
+ * Phase 4: Combination Rules
+ *
+ *   CombinationRule groups related rules into execution units
+ *   for staged rewrite in the pipeline.
+ * ======================================================================== */
+
+static PgCombinationRule g_combination_rules[] = {
+    /*
+     * GP_PUSH_DOWN_PREDICATE: Predicate pushdown group.
+     *   PushDownPredicateScan, PushDownPredicateJoin,
+     *   PushDownPredicateProject, PushDownPredicateAgg,
+     *   PushDownPredicateUnion
+     */
+    {"GP_PUSH_DOWN_PREDICATE",
+     NULL,  /* rule_ids computed from name lookup in rewrite */
+     true   /* iterate until convergence */
+    },
+
+    /*
+     * GP_PRUNE_COLUMNS: Column pruning group.
+     *   PruneScanColumns, PruneJoinColumns, PruneAggColumns,
+     *   PruneProjectColumns, PruneSortColumns
+     */
+    {"GP_PRUNE_COLUMNS", NULL, true},
+
+    /*
+     * GP_JOIN_REORDER: Join reorder group.
+     *   JoinCommutativity, JoinAssociativity, JoinLeftAsscom
+     */
+    {"GP_JOIN_REORDER", NULL, true},
+
+    /*
+     * GP_PRUNE_EMPTY: Empty set pruning group.
+     *   PruneEmptyJoin, PruneEmptyScan, PruneEmptyUnion
+     */
+    {"GP_PRUNE_EMPTY", NULL, false},
+
+    {NULL, NULL, false}  /* sentinel */
+};
+
+/*
+ * pg_cascades_init_combination_rules:
+ *   No longer needed.  Combination rules (g_combination_rules[]) are
+ *   consumed directly by pg_cascades_logical_rewrite() via
+ *   pg_cascades_get_combination_rules(), which builds per-combo rule
+ *   lists from pg_rewrite_lookup_transform() at each call site.
+ *   This function is retained as a no-op for API compatibility.
+ */
+void
+pg_cascades_init_combination_rules(void)
+{
+    /* No dynamic initialization needed — combination rules are
+     * driven by pg_cascades_logical_rewrite() at runtime. */
+}
+
+PgCombinationRule *
+pg_cascades_get_combination_rules(int *num_rules)
+{
+    *num_rules = (int)(sizeof(g_combination_rules) / sizeof(PgCombinationRule)) - 1;
+    return g_combination_rules;
+}
+
+/* ========================================================================
+ * Phase 4: Path Generation Join Implementation Rules
+ *
+ *   These rules call make_join_rel() internally to generate physical
+ *   join paths on-demand during Memo search, replacing the "import all
+ *   paths upfront" approach.
+ *
+ *   First version: INNER JOIN only.  Relies on prep->final_rel for
+ *   base relations having valid RelOptInfo with pathlist populated.
+ * ======================================================================== */
+
+static RelOptInfo *
+pg_rule_join_get_child_rel(PgPlannerCascadesContext *ctx, PgMemoGroup *child_grp)
+{
+    /* Direct mapping: base rel group */
+    if (child_grp->rel != NULL)
+        return child_grp->rel;
+
+    /* Try group_to_rel for join groups */
+    return pg_cascades_group_to_rel(ctx, child_grp);
+}
+
+/*
+ * Phase 4 HashJoin: LogicalJoin → PhysicalHashJoin via make_join_rel
+ */
+static List *
+pg_rule_join_to_hashjoin_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
+{
+    PgJoinPrivate *join_priv;
+    PgMemoGroup *outer_grp, *inner_grp;
+    RelOptInfo *outer_rel, *inner_rel, *joinrel;
+    List *result = NIL;
+    ListCell *lc;
+
+    if (list_length(expr->inputs) != 2)
+        return NIL;
+
+    join_priv = (PgJoinPrivate *) expr->op_private;
+    if (join_priv == NULL || join_priv->jointype != JOIN_INNER)
+        return NIL;
+
+    outer_grp = (PgMemoGroup *) linitial(expr->inputs);
+    inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
+
+    outer_rel = pg_rule_join_get_child_rel(ctx, outer_grp);
+    inner_rel = pg_rule_join_get_child_rel(ctx, inner_grp);
+
+    if (outer_rel == NULL || inner_rel == NULL)
+        return NIL;
+
+    joinrel = make_join_rel(ctx->root, outer_rel, inner_rel);
+    if (joinrel == NULL)
+        return NIL;
+
+    set_cheapest(joinrel);
+
+    foreach(lc, joinrel->pathlist)
+    {
+        Path *path = (Path *) lfirst(lc);
+        if (path->pathtype == T_HashJoin)
+        {
+            PgGroupExpr *phys = pg_memo_new_group_expr(ctx,
+                                        PG_CASCADES_PHYSICAL_HASHJOIN);
+            phys->mode = PG_PHYS_EXPR_IMPORTED_PATH;
+            phys->op_private = path;
+            phys->inputs = NIL;
+            result = lappend(result, phys);
+        }
+    }
+    return result;
+}
+
+/*
+ * Phase 4 NestLoop: LogicalJoin → PhysicalNestLoop via make_join_rel
+ */
+static List *
+pg_rule_join_to_nestloop_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
+{
+    PgJoinPrivate *join_priv;
+    PgMemoGroup *outer_grp, *inner_grp;
+    RelOptInfo *outer_rel, *inner_rel, *joinrel;
+    List *result = NIL;
+    ListCell *lc;
+
+    if (list_length(expr->inputs) != 2)
+        return NIL;
+
+    join_priv = (PgJoinPrivate *) expr->op_private;
+    if (join_priv == NULL || join_priv->jointype != JOIN_INNER)
+        return NIL;
+
+    outer_grp = (PgMemoGroup *) linitial(expr->inputs);
+    inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
+
+    outer_rel = pg_rule_join_get_child_rel(ctx, outer_grp);
+    inner_rel = pg_rule_join_get_child_rel(ctx, inner_grp);
+
+    if (outer_rel == NULL || inner_rel == NULL)
+        return NIL;
+
+    joinrel = make_join_rel(ctx->root, outer_rel, inner_rel);
+    if (joinrel == NULL)
+        return NIL;
+
+    set_cheapest(joinrel);
+
+    foreach(lc, joinrel->pathlist)
+    {
+        Path *path = (Path *) lfirst(lc);
+        if (path->pathtype == T_NestLoop)
+        {
+            PgGroupExpr *phys = pg_memo_new_group_expr(ctx,
+                                        PG_CASCADES_PHYSICAL_NESTLOOP);
+            phys->mode = PG_PHYS_EXPR_IMPORTED_PATH;
+            phys->op_private = path;
+            phys->inputs = NIL;
+            result = lappend(result, phys);
+        }
+    }
+    return result;
+}
+
+/*
+ * Phase 4 MergeJoin: LogicalJoin → PhysicalMergeJoin via make_join_rel
+ */
+static List *
+pg_rule_join_to_mergejoin_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
+{
+    PgJoinPrivate *join_priv;
+    PgMemoGroup *outer_grp, *inner_grp;
+    RelOptInfo *outer_rel, *inner_rel, *joinrel;
+    List *result = NIL;
+    ListCell *lc;
+
+    if (list_length(expr->inputs) != 2)
+        return NIL;
+
+    join_priv = (PgJoinPrivate *) expr->op_private;
+    if (join_priv == NULL || join_priv->jointype != JOIN_INNER)
+        return NIL;
+
+    outer_grp = (PgMemoGroup *) linitial(expr->inputs);
+    inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
+
+    outer_rel = pg_rule_join_get_child_rel(ctx, outer_grp);
+    inner_rel = pg_rule_join_get_child_rel(ctx, inner_grp);
+
+    if (outer_rel == NULL || inner_rel == NULL)
+        return NIL;
+
+    joinrel = make_join_rel(ctx->root, outer_rel, inner_rel);
+    if (joinrel == NULL)
+        return NIL;
+
+    set_cheapest(joinrel);
+
+    foreach(lc, joinrel->pathlist)
+    {
+        Path *path = (Path *) lfirst(lc);
+        if (path->pathtype == T_MergeJoin)
+        {
+            PgGroupExpr *phys = pg_memo_new_group_expr(ctx,
+                                        PG_CASCADES_PHYSICAL_MERGEJOIN);
+            phys->mode = PG_PHYS_EXPR_IMPORTED_PATH;
+            phys->op_private = path;
+            phys->inputs = NIL;
+            result = lappend(result, phys);
+        }
+    }
+    return result;
 }

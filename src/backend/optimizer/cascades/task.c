@@ -427,14 +427,50 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             PgBinder *binder = (PgBinder *) lfirst(elc);
             List *new_exprs;
             ListCell *nlc;
+            int      old_logical_count;
 
             /* Set binder for this match */
             g_current_binder = binder;
             expr->explored_rules = bms_add_member(expr->explored_rules,
                                                    rule->rule_bit);
 
+            /* Record count before transform (for group merging detection) */
+            old_logical_count = list_length(expr->owner_group->logical_exprs);
+
             /* transform with this binder */
             new_exprs = rule->transform(ctx, expr);
+
+            /*
+             * Group merging detection: if transform returned NIL but the
+             * group now has more logical expressions, a group-merging
+             * rule was applied.  Push tasks for the new expressions.
+             */
+            if (new_exprs == NIL &&
+                list_length(expr->owner_group->logical_exprs) > old_logical_count)
+            {
+                int new_count = list_length(expr->owner_group->logical_exprs);
+                int i;
+
+                for (i = old_logical_count; i < new_count; i++)
+                {
+                    PgGroupExpr *newe = (PgGroupExpr *)
+                        list_nth(expr->owner_group->logical_exprs, i);
+                    PgOptimizerTask *t;
+
+                    t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
+                    t->type = PG_TASK_OPTIMIZE_EXPRESSION;
+                    t->expr = newe;
+                    t->group = expr->owner_group;
+                    task_stack_push(ctx, t);
+                }
+
+                if (ctx->debug)
+                    elog(NOTICE, "Cascades: rule '%s' merged %d expressions into group %d",
+                         rule->name, new_count - old_logical_count,
+                         expr->owner_group->id);
+
+                continue;  /* skip normal insert loop */
+            }
 
             /* insert into Memo */
             foreach(nlc, new_exprs)
@@ -474,6 +510,7 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
     {
         List *new_exprs;
         ListCell *lc;
+        int      old_logical_count;
 
         if (expr->op != rule->from_op)
             return PG_CASCADES_OK;
@@ -485,9 +522,47 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         expr->explored_rules = bms_add_member(expr->explored_rules,
                                                rule->rule_bit);
 
+        /* Record logical_exprs count before transform (for group merging detection) */
+        old_logical_count = list_length(expr->owner_group->logical_exprs);
+
         g_current_binder = NULL;
         new_exprs = rule->transform(ctx, expr);
         g_current_binder = NULL;
+
+        /*
+         * Phase 5: Group merging detection.
+         * If transform returned NIL but the owner group now has more
+         * logical expressions than before, a group-merging rule (like
+         * EliminateLimit D3 or EliminateAgg F1) has merged child group
+         * expressions into this group.  Push OptimizeExpressionTask for
+         * each newly added expression.
+         */
+        if (new_exprs == NIL &&
+            list_length(expr->owner_group->logical_exprs) > old_logical_count)
+        {
+            int new_count = list_length(expr->owner_group->logical_exprs);
+            int i;
+
+            for (i = old_logical_count; i < new_count; i++)
+            {
+                PgGroupExpr *new_expr = (PgGroupExpr *)
+                    list_nth(expr->owner_group->logical_exprs, i);
+                PgOptimizerTask *t;
+
+                t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
+                t->type = PG_TASK_OPTIMIZE_EXPRESSION;
+                t->expr = new_expr;
+                t->group = expr->owner_group;
+                task_stack_push(ctx, t);
+            }
+
+            if (ctx->debug)
+                elog(NOTICE, "Cascades: rule '%s' merged %d expressions into group %d",
+                     rule->name, new_count - old_logical_count,
+                     expr->owner_group->id);
+
+            return PG_CASCADES_OK;
+        }
 
         foreach(lc, new_exprs)
         {

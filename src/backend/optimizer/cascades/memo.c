@@ -208,6 +208,91 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
 }
 
 /*
+ * pg_memo_insert_expression_tree:
+ *    Convert a standalone PgGroupExpr * tree (from pg_cascades_build_initial_tree)
+ *    into proper Memo groups.  In the standalone tree, expr->inputs are
+ *    PgGroupExpr * (child expressions).  This function recursively creates
+ *    PgMemoGroup entries and replaces the inputs with PgMemoGroup * references.
+ *
+ *    After this call, the tree is fully in Memo and the rewrite pipeline
+ *    can operate on it via ctx->memo->root_group.
+ */
+PgMemoGroup *
+pg_memo_insert_expression_tree(PgPlannerCascadesContext *ctx,
+                                PgGroupExpr *tree_root)
+{
+    PgMemo *memo = ctx->memo;
+    ListCell *lc;
+    List     *new_inputs = NIL;
+    PgMemoGroup *group;
+
+    if (tree_root == NULL)
+        return NULL;
+
+    /* Step 1: Recursively process children first (bottom-up) */
+    foreach(lc, tree_root->inputs)
+    {
+        PgGroupExpr *child_expr = (PgGroupExpr *) lfirst(lc);
+        PgMemoGroup *child_group;
+
+        child_group = pg_memo_insert_expression_tree(ctx, child_expr);
+        if (child_group != NULL)
+            new_inputs = lappend(new_inputs, child_group);
+    }
+
+    /* Step 2: Replace inputs with PgMemoGroup * references */
+    tree_root->inputs = new_inputs;
+
+    /* Step 3: Insert this expression into Memo */
+    group = pg_memo_insert_expression(ctx, memo, tree_root, NULL);
+
+    /*
+     * Phase 6: If this is a LogicalScan whose op_private points to a
+     * valid PG RelOptInfo, bridge the standalone OptExpression tree
+     * with PG's lower path generation (make_one_rel).  Populate the
+     * group with physical path candidates and set rel/rows/width.
+     *
+     * Without this, tree-created groups have NULL rel pointers which
+     * causes SIGSEGV when the task scheduler dereferences group->rel.
+     */
+    if (group != NULL && tree_root->op == PG_CASCADES_LOGICAL_SCAN &&
+        tree_root->op_private != NULL)
+    {
+        RelOptInfo *rel = (RelOptInfo *) tree_root->op_private;
+        ListCell   *lc;
+
+        group->rel = rel;
+        group->rows = rel->rows;
+        group->width = rel->width;
+
+        /* Import PG paths as physical expression candidates */
+        foreach(lc, rel->pathlist)
+        {
+            Path            *path = (Path *) lfirst(lc);
+            PgGroupExpr     *phys_expr;
+            PgCascadesOpKind op;
+
+            op = pg_cascades_pathtype_to_opkind(path->pathtype);
+            if ((int) op < 0)
+                continue;
+
+            phys_expr = pg_memo_new_group_expr(ctx, op);
+            phys_expr->mode = PG_PHYS_EXPR_IMPORTED_PATH;
+            phys_expr->op_private = path;
+            phys_expr->inputs = NIL;
+
+            pg_memo_add_physical_expr(group, phys_expr);
+        }
+    }
+
+    /* Set root_group if this is the top-level call */
+    if (group != NULL)
+        memo->root_group = group;
+
+    return group;
+}
+
+/*
  * pg_memo_init:
  *   从 logical root expression 初始化 Memo。
  *   递归创建所有 Group 和 GroupExpression。
@@ -335,6 +420,98 @@ pg_memo_derive_logical_property(PgMemo *memo, PgMemoGroup *group,
     }
 }
 
+/*
+ * pg_memo_derive_logical_property_v2:
+ *    Phase 4: Derive PgLogicalProperty for every group bottom-up.
+ *    Fills group->logical_prop with relids, output_columns, etc.
+ */
+void
+pg_memo_derive_logical_property_v2(PgMemo *memo, PgPlannerCascadesContext *ctx)
+{
+    ListCell *lc;
+
+    /* Bottom-up: iterate groups in reverse order (children first) */
+    foreach(lc, memo->groups)
+    {
+        PgMemoGroup *group = (PgMemoGroup *) lfirst(lc);
+        ListCell   *elc;
+
+        /* Already derived? */
+        if (group->logical_prop.relids != NULL)
+            continue;
+
+        /* Find the first logical expression to derive from */
+        foreach(elc, group->logical_exprs)
+        {
+            PgGroupExpr *expr = (PgGroupExpr *) lfirst(elc);
+            PgLogicalProperty prop;
+
+            MemSet(&prop, 0, sizeof(PgLogicalProperty));
+
+            switch (expr->op)
+            {
+                case PG_CASCADES_LOGICAL_SCAN:
+                    if (group->rel != NULL)
+                    {
+                        prop.relids = bms_copy(group->rel->relids);
+                        prop.rows = group->rel->rows;
+                        prop.width = group->rel->width;
+                    }
+                    break;
+
+                case PG_CASCADES_LOGICAL_JOIN:
+                    {
+                        PgMemoGroup *outer, *inner;
+                        if (list_length(expr->inputs) >= 2)
+                        {
+                            outer = (PgMemoGroup *) linitial(expr->inputs);
+                            inner = (PgMemoGroup *) lsecond(expr->inputs);
+                            prop.relids = bms_union(
+                                bms_copy(outer->logical_prop.relids),
+                                inner->logical_prop.relids);
+                            prop.rows = outer->rows * inner->rows * 0.1;
+                            prop.width = outer->width + inner->width;
+                        }
+                    }
+                    break;
+
+                case PG_CASCADES_LOGICAL_PROJECT:
+                case PG_CASCADES_LOGICAL_FILTER:
+                case PG_CASCADES_LOGICAL_DISTINCT:
+                case PG_CASCADES_LOGICAL_SORT:
+                case PG_CASCADES_LOGICAL_LIMIT:
+                    if (list_length(expr->inputs) >= 1)
+                    {
+                        PgMemoGroup *child = (PgMemoGroup *) linitial(expr->inputs);
+                        prop.relids = bms_copy(child->logical_prop.relids);
+                        prop.rows = child->rows;
+                        prop.width = child->width;
+                    }
+                    break;
+
+                case PG_CASCADES_LOGICAL_AGG:
+                    if (ctx->upper != NULL)
+                    {
+                        if (list_length(expr->inputs) >= 1)
+                        {
+                            PgMemoGroup *child = (PgMemoGroup *) linitial(expr->inputs);
+                            prop.relids = bms_copy(child->logical_prop.relids);
+                        }
+                        prop.rows = ctx->upper->dNumGroups;
+                    }
+                    break;
+
+                default:
+                    break;
+            }
+
+            /* Store derived property */
+            group->logical_prop = prop;
+            break;
+        }
+    }
+}
+
 /* ========================================================================
  * Phase 5: Group-to-RelOptInfo mapping helpers
  * ======================================================================== */
@@ -417,4 +594,122 @@ pg_cascades_group_relids(PgPlannerCascadesContext *ctx, PgMemoGroup *group)
     }
 
     return result;
+}
+
+/* ========================================================================
+ * Phase 5: Group Merging
+ *
+ * pg_memo_merge_group:
+ *   Merge all logical expressions from source group into target group.
+ *   This is used by rules like EliminateLimit (D3) and EliminateAgg (F1)
+ *   where a no-op logical node's child group is equivalent to the
+ *   current group — instead of creating a new expression that references
+ *   the child, we move the child's expressions directly into the target.
+ *
+ *   After merging:
+ *   - Source group's logical_exprs are appended to target's logical_exprs
+ *   - Each merged expression's owner_group is updated to target
+ *   - Source group is left empty (its expressions are now owned by target)
+ *   - Target group inherits source group's rows/width/rel if unset
+ *
+ *   Important: This is a one-way operation. The source group is effectively
+ *   "consumed" by the target group. This only makes sense for simple
+ *   single-child no-op nodes like Limit (when no LIMIT) and Agg (when no
+ *   aggregation).
+ * ======================================================================== */
+
+void
+pg_memo_merge_group(PgPlannerCascadesContext *ctx,
+                     PgMemoGroup *target, PgMemoGroup *source)
+{
+    ListCell *lc;
+    ListCell *gc;
+
+    if (source == NULL || target == NULL || source == target)
+        return;
+
+    /*
+     * Phase 6: Before moving expressions, update all inputs references
+     * in other groups that point to 'source' to instead point to 'target'.
+     * Without this fix, tree-based Memo groups would have dangling
+     * inputs pointers after merge, causing SIGSEGV in the task scheduler
+     * when it tries to optimize an empty (merged-away) child group.
+     *
+     * IMPORTANT: Skip expressions in the TARGET group itself — those
+     * intentionally reference the source (e.g., EliminateLimit merges
+     * its child into itself, and the parent's expression inputs should
+     * NOT be updated to self-reference, which would create a cycle).
+     */
+    foreach(gc, ctx->memo->groups)
+    {
+        PgMemoGroup *g = (PgMemoGroup *) lfirst(gc);
+        ListCell   *ec;
+
+        /* Skip target group — its expressions intentionally point to source */
+        if (g == target)
+            continue;
+
+        foreach(ec, g->logical_exprs)
+        {
+            PgGroupExpr *expr = (PgGroupExpr *) lfirst(ec);
+            ListCell   *ic;
+
+            foreach(ic, expr->inputs)
+            {
+                if ((PgMemoGroup *) lfirst(ic) == source)
+                    lfirst(ic) = target;
+            }
+        }
+        foreach(ec, g->physical_exprs)
+        {
+            PgGroupExpr *expr = (PgGroupExpr *) lfirst(ec);
+            ListCell   *ic;
+
+            foreach(ic, expr->inputs)
+            {
+                if ((PgMemoGroup *) lfirst(ic) == source)
+                    lfirst(ic) = target;
+            }
+        }
+    }
+
+    /* Move logical expressions from source to target */
+    foreach(lc, source->logical_exprs)
+    {
+        PgGroupExpr *expr = (PgGroupExpr *) lfirst(lc);
+        expr->owner_group = target;
+        target->logical_exprs = lappend(target->logical_exprs, expr);
+    }
+
+    /* Move physical expressions too (if any) */
+    foreach(lc, source->physical_exprs)
+    {
+        PgGroupExpr *expr = (PgGroupExpr *) lfirst(lc);
+        expr->owner_group = target;
+        target->physical_exprs = lappend(target->physical_exprs, expr);
+    }
+
+    /* Merge best entries */
+    foreach(lc, source->best_entries)
+    {
+        PgGroupBestEntry *entry = (PgGroupBestEntry *) lfirst(lc);
+        target->best_entries = lappend(target->best_entries, entry);
+    }
+
+    /* Inherit rows/width/rel from source if target doesn't have them */
+    if (target->rows <= 0 && source->rows > 0)
+        target->rows = source->rows;
+    if (target->width <= 0 && source->width > 0)
+        target->width = source->width;
+    if (target->rel == NULL && source->rel != NULL)
+        target->rel = source->rel;
+
+    /* Clear source (expressions are now owned by target) */
+    source->logical_exprs = NIL;
+    source->physical_exprs = NIL;
+    source->best_entries = NIL;
+
+    if (ctx->debug)
+        elog(NOTICE, "Cascades: merged group %d into group %d",
+             source->id, target->id);
 }
