@@ -6,21 +6,14 @@
 
 #include "postgres.h"
 #include "optimizer/cascades.h"
+#include "optimizer/paths.h"
+#include "optimizer/pathnode.h"
 #include "utils/memutils.h"
 #include "utils/hsearch.h"
 
 /* ========================================================================
  * Hash Table for GroupExpression Dedup
  * ======================================================================== */
-
-#define PG_MEMO_HASH_MAX_INPUTS 4
-
-typedef struct PgExprHashKey
-{
-    PgCascadesOpKind op;
-    int32           num_inputs;
-    int32           group_ids[PG_MEMO_HASH_MAX_INPUTS];
-} PgExprHashKey;
 
 static uint32
 pg_memo_hash_key(const void *key_ptr, Size keysize)
@@ -177,7 +170,30 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
      * - Otherwise create a new group (pg_adapter building logical tree).
      */
     if (parent_group != NULL)
+    {
         group = parent_group;
+
+        /*
+         * Phase 4: Local dedup — check if an equivalent logical expression
+         * already exists in this group.  This closes the loop where
+         * JoinCommutativity would otherwise create A⋈B → B⋈A → A⋈B → ...
+         * infinitely.  Global hash table handles cross-group dedup.
+         */
+        if ((int)expr->op < PG_CASCADES_PHYSICAL_SEQSCAN)
+        {
+            ListCell *lc;
+            foreach(lc, group->logical_exprs)
+            {
+                PgGroupExpr *existing = (PgGroupExpr *) lfirst(lc);
+                if (existing->expr_hash == expr->expr_hash &&
+                    existing->op == expr->op)
+                {
+                    /* Already have this expression — skip */
+                    return group;
+                }
+            }
+        }
+    }
     else
         group = pg_memo_new_group(ctx);
 
@@ -201,10 +217,9 @@ pg_memo_init(PgPlannerCascadesContext *ctx, PgGroupExpr *logical_root)
 {
     PgMemo     *memo;
     MemoryContext old_cxt;
+    HASHCTL     hash_ctl;
 
     old_cxt = MemoryContextSwitchTo(ctx->memo_cxt);
-
-    HASHCTL hash_ctl;
 
     memo = (PgMemo *) palloc0(sizeof(PgMemo));
     memo->context = ctx->memo_cxt;
@@ -318,4 +333,88 @@ pg_memo_derive_logical_property(PgMemo *memo, PgMemoGroup *group,
         /* 只取第一个 logical expression 的结果 */
         break;
     }
+}
+
+/* ========================================================================
+ * Phase 5: Group-to-RelOptInfo mapping helpers
+ * ======================================================================== */
+
+/*
+ * pg_cascades_group_to_rel:
+ *   尝试将 PgMemoGroup 映射到 PG RelOptInfo。
+ *   对 base rel group 直接返回 group->rel。
+ *   对 join group：如果 children 都有 rel，调用 make_join_rel。
+ */
+RelOptInfo *
+pg_cascades_group_to_rel(PgPlannerCascadesContext *ctx, PgMemoGroup *group)
+{
+    ListCell *lc;
+
+    if (group->rel != NULL)
+        return group->rel;
+
+    /* 尝试从 children 推导 joinrel */
+    foreach(lc, group->logical_exprs)
+    {
+        PgGroupExpr *expr = (PgGroupExpr *) lfirst(lc);
+
+        if (expr->op != PG_CASCADES_LOGICAL_JOIN)
+            continue;
+        if (list_length(expr->inputs) != 2)
+            continue;
+
+        {
+            PgMemoGroup *outer_grp = (PgMemoGroup *) linitial(expr->inputs);
+            PgMemoGroup *inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
+            RelOptInfo *outer_rel = pg_cascades_group_to_rel(ctx, outer_grp);
+            RelOptInfo *inner_rel = pg_cascades_group_to_rel(ctx, inner_grp);
+
+            if (outer_rel != NULL && inner_rel != NULL)
+            {
+                RelOptInfo *joinrel;
+
+                joinrel = make_join_rel(ctx->root, outer_rel, inner_rel);
+                if (joinrel != NULL)
+                {
+                    set_cheapest(joinrel);
+                    group->rel = joinrel;
+                    return joinrel;
+                }
+            }
+        }
+    }
+
+    return NULL;
+}
+
+/*
+ * pg_cascades_group_relids:
+ *   返回 group 涉及的 base rel OID 集合。
+ */
+Relids
+pg_cascades_group_relids(PgPlannerCascadesContext *ctx, PgMemoGroup *group)
+{
+    Relids   result = NULL;
+    ListCell *lc;
+
+    if (group->rel != NULL)
+        return bms_copy(group->rel->relids);
+
+    /* join/upper group：从 children 合并 */
+    foreach(lc, group->logical_exprs)
+    {
+        PgGroupExpr *expr = (PgGroupExpr *) lfirst(lc);
+        ListCell   *ic;
+
+        foreach(ic, expr->inputs)
+        {
+            PgMemoGroup *child = (PgMemoGroup *) lfirst(ic);
+            Relids child_relids = pg_cascades_group_relids(ctx, child);
+
+            if (child_relids != NULL)
+                result = bms_union(result, child_relids);
+        }
+    }
+
+    return result;
 }

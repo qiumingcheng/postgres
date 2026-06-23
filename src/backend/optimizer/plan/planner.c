@@ -400,6 +400,25 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	root->hasPseudoConstantQuals = false;
 
 	/*
+	 * Phase 6: Attempt scalar subquery decorrelation before SS_process_sublinks
+	 * converts remaining SubLinks to SubPlans.  If decorrelation fails for any
+	 * reason, we silently continue — the SubPlan will be handled by PG normally.
+	 */
+	if (enable_cascades_planner)
+	{
+		PG_TRY();
+		{
+			pg_cascades_decorrelate_subqueries(root);
+		}
+		PG_CATCH();
+		{
+			/* Decorrelation failed — continue with normal SubPlan path */
+			FlushErrorState();
+		}
+		PG_END_TRY();
+	}
+
+	/*
 	 * Do expression preprocessing on targetlist and quals, as well as other
 	 * random expressions in the querytree.  Note that we do not need to
 	 * handle sort/group expressions explicitly, because they are actually

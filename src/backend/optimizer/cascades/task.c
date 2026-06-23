@@ -209,32 +209,74 @@ pg_task_optimize_expression(PgPlannerCascadesContext *ctx, PgOptimizerTask *task
     int         i;
 
     /* Step 1: push ApplyRuleTask for each applicable rule */
-    /* Implementation rules */
+    /* Implementation rules — high promise first (already sorted) */
     for (i = 0; i < ctx->num_impl_rules; i++)
     {
-        if (ctx->impl_rules[i].from_op == expr->op)
+        PgRule *rule = &ctx->impl_rules[i];
+        bool    matches = false;
+
+        /* Phase 5: pattern-based matching */
+        if (rule->pattern != NULL)
+        {
+            ListCell *elc;
+            matches = false;
+            foreach(elc, expr->owner_group->logical_exprs)
+            {
+                PgGroupExpr *cand = (PgGroupExpr *) lfirst(elc);
+                if (pg_pattern_match_root_only(rule->pattern, cand) != NIL)
+                {
+                    matches = true;
+                    break;
+                }
+            }
+        }
+        else if (rule->from_op == expr->op)
+            matches = true;
+
+        if (matches)
         {
             PgOptimizerTask *t;
 
             t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
             t->type = PG_TASK_APPLY_RULE;
             t->expr = expr;
-            t->rule = &ctx->impl_rules[i];
+            t->rule = rule;
             task_stack_push(ctx, t);
         }
     }
 
-    /* Transformation rules (Phase 3) */
+    /* Transformation rules — high promise first (already sorted) */
     for (i = 0; i < ctx->num_trans_rules; i++)
     {
-        if (ctx->trans_rules[i].from_op == expr->op)
+        PgRule *rule = &ctx->trans_rules[i];
+        bool    matches = false;
+
+        /* Phase 5: pattern-based matching */
+        if (rule->pattern != NULL)
+        {
+            ListCell *elc;
+            matches = false;
+            foreach(elc, expr->owner_group->logical_exprs)
+            {
+                PgGroupExpr *cand = (PgGroupExpr *) lfirst(elc);
+                if (pg_pattern_match_root_only(rule->pattern, cand) != NIL)
+                {
+                    matches = true;
+                    break;
+                }
+            }
+        }
+        else if (rule->from_op == expr->op)
+            matches = true;
+
+        if (matches)
         {
             PgOptimizerTask *t;
 
             t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
             t->type = PG_TASK_APPLY_RULE;
             t->expr = expr;
-            t->rule = &ctx->trans_rules[i];
+            t->rule = rule;
             task_stack_push(ctx, t);
         }
     }
@@ -334,58 +376,145 @@ pg_cascades_push_enforce_and_cost_tasks(PgPlannerCascadesContext *ctx,
     }
 }
 
+/* ========================================================================
+ * Phase 5: Binder helper for pattern-based rules
+ * ======================================================================== */
+
+static PgBinder *g_current_binder = NULL;
+
+PgBinder *
+pg_cascades_get_current_binder(PgPlannerCascadesContext *ctx)
+{
+    (void) ctx;
+    return g_current_binder;
+}
+
+/* ========================================================================
+ * ApplyRuleTask
+ *
+ * Phase 5: supports both from_op matching (legacy) and pattern-based
+ * matching. When rule->pattern != NULL, pg_pattern_bind is called first
+ * and the result is stored in task->binder for the transform function
+ * to access via pg_cascades_get_current_binder().
+ * ======================================================================== */
+
 static PgCascadesStatus
 pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
 {
     PgRule     *rule = (PgRule *) task->rule;
     PgGroupExpr *expr = task->expr;
-    List       *new_exprs;
-    ListCell   *lc;
 
-    /* check from_op match */
-    if (expr->op != rule->from_op)
-        return PG_CASCADES_OK;
-
-    /* Dual BitSet: skip if this rule already explored on this expression */
-    if (bms_is_member(rule->rule_bit, expr->explored_rules))
-        return PG_CASCADES_OK;
-
-    /* mark rule as explored before transform */
-    expr->explored_rules = bms_add_member(expr->explored_rules, rule->rule_bit);
-
-    /* transform */
-    new_exprs = rule->transform(ctx, expr);
-
-    /* insert into Memo */
-    foreach(lc, new_exprs)
+    /* Phase 5: pattern-based matching — enumerate all matches */
+    if (rule->pattern != NULL)
     {
-        PgGroupExpr *new_expr = (PgGroupExpr *) lfirst(lc);
-        PgMemoGroup *group;
+        ListCell *elc;
+        List *all_binders = NIL;
 
-        CHECK_FOR_INTERRUPTS();
+        /* Try matching pattern against each logical expression in the group */
+        foreach(elc, expr->owner_group->logical_exprs)
+        {
+            PgGroupExpr *candidate = (PgGroupExpr *) lfirst(elc);
+            List *binders = pg_pattern_match_full(rule->pattern, candidate);
+            if (binders != NIL)
+                all_binders = list_concat(all_binders, binders);
+        }
+        if (all_binders == NIL)
+            return PG_CASCADES_OK;  /* pattern doesn't match */
 
-        /* lineage: new_expr inherits parent's applied_rules + this rule */
-        new_expr->applied_rules = bms_add_member(expr->applied_rules,
+        /* Process each match */
+        foreach(elc, all_binders)
+        {
+            PgBinder *binder = (PgBinder *) lfirst(elc);
+            List *new_exprs;
+            ListCell *nlc;
+
+            /* Set binder for this match */
+            g_current_binder = binder;
+            expr->explored_rules = bms_add_member(expr->explored_rules,
                                                    rule->rule_bit);
 
-        group = pg_memo_insert_expression(ctx, ctx->memo, new_expr,
-                                           expr->owner_group);
+            /* transform with this binder */
+            new_exprs = rule->transform(ctx, expr);
 
-        if (group == NULL)
-            continue;  /* duplicate — skip */
+            /* insert into Memo */
+            foreach(nlc, new_exprs)
+            {
+                PgGroupExpr *new_expr = (PgGroupExpr *) lfirst(nlc);
+                PgMemoGroup *group;
 
-        if (rule->is_implementation)
-            pg_cascades_push_enforce_and_cost_tasks(ctx, group, new_expr);
-        else
+                CHECK_FOR_INTERRUPTS();
+
+                new_expr->applied_rules = bms_add_member(
+                    expr->applied_rules, rule->rule_bit);
+
+                group = pg_memo_insert_expression(ctx, ctx->memo,
+                                                   new_expr, expr->owner_group);
+                if (group == NULL)
+                    continue;
+
+                if (rule->rule_type == PG_RULE_IMPL)
+                    pg_cascades_push_enforce_and_cost_tasks(ctx, group, new_expr);
+                else
+                {
+                    PgOptimizerTask *t;
+                    t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
+                    t->type = PG_TASK_OPTIMIZE_EXPRESSION;
+                    t->expr = new_expr;
+                    t->group = group;
+                    task_stack_push(ctx, t);
+                }
+            }
+        }
+
+        g_current_binder = NULL;
+        return PG_CASCADES_OK;
+    }
+
+    /* Legacy from_op matching (rules without pattern) */
+    {
+        List *new_exprs;
+        ListCell *lc;
+
+        if (expr->op != rule->from_op)
+            return PG_CASCADES_OK;
+
+        /* Dual BitSet: skip if already explored */
+        if (bms_is_member(rule->rule_bit, expr->explored_rules))
+            return PG_CASCADES_OK;
+
+        expr->explored_rules = bms_add_member(expr->explored_rules,
+                                               rule->rule_bit);
+
+        g_current_binder = NULL;
+        new_exprs = rule->transform(ctx, expr);
+        g_current_binder = NULL;
+
+        foreach(lc, new_exprs)
         {
-            /* new logical expr → push OptimizeExpressionTask */
-            PgOptimizerTask *t;
+            PgGroupExpr *new_expr = (PgGroupExpr *) lfirst(lc);
+            PgMemoGroup *group;
 
-            t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
-            t->type = PG_TASK_OPTIMIZE_EXPRESSION;
-            t->expr = new_expr;
-            t->group = group;
-            task_stack_push(ctx, t);
+            CHECK_FOR_INTERRUPTS();
+
+            new_expr->applied_rules = bms_add_member(expr->applied_rules,
+                                                       rule->rule_bit);
+
+            group = pg_memo_insert_expression(ctx, ctx->memo, new_expr,
+                                               expr->owner_group);
+            if (group == NULL)
+                continue;
+
+            if (rule->rule_type == PG_RULE_IMPL)
+                pg_cascades_push_enforce_and_cost_tasks(ctx, group, new_expr);
+            else
+            {
+                PgOptimizerTask *t;
+                t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
+                t->type = PG_TASK_OPTIMIZE_EXPRESSION;
+                t->expr = new_expr;
+                t->group = group;
+                task_stack_push(ctx, t);
+            }
         }
     }
 
@@ -633,27 +762,66 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
              * doesn't satisfy them, insert a PhysicalSort on top
              * of the child group.
              *
-             * Strategy: for each single-child COMPOSABLE_OP,
-             * create a Sort enforcer expression, push its
-             * EnforceAndCostTask, and let LIFO handle it.
-             * The enforcer's best entry will then be available
-             * when we resume.
+             * Phase 5 fix: dedup check — don't create duplicate Sort
+             * enforcers for the same (child_group, pathkeys) pair.
+             * Also skip creating Sort on top of Sort (Sort(Sort) is
+             * redundant).
              */
             if (list_length(expr->inputs) == 1 &&
-                required->pathkeys != NIL)
+                required->pathkeys != NIL &&
+                expr->op != PG_CASCADES_PHYSICAL_SORT)  /* skip Sort-on-Sort */
             {
                 PgMemoGroup *child_group;
                 PgGroupExpr *sort_expr;
                 PgOptimizerTask *enforcer_task;
+                ListCell   *lc;
+                bool        already_exists = false;
 
                 child_group = (PgMemoGroup *) linitial(expr->inputs);
+
+                /* Phase 5: dedup — check if Sort enforcer already exists */
+                foreach(lc, child_group->physical_exprs)
+                {
+                    PgGroupExpr *pex = (PgGroupExpr *) lfirst(lc);
+                    PgSortPrivate *sp;
+
+                    if (pex->op != PG_CASCADES_PHYSICAL_SORT)
+                        continue;
+                    if (list_length(pex->inputs) != 1)
+                        continue;
+                    /* Same child? */
+                    if (linitial(pex->inputs) != linitial(expr->inputs))
+                        continue;
+                    /* Check pathkeys via op_private */
+                    sp = (PgSortPrivate *) pex->op_private;
+                    if (sp != NULL && sp->pathkeys == required->pathkeys)
+                    {
+                        already_exists = true;
+                        break;
+                    }
+                }
+
+                if (already_exists)
+                {
+                    /* Sort enforcer already exists for this (group, pathkeys) */
+                    task->enforce_state = ENFORCE_COMPLETE;
+                    return PG_CASCADES_OK;
+                }
 
                 /* Build PhysicalSort on child group */
                 sort_expr = pg_memo_new_group_expr(ctx,
                                     PG_CASCADES_PHYSICAL_SORT);
                 sort_expr->mode = PG_PHYS_EXPR_COMPOSABLE_OP;
                 sort_expr->inputs = list_make1(child_group);
-                sort_expr->op_private = ctx->upper;
+
+                /* Store pathkeys in PgSortPrivate */
+                {
+                    PgSortPrivate *sp = (PgSortPrivate *)
+                        palloc(sizeof(PgSortPrivate));
+                    sp->pathkeys = required->pathkeys;
+                    sp->limit_tuples = required->limit_tuples;
+                    sort_expr->op_private = sp;
+                }
 
                 /* Insert into child group */
                 pg_memo_add_physical_expr(child_group, sort_expr);

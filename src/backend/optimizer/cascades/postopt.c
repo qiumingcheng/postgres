@@ -6,6 +6,7 @@
 
 #include "postgres.h"
 #include "optimizer/cascades.h"
+#include "optimizer/planmain.h"
 #include "nodes/plannodes.h"
 
 /* ========================================================================
@@ -119,10 +120,14 @@ pg_cascades_validate_plan(Plan *plan)
 /*
  * pg_cascades_physical_rewrite_recurse:
  *   Recursively apply post-optimization physical rewrites (bottom-up).
- *   Currently a skeleton — recurses into children, applies no rewrites.
  *
- *   Future rewrites (when PG helpers are exposed):
- *     - Materialize on NestLoop inner for non-rescannable scans
+ *   Implemented rewrites:
+ *     1. Materialize on NestLoop inner: If the inner side of a NestLoop
+ *        is not a Material node and is not inherently rescannable
+ *        (i.e., not a simple SeqScan/IndexScan), insert a Material node.
+ *        This prevents expensive re-execution of the inner plan.
+ *
+ *   Future rewrites:
  *     - Pre-aggregate pushdown (partial agg)
  *     - Skew join detection and adjustment
  */
@@ -139,10 +144,88 @@ pg_cascades_physical_rewrite_recurse(PgPlannerCascadesContext *ctx, Plan *plan)
                                                             plan->righttree);
 
     /*
-     * Future rewrite rules go here.
-     * The required PG helpers (make_material etc.) are static in
-     * createplan.c and need to be exposed before these can be enabled.
+     * Rewrite 1: Materialize on NestLoop inner side.
+     *
+     * In PostgreSQL, the inner side of a NestLoop is rescanned for each
+     * outer row.  If the inner plan is expensive to re-execute (e.g., a
+     * Sort or HashAgg), we should insert a Material node to cache the
+     * result.  PG's create_nestloop_plan already does this for paths,
+     * but Cascades-extracted plans may not have this applied.
+     *
+     * We check:
+     *   - Is this a NestLoop?
+     *   - Is the inner side NOT already a Material?
+     *   - Is the inner plan NOT inherently rescannable?
+     *
+     * Rescannable plan types (can re-execute cheaply):
+     *   SeqScan, IndexScan, IndexOnlyScan, BitmapHeapScan, TidScan,
+     *   FunctionScan, ValuesScan, Material (already materialized),
+     *   Result (when it's just a projection)
      */
+    if (IsA(plan, NestLoop) && plan->righttree != NULL)
+    {
+        Plan *inner = plan->righttree;
+
+        /* Don't double-materialize */
+        if (!IsA(inner, Material))
+        {
+            bool needs_material = false;
+
+            switch (nodeTag(inner))
+            {
+                /* Inherently rescannable — no material needed */
+                case T_SeqScan:
+                case T_IndexScan:
+                case T_IndexOnlyScan:
+                case T_BitmapHeapScan:
+                case T_TidScan:
+                case T_FunctionScan:
+                case T_ValuesScan:
+                case T_Material:
+                case T_CteScan:
+                case T_WorkTableScan:
+                    needs_material = false;
+                    break;
+
+                /* Result is rescannable if it's just a projection */
+                case T_Result:
+                    if (inner->lefttree == NULL)
+                        needs_material = false;  /* constant Result */
+                    else
+                        needs_material = true;   /* Result with subplan */
+                    break;
+
+                /* All other types: need materialization */
+                case T_Sort:
+                case T_Agg:
+                case T_Group:
+                case T_Hash:
+                case T_Unique:
+                case T_WindowAgg:
+                case T_SetOp:
+                case T_NestLoop:
+                case T_MergeJoin:
+                case T_HashJoin:
+                case T_SubqueryScan:
+                case T_ForeignScan:
+                case T_Append:
+                case T_MergeAppend:
+                default:
+                    needs_material = true;
+                    break;
+            }
+
+            if (needs_material)
+            {
+                plan->righttree = materialize_finished_plan(inner);
+
+                if (ctx->debug)
+                    elog(NOTICE, "Cascades postopt: inserted Material on "
+                         "NestLoop inner (inner type=%d)",
+                         (int) nodeTag(inner));
+            }
+        }
+    }
 
     return plan;
 }

@@ -54,11 +54,21 @@ pg_cascades_build_memo_path_import(PgPlannerCascadesContext *ctx)
     /* Create Memo */
     {
         MemoryContext old_cxt = MemoryContextSwitchTo(ctx->memo_cxt);
+        HASHCTL hash_ctl;
 
         memo = (PgMemo *) palloc0(sizeof(PgMemo));
         memo->context = ctx->memo_cxt;
         memo->groups = NIL;
-        memo->group_expr_table = NULL;
+
+        /* Phase 4: Create hash table for GroupExpression dedup */
+        MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+        hash_ctl.keysize = sizeof(PgExprHashKey);
+        hash_ctl.entrysize = sizeof(PgExprHashKey);
+        hash_ctl.hcxt = ctx->memo_cxt;
+        memo->group_expr_table = hash_create("Memo GroupExpr Table", 256,
+                                              &hash_ctl,
+                                              HASH_ELEM | HASH_CONTEXT);
+
         ctx->memo = memo;
 
         MemoryContextSwitchTo(old_cxt);
@@ -323,10 +333,21 @@ pg_cascades_build_memo_phase3(PgPlannerCascadesContext *ctx)
     /* Create Memo */
     old_cxt = MemoryContextSwitchTo(ctx->memo_cxt);
 
+    HASHCTL hash_ctl;
+
     memo = (PgMemo *) palloc0(sizeof(PgMemo));
     memo->context = ctx->memo_cxt;
     memo->groups = NIL;
-    memo->group_expr_table = NULL;
+
+    /* Phase 4: Create hash table for GroupExpression dedup */
+    MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+    hash_ctl.keysize = sizeof(PgExprHashKey);
+    hash_ctl.entrysize = sizeof(PgExprHashKey);
+    hash_ctl.hcxt = ctx->memo_cxt;
+    memo->group_expr_table = hash_create("Memo GroupExpr Table", 256,
+                                          &hash_ctl,
+                                          HASH_ELEM | HASH_CONTEXT);
+
     ctx->memo = memo;
 
     MemoryContextSwitchTo(old_cxt);

@@ -138,6 +138,7 @@ struct PgRequiredProperty
     Relids      required_outer;     /* 参数化路径依赖 */
     double      tuple_fraction;     /* row goal: LIMIT / cursor / EXISTS */
     double      limit_tuples;       /* LIMIT 行数 */
+    Bitmapset  *required_columns;   /* Phase5: 上层需要的列 (Var varattno 集合) */
 };
 
 /* Output Property: 物理表达式实际输出的属性 */
@@ -209,6 +210,10 @@ typedef enum PgEnforceState
     ENFORCE_COMPLETE            /* 完成 */
 } PgEnforceState;
 
+/* Forward declarations for types used in PgOptimizerTask and PgRule */
+typedef struct PgPattern  PgPattern;
+typedef struct PgBinder   PgBinder;
+
 /* OptimizerTask: task scheduler 栈中的任务 */
 struct PgOptimizerTask
 {
@@ -229,23 +234,58 @@ struct PgOptimizerTask
     List       *child_required_props; /* per-child required properties */
     double      total_cost;         /* accumulated cost */
     double      startup_cost;       /* startup cost */
+
+    /* Phase 5: Pattern binding result */
+    PgBinder   *binder;             /* Pattern 绑定结果（仅 pattern-based 规则使用） */
 };
 
 /* Rule: 一条变换规则 */
 typedef bool (*PgRuleMatchFn)(PgGroupExpr *expr);
 typedef List *(*PgRuleTransformFn)(PgPlannerCascadesContext *ctx, PgGroupExpr *expr);
 
+/* Phase 5: 规则类型 */
+typedef enum PgRuleType
+{
+    PG_RULE_IMPL,            /* 实现规则: Logical → Physical */
+    PG_RULE_TRANS,           /* 变换规则: Logical → Logical */
+    PG_RULE_ENFORCER         /* Enforcer: 插入 Sort 等 */
+} PgRuleType;
+
 struct PgRule
 {
     const char *name;
-    PgRuleMatchFn     match;        /* 匹配函数，第一版可为 NULL */
+    PgRuleMatchFn     match;        /* 匹配函数，可为 NULL */
     PgRuleTransformFn transform;    /* 变换函数 */
-    bool        is_implementation;  /* true=implementation, false=transformation */
-    PgCascadesOpKind from_op;       /* 匹配的 logical op kind */
-    PgCascadesOpKind to_op;        /* 目标 op kind */
-    int         rule_bit;          /* Phase 4: rule index for BitSet */
-    double      promise;           /* Phase 4: expected benefit 0..1 */
+
+    PgRuleType   rule_type;         /* Phase 5: PG_RULE_IMPL/TRANS/ENFORCER */
+
+    /* 匹配方式：pattern 优先于 from_op */
+    PgPattern       *pattern;       /* Phase 5: 多节点 Pattern */
+    PgCascadesOpKind from_op;       /* 单节点匹配（pattern==NULL 时使用） */
+    PgCascadesOpKind to_op;         /* 目标 op kind（仅 rule_type==IMPL 有效） */
+
+    int         rule_bit;           /* Phase 4: rule index for BitSet */
+    double      promise;            /* Phase 4: expected benefit 0..1 */
 };
+
+/* ========================================================================
+ * Phase 5: Rule 私有数据结构
+ * ======================================================================== */
+
+/* PgJoinPrivate: LogicalJoin/PhysicalJoin 的 op_private */
+typedef struct PgJoinPrivate
+{
+    JoinType    jointype;           /* JOIN_INNER, JOIN_LEFT, etc. */
+    List       *restrictlist;       /* join qual RestrictInfo list */
+    List       *joinlist;           /* deconstruct_jointree 的子 joinlist */
+} PgJoinPrivate;
+
+/* PgSortPrivate: LogicalSort/PhysicalSort 的 op_private */
+typedef struct PgSortPrivate
+{
+    List       *pathkeys;           /* canonical PathKey list */
+    double      limit_tuples;       /* 0 = 无 limit, >0 = TopN bound */
+} PgSortPrivate;
 
 /* ========================================================================
  * Phase 4: Pattern Matching Engine
@@ -296,12 +336,23 @@ typedef enum PgRewriteStage
     REWRITE_NUM_STAGES
 } PgRewriteStage;
 
+/* RewriteRule: a single named rule in a pipeline stage */
+typedef struct PgRewriteRule
+{
+    const char     *name;          /* rule name (matches PgRule.name) */
+    PgCascadesOpKind match_op;     /* which logical op to match */
+    PgRuleTransformFn transform;   /* transform function */
+    int             rule_bit;      /* for BitSet tracking */
+    double          promise;       /* priority */
+} PgRewriteRule;
+
 typedef struct PgRewriteStageDef
 {
-    PgRewriteStage stage;
-    const char    *name;
-    bool           iterate;      /* iterate until convergence */
-    /* Future: List *rules for this stage */
+    PgRewriteStage  stage;
+    const char     *name;
+    bool            iterate;       /* iterate until convergence */
+    PgRewriteRule  *rules;         /* array of rules, sentinel-terminated */
+    int             num_rules;     /* number of rules (excluding sentinel) */
 } PgRewriteStageDef;
 
 /* Pattern 构造函数 */
@@ -313,6 +364,19 @@ PgPattern *pg_pattern_tree(PgCascadesOpKind op, List *children);
 /* Pattern 匹配 */
 List *pg_pattern_match_root_only(PgPattern *pattern, PgGroupExpr *root);
 List *pg_pattern_match_full(PgPattern *pattern, PgGroupExpr *root);
+
+/* ========================================================================
+ * Hash Key for GroupExpression Dedup (shared by memo.c and pg_adapter.c)
+ * ======================================================================== */
+
+#define PG_MEMO_HASH_MAX_INPUTS 4
+
+typedef struct PgExprHashKey
+{
+    PgCascadesOpKind op;
+    int32           num_inputs;
+    int32           group_ids[PG_MEMO_HASH_MAX_INPUTS];
+} PgExprHashKey;
 
 /* ========================================================================
  * 上下文结构
@@ -465,7 +529,18 @@ extern void pg_group_update_best(PgMemoGroup *group,
 extern PgRule *pg_cascades_get_impl_rules(int *num_rules);
 extern PgRule *pg_cascades_get_trans_rules(int *num_rules);
 extern PgRule *pg_cascades_get_impl_rules_phase2(int *num_rules);
+extern PgRule *pg_cascades_get_trans_rules_phase5(int *num_rules);
 extern PgRule *pg_cascades_get_rules_sorted(PgRule *rules, int *num_rules);
+extern void pg_cascades_init_rule_patterns(void);
+
+/* Phase 5: Binder helper for pattern-based rules */
+extern PgBinder *pg_cascades_get_current_binder(PgPlannerCascadesContext *ctx);
+
+/* Phase 5: Group-to-RelOptInfo mapping */
+extern RelOptInfo *pg_cascades_group_to_rel(PgPlannerCascadesContext *ctx,
+                                             PgMemoGroup *group);
+extern Relids pg_cascades_group_relids(PgPlannerCascadesContext *ctx,
+                                        PgMemoGroup *group);
 
 /* pg_adapter.c */
 extern PgGroupExpr *pg_cascades_build_logical_root(
@@ -480,12 +555,16 @@ extern void pg_cascades_validate_plan(Plan *plan);
 extern Plan *pg_cascades_physical_rewrite(PgPlannerCascadesContext *ctx,
                                            Plan *plan);
 
+/* decorrelate.c (Phase 6) */
+extern bool pg_cascades_decorrelate_subqueries(PlannerInfo *root);
+
 /* rewrite.c */
 extern PgCascadesStatus pg_cascades_logical_rewrite(
     PgPlannerCascadesContext *ctx);
 
 /* debug.c */
 extern void debug_print_cascades_memo(PgPlannerCascadesContext *ctx);
+extern void debug_print_cascades_rules(PgPlannerCascadesContext *ctx);
 extern void debug_print_cascades_fallback_reason(
     PgPlannerCascadesContext *ctx, const char *reason);
 

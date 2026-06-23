@@ -29,25 +29,64 @@ int  cascades_planner_max_groups = 10000;
 int  cascades_planner_max_tasks = 100000;
 
 /* ========================================================================
- * SubPlan 检测
+ * SubPlan 检测 (Phase 6b: 区分 correlated vs uncorrelated)
  * ======================================================================== */
 
+/*
+ * pg_cascades_contains_correlated_subplan:
+ *   Walk expression tree looking for SubPlan nodes that are CORRELATED
+ *   (parParam != NIL, meaning they reference outer query variables).
+ *
+ *   Uncorrelated SubPlans (initPlans, setParam != NIL, parParam == NIL)
+ *   are safe — they execute once and return a constant.  The Cascades
+ *   planner can treat them as opaque constants in the expression tree.
+ *
+ *   Only correlated SubPlans cause fallback, since they would need
+ *   decorrelation to be properly optimized in the Memo.
+ */
 static bool
-pg_cascades_contains_subplan_walker(Node *node, void *context)
+pg_cascades_contains_correlated_subplan_walker(Node *node, void *context)
 {
     if (node == NULL)
         return false;
-    if (IsA(node, SubPlan) || IsA(node, AlternativeSubPlan))
-        return true;
+
+    if (IsA(node, SubPlan))
+    {
+        SubPlan *sp = (SubPlan *) node;
+
+        /* Correlated: parParam is non-empty (references outer vars) */
+        if (sp->parParam != NIL)
+            return true;
+
+        /* Uncorrelated initPlan — safe, continue walking */
+        return expression_tree_walker(node,
+                                       pg_cascades_contains_correlated_subplan_walker,
+                                       context);
+    }
+    else if (IsA(node, AlternativeSubPlan))
+    {
+        /* AlternativeSubPlan wraps two SubPlans; check both */
+        AlternativeSubPlan *asp = (AlternativeSubPlan *) node;
+        ListCell *lc;
+
+        foreach(lc, asp->subplans)
+        {
+            SubPlan *sp = (SubPlan *) lfirst(lc);
+            if (sp->parParam != NIL)
+                return true;
+        }
+        return false;
+    }
+
     return expression_tree_walker(node,
-                                  pg_cascades_contains_subplan_walker,
-                                  context);
+                                   pg_cascades_contains_correlated_subplan_walker,
+                                   context);
 }
 
 static bool
-pg_cascades_contains_subplan(Node *node)
+pg_cascades_contains_correlated_subplan(Node *node)
 {
-    return pg_cascades_contains_subplan_walker(node, NULL);
+    return pg_cascades_contains_correlated_subplan_walker(node, NULL);
 }
 
 /* ========================================================================
@@ -76,11 +115,11 @@ pg_cascades_supported_query_precheck(PlannerInfo *root,
         return PG_CASCADES_UNSUPPORTED;
     if (root->minmax_aggs != NIL)
         return PG_CASCADES_UNSUPPORTED;
-    if (pg_cascades_contains_subplan((Node *) parse->targetList) ||
-        pg_cascades_contains_subplan((Node *) parse->jointree) ||
-        pg_cascades_contains_subplan(parse->havingQual) ||
-        pg_cascades_contains_subplan(parse->limitOffset) ||
-        pg_cascades_contains_subplan(parse->limitCount))
+    if (pg_cascades_contains_correlated_subplan((Node *) parse->targetList) ||
+        pg_cascades_contains_correlated_subplan((Node *) parse->jointree) ||
+        pg_cascades_contains_correlated_subplan(parse->havingQual) ||
+        pg_cascades_contains_correlated_subplan(parse->limitOffset) ||
+        pg_cascades_contains_correlated_subplan(parse->limitCount))
         return PG_CASCADES_UNSUPPORTED_SUBPLAN;
 
     return PG_CASCADES_OK;
@@ -165,7 +204,6 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     PgPlannerCascadesContext ctx;
     PgCascadesStatus status;
     PgRule     *rules;
-    int         num_rules;
     MemoryContext old_cxt;
 
     MemSet(&ctx, 0, sizeof(PgPlannerCascadesContext));
@@ -177,6 +215,9 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
                                          ALLOCSET_DEFAULT_INITSIZE,
                                          ALLOCSET_DEFAULT_MAXSIZE);
     old_cxt = MemoryContextSwitchTo(ctx.memo_cxt);
+
+    /* 2a. Initialize rule patterns (Phase 5: multi-node pattern matching) */
+    pg_cascades_init_rule_patterns();
 
     /* 2. Initialize context */
     ctx.root = root;
@@ -200,15 +241,37 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
         ctx.num_impl_rules = num_impl;
 
         rules = pg_cascades_get_trans_rules(&num_trans);
-        if (num_trans > 0)
+        /* Phase 5: also include Phase 5 transformation rules */
         {
-            ctx.trans_rules = pg_cascades_get_rules_sorted(rules, &num_trans);
-            ctx.num_trans_rules = num_trans;
-        }
-        else
-        {
-            ctx.trans_rules = NULL;
-            ctx.num_trans_rules = 0;
+            PgRule *phase5_rules;
+            int     num_phase5;
+
+            phase5_rules = pg_cascades_get_trans_rules_phase5(&num_phase5);
+            if (num_phase5 > 0)
+            {
+                /* Merge Phase 3 + Phase 5 trans rules, then sort */
+                int total = num_trans + num_phase5;
+                PgRule *merged = (PgRule *) palloc(sizeof(PgRule) * (total + 1));
+
+                if (num_trans > 0)
+                    memcpy(merged, rules, sizeof(PgRule) * num_trans);
+                memcpy(&merged[num_trans], phase5_rules,
+                       sizeof(PgRule) * num_phase5);
+                MemSet(&merged[total], 0, sizeof(PgRule)); /* sentinel */
+
+                ctx.trans_rules = pg_cascades_get_rules_sorted(merged, &total);
+                ctx.num_trans_rules = total;
+            }
+            else if (num_trans > 0)
+            {
+                ctx.trans_rules = pg_cascades_get_rules_sorted(rules, &num_trans);
+                ctx.num_trans_rules = num_trans;
+            }
+            else
+            {
+                ctx.trans_rules = NULL;
+                ctx.num_trans_rules = 0;
+            }
         }
     }
 
@@ -288,7 +351,10 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     status = pg_cascades_run_tasks(&ctx);
 
     if (cascades_planner_debug)
+    {
         debug_print_cascades_memo(&ctx);
+        debug_print_cascades_rules(&ctx);
+    }
 
     /* 9. Extract best plan */
     if (status == PG_CASCADES_OK)
