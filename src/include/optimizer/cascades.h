@@ -435,7 +435,7 @@ List *pg_pattern_match_full(PgPattern *pattern, PgGroupExpr *root);
 typedef struct PgExprHashKey
 {
     PgCascadesOpKind op;
-    int32           num_inputs;
+    int32           num_inputs;      /* <0 = leaf with -relid discriminator */
     int32           group_ids[PG_MEMO_HASH_MAX_INPUTS];
 } PgExprHashKey;
 
