@@ -633,6 +633,15 @@ extern void pg_cascades_validate_plan(Plan *plan);
 extern Plan *pg_cascades_physical_rewrite(PgPlannerCascadesContext *ctx,
                                            Plan *plan);
 
+/* planmain.c — split query_planner for Cascades */
+extern QueryPlannerPrepResult *prepare_query_planner_inputs(
+    PlannerInfo *root, List *tlist,
+    double tuple_fraction, double limit_tuples);
+extern void finish_query_planner_after_prepare(
+    PlannerInfo *root, QueryPlannerPrepResult *prep,
+    List *tlist, double tuple_fraction, double limit_tuples,
+    Path **cheapest_path, Path **sorted_path, double *num_groups);
+
 /* decorrelate.c (Phase 6) */
 extern bool pg_cascades_decorrelate_subqueries(PlannerInfo *root);
 

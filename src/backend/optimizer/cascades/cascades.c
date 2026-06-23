@@ -234,10 +234,10 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
 
     /* 3. Set up rules (Phase 4: sorted by promise descending) */
     {
-        int num_impl, num_trans, num_enforcer;
+        int num_impl, num_trans;
 
         /*
-         * Merge: Phase 1 impl + Enforcer rules.
+         * Merge: Phase 1 impl + Phase 2 join + Enforcer rules.
          *
          * Note: Phase 2 scan rules (bits 6-8) are NOT merged here.
          * In the tree-based Memo (Phase 6), LogicalScan groups already
@@ -245,9 +245,6 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
          * Re-running scan impl rules would create COMPOSABLE_OP scan
          * expressions whose op_private is RelOptInfo* (not Path*),
          * causing SIGSEGV in pg_derive_child_properties.
-         *
-         * Phase 2 join rules (bits 9-11) + Phase 4 path-generation join
-         * rules (bits 43-45) remain deferred to Phase 6.
          */
         rules = pg_cascades_get_impl_rules(&num_impl);
         {
@@ -326,19 +323,35 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     {
         RelOptInfo *final_rel;
 
-        PG_TRY();
+        /*
+         * CRITICAL: Switch back to the caller's memory context before
+         * calling make_one_rel.  PG's standard planner allocates
+         * RelOptInfo, Path, and related structures in the current
+         * memory context.  If we stay in ctx.memo_cxt, all of these
+         * go into the memo context and get freed when we call
+         * MemoryContextDelete below.  The fallback path
+         * (finish_query_planner_after_prepare) then accesses
+         * freed memory → SIGSEGV.
+         */
         {
-            final_rel = make_one_rel(root, prep->joinlist);
-            prep->lower_paths_built = true;
-            prep->final_rel = final_rel;
+            MemoryContext save_cxt = MemoryContextSwitchTo(old_cxt);
+
+            PG_TRY();
+            {
+                final_rel = make_one_rel(root, prep->joinlist);
+                prep->lower_paths_built = true;
+                prep->final_rel = final_rel;
+            }
+            PG_CATCH();
+            {
+                MemoryContextSwitchTo(old_cxt);
+                MemoryContextDelete(ctx.memo_cxt);
+                PG_RE_THROW();
+            }
+            PG_END_TRY();
+
+            MemoryContextSwitchTo(save_cxt);
         }
-        PG_CATCH();
-        {
-            MemoryContextSwitchTo(old_cxt);
-            MemoryContextDelete(ctx.memo_cxt);
-            PG_RE_THROW();
-        }
-        PG_END_TRY();
     }
 
     if (prep->final_rel == NULL ||

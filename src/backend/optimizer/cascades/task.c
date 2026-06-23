@@ -238,20 +238,33 @@ pg_task_optimize_expression(PgPlannerCascadesContext *ctx, PgOptimizerTask *task
         /* Phase 5: pattern-based matching */
         if (rule->pattern != NULL)
         {
-            ListCell *elc;
-            matches = false;
-            foreach(elc, expr->owner_group->logical_exprs)
+            /*
+             * Fast-path guard: if from_op is set, the root expression's op
+             * must match before pattern matching.
+             */
+            if (rule->from_op != 0 && rule->from_op != expr->op)
             {
-                PgGroupExpr *cand = (PgGroupExpr *) lfirst(elc);
-                if (pg_pattern_match_root_only(rule->pattern, cand) != NIL)
+                matches = false;
+            }
+            else
+            {
+                ListCell *elc;
+                matches = false;
+                foreach(elc, expr->owner_group->logical_exprs)
                 {
-                    matches = true;
-                    break;
+                    PgGroupExpr *cand = (PgGroupExpr *) lfirst(elc);
+                    if (pg_pattern_match_root_only(rule->pattern, cand) != NIL)
+                    {
+                        matches = true;
+                        break;
+                    }
                 }
             }
         }
         else if (rule->from_op == expr->op)
             matches = true;
+        else
+            matches = false;
 
         if (matches)
         {
@@ -274,20 +287,33 @@ pg_task_optimize_expression(PgPlannerCascadesContext *ctx, PgOptimizerTask *task
         /* Phase 5: pattern-based matching */
         if (rule->pattern != NULL)
         {
-            ListCell *elc;
-            matches = false;
-            foreach(elc, expr->owner_group->logical_exprs)
+            /*
+             * Fast-path guard: if from_op is set, the root expression's op
+             * must match before pattern matching.
+             */
+            if (rule->from_op != 0 && rule->from_op != expr->op)
             {
-                PgGroupExpr *cand = (PgGroupExpr *) lfirst(elc);
-                if (pg_pattern_match_root_only(rule->pattern, cand) != NIL)
+                matches = false;
+            }
+            else
+            {
+                ListCell *elc;
+                matches = false;
+                foreach(elc, expr->owner_group->logical_exprs)
                 {
-                    matches = true;
-                    break;
+                    PgGroupExpr *cand = (PgGroupExpr *) lfirst(elc);
+                    if (pg_pattern_match_root_only(rule->pattern, cand) != NIL)
+                    {
+                        matches = true;
+                        break;
+                    }
                 }
             }
         }
         else if (rule->from_op == expr->op)
             matches = true;
+        else
+            matches = false;
 
         if (matches)
         {
