@@ -153,9 +153,10 @@ pg_cascades_build_initial_tree(PgPlannerCascadesContext *ctx)
     PgGroupExpr *current = NULL;
 
     /*
-     * Phase 4-6: Single LogicalScan representing entire FROM/JOIN/WHERE.
-     * Phase 7 (pending): Replace with pg_cascades_build_join_tree(ctx, ctx->prep->joinlist).
-     * Task scheduler + Phase 4 rules work. Blocker: plan builder make_agg() crash.
+     * Phase 4-6: Single LogicalScan for entire FROM/JOIN/WHERE.
+     * Phase 7: When pg_cascades_build_join_tree() path is stable, replace with:
+     *   current = pg_cascades_build_join_tree(ctx, ctx->prep->joinlist);
+     *   if (current == NULL) { ... fallback ... }
      */
     current = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_SCAN);
     current->inputs = NIL;

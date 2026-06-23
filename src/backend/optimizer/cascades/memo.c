@@ -56,21 +56,6 @@ pg_memo_build_hash_key(PgExprHashKey *key, PgGroupExpr *expr)
     MemSet(key, 0, sizeof(PgExprHashKey));
     key->op = expr->op;
     key->num_inputs = list_length(expr->inputs);
-
-    /*
-     * Phase 7: For leaf LOGICAL_SCAN expressions (inputs=NIL), encode the
-     * relation ID as a negative num_inputs to distinguish different tables.
-     * Two scans on different relations must NOT have the same hash key.
-     * Uses existing struct fields — no sizeof change needed.
-     */
-    if (key->num_inputs == 0 && expr->op == PG_CASCADES_LOGICAL_SCAN &&
-        expr->op_private != NULL)
-    {
-        RelOptInfo *rel = (RelOptInfo *) expr->op_private;
-        if (rel->relid > 0)
-            key->num_inputs = -(int32) rel->relid;
-    }
-
     foreach(lc, expr->inputs)
     {
         if (i >= PG_MEMO_HASH_MAX_INPUTS)
