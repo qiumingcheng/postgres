@@ -433,6 +433,18 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
             status = PG_CASCADES_INTERNAL_NO_PLAN;
     }
 
+    /*
+     * 9b. Phase 6: Post-optimization — validate and rewrite the plan.
+     * - Validate structural integrity (pg_cascades_validate_plan)
+     * - Insert Material nodes on NestLoop inner sides where needed
+     *   (pg_cascades_physical_rewrite)
+     */
+    if (status == PG_CASCADES_OK && *plan != NULL)
+    {
+        pg_cascades_validate_plan(*plan);
+        *plan = pg_cascades_physical_rewrite(&ctx, *plan);
+    }
+
     /* 10. Cleanup - copy plan out before deleting memo context */
     if (*plan != NULL)
     {
