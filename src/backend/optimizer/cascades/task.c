@@ -6,6 +6,8 @@
 
 #include "postgres.h"
 #include "optimizer/cascades.h"
+#include "optimizer/cost.h"
+#include "optimizer/clauses.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
@@ -338,8 +340,61 @@ pg_task_derive_stats(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
  * ======================================================================== */
 
 /*
+ * push_property_task: helper to create an EnforceAndCostTask for a
+ * specific required property (identified by pathkeys), with dedup
+ * against previously-pushed properties.
+ */
+static void
+push_property_task(PgPlannerCascadesContext *ctx, PgGroupExpr *expr,
+                   List *pathkeys, List **pushed)
+{
+    ListCell *lc;
+
+    /* Dedup: skip if this pathkeys already pushed */
+    foreach(lc, *pushed)
+    {
+        List *pk = (List *) lfirst(lc);
+        if (pk == pathkeys)
+            return;
+    }
+
+    /* Create new required property and task */
+    {
+        PgRequiredProperty *req;
+        PgOptimizerTask *t;
+
+        req = (PgRequiredProperty *) palloc0(sizeof(PgRequiredProperty));
+        req->pathkeys = pathkeys;
+        req->required_outer = NULL;
+        req->tuple_fraction = ctx->upper->tuple_fraction;
+        req->limit_tuples = ctx->upper->limit_tuples;
+
+        t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
+        t->type = PG_TASK_ENFORCE_AND_COST;
+        t->expr = expr;
+        t->required = req;
+        task_stack_push(ctx, t);
+
+        *pushed = lappend(*pushed, pathkeys);
+    }
+}
+
+/*
  * pg_cascades_push_enforce_and_cost_tasks:
  *   为新 physical expression 创建 EnforceAndCostTask。
+ *
+ *   Phase 6: Multi-property optimization.  For each physical expression,
+ *   create tasks for all relevant required property combinations:
+ *     1. No ordering (NIL pathkeys) — always
+ *     2. Sort ordering (sort_pathkeys) — if query has ORDER BY
+ *     3. Group ordering (group_pathkeys) — if query has GROUP BY
+ *        (for GroupAgg which requires sorted input)
+ *     4. Distinct ordering (distinct_pathkeys) — if query has DISTINCT
+ *        (for Unique sorted which requires sorted input)
+ *
+ *   The cost-based search picks the cheapest plan for each
+ *   required property; the plan builder selects the one matching
+ *   the query's actual requirements.
  */
 void
 pg_cascades_push_enforce_and_cost_tasks(PgPlannerCascadesContext *ctx,
@@ -349,6 +404,8 @@ pg_cascades_push_enforce_and_cost_tasks(PgPlannerCascadesContext *ctx,
     PgRequiredProperty *req1;
     PgRequiredProperty *req2;
     PgOptimizerTask *t;
+
+    (void) group;  /* unused in this function */
 
     /* required = NIL pathkeys */
     req1 = (PgRequiredProperty *) palloc0(sizeof(PgRequiredProperty));
@@ -696,19 +753,6 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             task->total_cost = 0;
             task->startup_cost = 0;
 
-            /* Add local/base cost */
-            switch (expr->op)
-            {
-                case PG_CASCADES_PHYSICAL_HASHAGG:
-                    task->startup_cost = 0.01; task->total_cost = 0.01; break;
-                case PG_CASCADES_PHYSICAL_GROUPAGG:
-                    task->startup_cost = 0.02; task->total_cost = 0.02; break;
-                case PG_CASCADES_PHYSICAL_SORT:
-                    task->startup_cost = 1.0; task->total_cost = 1.0; break;
-                default:
-                    task->startup_cost = 0.1; task->total_cost = 0.1; break;
-            }
-
             task->enforce_state = ENFORCE_OPTIMIZE_CHILDREN;
             /* fall through */
         }
@@ -780,10 +824,141 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         }
 
         /* ------------------------------------------------------------
-         * ENFORCE_COMPUTE_COST: check pruning + property satisfaction
+         * ENFORCE_COMPUTE_COST: compute local cost with PG cost model,
+         * check pruning + property satisfaction
          * ------------------------------------------------------------ */
         case ENFORCE_COMPUTE_COST:
         {
+            Cost child_startup = task->startup_cost;
+            Cost child_total   = task->total_cost;
+            double input_rows = 0;
+            int    input_width = 0;
+            bool   pg_cost_called = false;
+
+            /*
+             * Get child output properties (rows, width) for cost
+             * functions that need them.  For expressions without
+             * children (e.g. scans), these stay at 0.
+             */
+            if (list_length(expr->inputs) >= 1)
+            {
+                PgMemoGroup *child0 = (PgMemoGroup *)
+                    linitial(expr->inputs);
+                if (list_length(child0->best_entries) > 0)
+                {
+                    PgGroupBestEntry *cbe = (PgGroupBestEntry *)
+                        linitial(child0->best_entries);
+                    input_rows = cbe->output.rows;
+                    input_width = cbe->output.width;
+                }
+            }
+            if (input_rows <= 0) input_rows = 100;
+            if (input_width <= 0) input_width = 10;
+
+            /*
+             * Compute local cost using PG cost functions.
+             *
+             * For most PG cost functions (cost_agg, cost_sort),
+             * the result ALREADY includes child costs — the function
+             * takes input_total_cost as a parameter and returns the
+             * total including both local and input.
+             *
+             * For Project and Limit, we compute local cost and
+             * add it to child costs.
+             */
+            switch (expr->op)
+            {
+                case PG_CASCADES_PHYSICAL_HASHAGG:
+                {
+                    Path dummy_path;
+                    MemSet(&dummy_path, 0, sizeof(Path));
+                    dummy_path.pathtype = T_Agg;
+                    cost_agg(&dummy_path, ctx->root, AGG_HASHED,
+                             &ctx->upper->agg_costs,
+                             ctx->upper->numGroupCols,
+                             ctx->upper->dNumGroups,
+                             child_startup, child_total, input_rows);
+                    task->startup_cost = dummy_path.startup_cost;
+                    task->total_cost = dummy_path.total_cost;
+                    pg_cost_called = true;
+                    break;
+                }
+                case PG_CASCADES_PHYSICAL_GROUPAGG:
+                {
+                    Path dummy_path;
+                    MemSet(&dummy_path, 0, sizeof(Path));
+                    dummy_path.pathtype = T_Agg;
+                    cost_agg(&dummy_path, ctx->root, AGG_SORTED,
+                             &ctx->upper->agg_costs,
+                             ctx->upper->numGroupCols,
+                             ctx->upper->dNumGroups,
+                             child_startup, child_total, input_rows);
+                    task->startup_cost = dummy_path.startup_cost;
+                    task->total_cost = dummy_path.total_cost;
+                    pg_cost_called = true;
+                    break;
+                }
+                case PG_CASCADES_PHYSICAL_SORT:
+                {
+                    Path dummy_path;
+                    double limit_tuples = required->limit_tuples;
+                    MemSet(&dummy_path, 0, sizeof(Path));
+                    dummy_path.pathtype = T_Sort;
+                    cost_sort(&dummy_path, ctx->root,
+                              required->pathkeys,
+                              child_total,
+                              input_rows, input_width,
+                              0.0,         /* comparison_cost */
+                              work_mem,
+                              (limit_tuples > 0) ? limit_tuples : -1.0);
+                    task->startup_cost = dummy_path.startup_cost;
+                    task->total_cost = dummy_path.total_cost;
+                    pg_cost_called = true;
+                    break;
+                }
+                case PG_CASCADES_PHYSICAL_UNIQUE:
+                {
+                    Path dummy_path;
+                    MemSet(&dummy_path, 0, sizeof(Path));
+                    dummy_path.pathtype = T_Unique;
+                    cost_sort(&dummy_path, ctx->root,
+                              ctx->upper->distinct_pathkeys,
+                              child_total,
+                              input_rows, input_width,
+                              0.0, work_mem, -1.0);
+                    task->startup_cost = dummy_path.startup_cost;
+                    task->total_cost = dummy_path.total_cost;
+                    pg_cost_called = true;
+                    break;
+                }
+                case PG_CASCADES_PHYSICAL_LIMIT:
+                {
+                    double frac = 1.0;
+                    if (required->limit_tuples > 0 &&
+                        required->limit_tuples < input_rows)
+                        frac = required->limit_tuples / input_rows;
+                    task->startup_cost = child_startup;
+                    task->total_cost = child_startup +
+                        (child_total - child_startup) * frac;
+                    break;
+                }
+                case PG_CASCADES_PHYSICAL_PROJECT:
+                {
+                    QualCost qcost;
+                    MemSet(&qcost, 0, sizeof(QualCost));
+                    cost_qual_eval(&qcost, ctx->upper->tlist, ctx->root);
+                    task->startup_cost = child_startup + qcost.startup;
+                    task->total_cost = child_total +
+                        qcost.per_tuple * input_rows;
+                    break;
+                }
+                default:
+                    task->startup_cost = child_startup + 0.01;
+                    task->total_cost = child_total + 0.01;
+                    break;
+            }
+            (void) pg_cost_called;  /* suppress unused warning */
+
             /* Phase 4: upper-bound pruning */
             if (ctx->upper_bound_cost > 0 &&
                 task->total_cost >= ctx->upper_bound_cost)
