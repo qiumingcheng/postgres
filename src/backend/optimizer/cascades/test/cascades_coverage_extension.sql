@@ -135,6 +135,78 @@ SELECT cov_test(702, 'C702: distinct agg combo', $$SELECT count(DISTINCT a) AS d
 SELECT cov_test(703, 'C703: full combo', $$SELECT t1.a, count(*) AS cnt, sum(t2.val) AS total FROM cascades_test_t t1 JOIN cascades_test_j2 t2 ON t1.b = t2.val WHERE t1.a > 10 GROUP BY t1.a HAVING count(*) > 1 ORDER BY total DESC LIMIT 10$$);
 SELECT cov_test(704, 'C704: exists agg', $$SELECT t1.* FROM cascades_test_j1 t1 WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2 WHERE t2.j1_id = t1.id GROUP BY t2.val HAVING count(*) > 1)$$);
 
+-- ============================================================================
+-- Part 8: Decorrelation deep coverage (decorrelate.c 13% → 80%)
+-- ============================================================================
+\echo '=== Part 8: Decorrelation ==='
+
+-- decorrelate.c: correlated subquery with multiple params
+SELECT cov_test(801, 'C801: correlated multi-param', $$SELECT * FROM cascades_test_j1 t1 WHERE t1.val > (SELECT avg(t2.j1_id) FROM cascades_test_j2 t2 WHERE t2.val = t1.val)$$);
+-- decorrelate.c: correlated subquery with join conditions
+SELECT cov_test(802, 'C802: correlated join subquery', $$SELECT t1.* FROM cascades_test_j1 t1 WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2 JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id WHERE t2.j1_id = t1.id)$$);
+-- decorrelate.c: multiple correlated subqueries in same query
+SELECT cov_test(803, 'C803: multi correlated', $$SELECT t1.* FROM cascades_test_j1 t1 WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2 WHERE t2.j1_id = t1.id) AND t1.val < (SELECT max(val) FROM cascades_test_j2 t3 WHERE t3.j1_id = t1.id)$$);
+
+-- ============================================================================
+-- Part 9: Plan build deep coverage (planbuild.c 44% → 80%, postopt.c 43% → 80%)
+-- ============================================================================
+\echo '=== Part 9: Plan Build ==='
+
+-- planbuild.c: merge join path (enable mergejoin only)
+SET enable_nestloop = off; SET enable_hashjoin = off; SET enable_mergejoin = on;
+SELECT cov_test(901, 'C901: merge join', $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_t t1 JOIN cascades_test_j1 t2 ON t1.a = t2.id ORDER BY t1.a, t2.id$$);
+SET enable_nestloop = on; SET enable_hashjoin = on; SET enable_mergejoin = on;
+
+-- planbuild.c: nestloop join path (disable hashjoin/mergejoin → force nestloop → postopt.c materialize)
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+SELECT cov_test(902, 'C902: nestloop join', $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_t t1 JOIN cascades_test_j1 t2 ON t1.a = t2.id$$);
+SET enable_hashjoin = on; SET enable_mergejoin = on;
+
+-- planbuild.c: hash agg with group by
+SELECT cov_test(903, 'C903: hash agg grouped', $$SELECT a, count(*) AS cnt, sum(b) AS s FROM cascades_test_t GROUP BY a$$);
+-- planbuild.c: sort (no index) forces sort enforcer
+SELECT cov_test(904, 'C904: sort enforcer', $$SELECT * FROM cascades_test_t ORDER BY name$$);
+-- planbuild.c: limit + offset 
+SELECT cov_test(905, 'C905: limit offset 2', $$SELECT * FROM cascades_test_t ORDER BY id LIMIT 5 OFFSET 5$$);
+
+-- ============================================================================
+-- Part 10: Memo + Pattern coverage (memo.c 70% → 80%, pattern.c 64% → 80%)
+-- ============================================================================
+\echo '=== Part 10: Memo + Pattern ==='
+
+-- memo.c: self-join with same table → group merging
+SELECT cov_test(1001, 'C1001: self join merge', $$SELECT t1.id, t2.id FROM cascades_test_t t1 JOIN cascades_test_t t2 ON t1.a = t2.a$$);
+-- memo.c: 3-way self-join
+SELECT cov_test(1002, 'C1002: self triple join', $$SELECT t1.id, t2.id, t3.id FROM cascades_test_t t1 JOIN cascades_test_t t2 ON t1.a = t2.b JOIN cascades_test_t t3 ON t2.b = t3.a$$);
+-- pattern.c: multi-level join pattern
+SELECT cov_test(1003, 'C1003: multi level join', $$SELECT t1.id, t2.id, t3.id FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id$$);
+
+-- ============================================================================
+-- Part 11: Rewrite + Rule coverage (rewrite.c 55% → 80%, rule.c 55% → 80%)
+-- ============================================================================
+\echo '=== Part 11: Rewrite + Rule ==='
+
+-- rewrite.c: predicate pushdown through multi-level joins
+SELECT cov_test(1101, 'C1101: pushdown multi join', $$SELECT t1.val AS v1, t2.val AS v2, t3.val AS v3 FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id WHERE t1.val > 5 AND t2.val > 3 AND t3.val > 1$$);
+-- rewrite.c: column pruning through joins
+SELECT cov_test(1102, 'C1102: column prune join', $$SELECT t1.val, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+-- rule.c: Aggregate with DISTINCT → distinct rule
+SELECT cov_test(1103, 'C1103: agg distinct', $$SELECT count(DISTINCT a), sum(DISTINCT b) FROM cascades_test_t$$);
+-- rule.c: Limit + Sort merge
+SELECT cov_test(1104, 'C1104: limit sort merge', $$SELECT * FROM cascades_test_t ORDER BY a DESC LIMIT 1$$);
+-- rule.c: Filter + Project interaction
+SELECT cov_test(1105, 'C1105: filter project', $$SELECT a, b FROM cascades_test_t WHERE a > 10$$);
+
+-- ============================================================================
+-- Part 12: pg_adapter edge cases (pg_adapter.c 78% → 80%)
+-- ============================================================================
+\echo '=== Part 12: pg_adapter ==='
+
+-- pg_adapter.c: RIGHT JOIN → triggers anti-join conversion in pg_adapter
+SELECT cov_test(1201, 'C1201: right join', $$SELECT t1.val, t2.val FROM cascades_test_j1 t1 RIGHT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+-- pg_adapter.c: FULL OUTER JOIN
+SELECT cov_test(1202, 'C1202: full outer join', $$SELECT t1.val, t2.val FROM cascades_test_j1 t1 FULL JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+
 \echo ''
 \echo '========================================'
 \echo '  EXTENDED COVERAGE TEST SUMMARY'
