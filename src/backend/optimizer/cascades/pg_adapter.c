@@ -157,12 +157,14 @@ pg_cascades_build_initial_tree(PgPlannerCascadesContext *ctx)
      * FROM/JOIN/WHERE result.  Op_private is the final_rel from
      * make_one_rel, which contains all PG join paths.
      *
-     * Phase 7 (in progress): pg_cascades_build_join_tree() above builds
+     * Phase 7 (pending): pg_cascades_build_join_tree() above builds
      * individual LogicalScan per base relation + LogicalJoin tree.
-     * When stable, replace this single-scan approach with:
-     *   current = pg_cascades_build_join_tree(ctx, ctx->prep->joinlist);
-     * Known issue: task scheduler crashes during ApplyRuleTask processing
-     * of Phase 4 join rules on the join tree structure.
+     * Known blockers:
+     *   a) Leaf hash key must include op_private (fixed: PgExprHashKey.op_private_tag)
+     *   b) entrysize must be PgExprHashEntry (fixed)
+     *   c) explored_rules inheritance (fixed)
+     *   d) Rewrite pipeline corrupts LogicalJoin inputs to 1 element
+     *      (likely SEMIJOIN_DEDUP stage or GP_JOIN_REORDER combination rule)
      */
     current = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_SCAN);
     current->inputs = NIL;
