@@ -138,17 +138,26 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
             {
                 PgMemoGroup *child = (PgMemoGroup *) linitial(logical->inputs);
                 AggStrategy agg_strategy;
+                AttrNumber *use_groupColIdx;
+                Oid        *use_groupOperators;
 
-                /* Build child plan through logical tree.
-                 * LogicalProject now uses sub_tlist (safe for Agg). */
+                /* Build child plan through logical tree. */
                 child_plan = pg_cascades_build_logical_plan(ctx, child);
                 if (child_plan == NULL)
                     break;
 
                 if (ctx->upper->numGroupCols == 0)
+                {
                     agg_strategy = AGG_PLAIN;
+                    use_groupColIdx = NULL;
+                    use_groupOperators = NULL;
+                }
                 else
+                {
                     agg_strategy = AGG_HASHED;
+                    use_groupColIdx = ctx->upper->groupColIdx;
+                    use_groupOperators = ctx->upper->groupOperators;
+                }
 
                 result = (Plan *) make_agg(ctx->root,
                     ctx->upper->tlist,
@@ -156,8 +165,8 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
                     agg_strategy,
                     &ctx->upper->agg_costs,
                     ctx->upper->numGroupCols,
-                    ctx->upper->groupColIdx,
-                    ctx->upper->groupOperators,
+                    use_groupColIdx,
+                    use_groupOperators,
                     (long) ctx->upper->dNumGroups,
                     child_plan);
                 return result;

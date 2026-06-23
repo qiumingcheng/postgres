@@ -2456,7 +2456,8 @@ static PgCombinationRule g_combination_rules[] = {
      * GP_JOIN_REORDER: Join reorder group.
      *   JoinCommutativity, JoinAssociativity, JoinLeftAsscom
      */
-    {"GP_JOIN_REORDER", NULL, true},
+    /* Phase 7: GP_JOIN_REORDER disabled */
+    {"GP_JOIN_REORDER", NULL, false},
 
     /*
      * GP_PRUNE_EMPTY: Empty set pruning group.

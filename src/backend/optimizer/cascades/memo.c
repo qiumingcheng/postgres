@@ -154,6 +154,10 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
     /*
      * Phase 4 + Phase 6: Global hash table dedup for logical expressions.
      *
+     * Phase 7: Skip dedup for LOGICAL_SCAN leaf expressions (inputs=NIL).
+     * Two scans on different tables have identical hash keys
+     * (op + 0 children) but are NOT semantically equivalent.
+     *
      * Phase 6: When a duplicate expression is found in a DIFFERENT group
      * than its first occurrence, automatically merge the two groups.
      * This is the StarRocks "copyIn auto-merge" behavior:
@@ -162,7 +166,8 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
      */
     if ((int)expr->op < PG_CASCADES_PHYSICAL_SEQSCAN &&
         expr->mode != PG_PHYS_EXPR_IMPORTED_PATH &&
-        memo->group_expr_table != NULL)
+        memo->group_expr_table != NULL &&
+        !(expr->op == PG_CASCADES_LOGICAL_SCAN && expr->inputs == NIL))
     {
         PgExprHashEntry *entry;
         bool             found;
@@ -250,10 +255,12 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
     /*
      * Phase 6: If this was the first occurrence of this expression,
      * record the group ID in the hash entry for future auto-merge.
+     * Phase 7: Skip for LOGICAL_SCAN leaf expressions (same reason as above).
      */
     if ((int)expr->op < PG_CASCADES_PHYSICAL_SEQSCAN &&
         expr->mode != PG_PHYS_EXPR_IMPORTED_PATH &&
-        memo->group_expr_table != NULL)
+        memo->group_expr_table != NULL &&
+        !(expr->op == PG_CASCADES_LOGICAL_SCAN && expr->inputs == NIL))
     {
         PgExprHashEntry *entry;
         bool             dummy_found;

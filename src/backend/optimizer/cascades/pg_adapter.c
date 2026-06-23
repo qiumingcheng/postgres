@@ -152,15 +152,15 @@ pg_cascades_build_initial_tree(PgPlannerCascadesContext *ctx)
     PgCascadesUpperInfo *upper = ctx->upper;
     PgGroupExpr *current = NULL;
 
-    /*
-     * Phase 4-6: Single LogicalScan for entire FROM/JOIN/WHERE.
-     * Phase 7: When pg_cascades_build_join_tree() path is stable, replace with:
-     *   current = pg_cascades_build_join_tree(ctx, ctx->prep->joinlist);
-     *   if (current == NULL) { ... fallback ... }
-     */
-    current = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_SCAN);
-    current->inputs = NIL;
-    current->op_private = ctx->prep->final_rel;
+    /* Phase 7: Build join tree from joinlist */
+    current = pg_cascades_build_join_tree(ctx, ctx->prep->joinlist);
+
+    if (current == NULL)
+    {
+        current = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_SCAN);
+        current->inputs = NIL;
+        current->op_private = ctx->prep->final_rel;
+    }
 
     /* LogicalProject */
     {

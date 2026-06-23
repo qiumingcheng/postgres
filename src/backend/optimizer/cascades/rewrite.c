@@ -90,7 +90,8 @@ static PgRewriteStageDef g_rewrite_pipeline[REWRITE_NUM_STAGES] = {
     {REWRITE_COLUMN_PRUNE,        "Column Pruning",       true,
      g_rules_column_prune,
      sizeof(g_rules_column_prune) / sizeof(PgRewriteRule) - 1},
-    {REWRITE_JOIN_REORDER,        "Join Reorder",         true,
+    /* Phase 7: disabled - modifies LogicalJoin inputs */
+    {REWRITE_JOIN_REORDER,        "Join Reorder",         false,
      g_rules_join_reorder,
      sizeof(g_rules_join_reorder) / sizeof(PgRewriteRule) - 1},
     {REWRITE_LIMIT_PUSH,          "Limit Push/Optimize",  false,
@@ -99,7 +100,8 @@ static PgRewriteStageDef g_rewrite_pipeline[REWRITE_NUM_STAGES] = {
     {REWRITE_AGG_PUSHDOWN,        "Aggregate Pushdown",   false,
      g_rules_agg_pushdown,
      sizeof(g_rules_agg_pushdown) / sizeof(PgRewriteRule) - 1},
-    {REWRITE_SEMIJOIN_DEDUP,      "Semi-Join Dedup",      true,
+    /* Phase 7: disabled - modifies LogicalJoin inputs */
+    {REWRITE_SEMIJOIN_DEDUP,      "Semi-Join Dedup",      false,
      g_rules_semijoin_dedup,
      sizeof(g_rules_semijoin_dedup) / sizeof(PgRewriteRule) - 1},
 };
@@ -245,6 +247,17 @@ pg_rewrite_apply_rules_recursive(PgPlannerCascadesContext *ctx,
         return false;
 
     /*
+     * Phase 7: Cycle detection.  With the join tree structure,
+     * the same child group can be reached through multiple parent
+     * expressions.  Without a visited guard, the recursion depth
+     * explodes (observed: 58000+ frames → stack overflow).
+     * Use group->optimized as a simple visited flag during rewrite.
+     */
+    if (group->optimized)
+        return false;
+    group->optimized = true;
+
+    /*
      * Step 1: Recursively apply rules to child groups first (bottom-up).
      * We iterate over a snapshot of logical_exprs because the list may
      * grow as we apply rules.
@@ -312,6 +325,7 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
     int total_rules_applied = 0;
     int stages_with_rules = 0;
     int stages_without_rules = 0;
+    ListCell *glc;
 
     if (ctx->memo == NULL || ctx->memo->root_group == NULL)
     {
@@ -334,6 +348,10 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
         }
 
         stages_with_rules++;
+
+        /* Phase 7: Clear visited flags before each stage */
+        foreach(glc, ctx->memo->groups)
+            ((PgMemoGroup *) lfirst(glc))->optimized = false;
 
         if (stage->iterate)
         {
@@ -372,11 +390,14 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
 
     /*
      * Apply final cleanup rules (g_rules_final_cleanup) once.
-     * These are simple single-node transformations that don't need
-     * a dedicated pipeline stage.
      */
     {
         int num_cleanup = sizeof(g_rules_final_cleanup) / sizeof(PgRewriteRule) - 1;
+
+        /* Phase 7: Clear visited flags before final cleanup */
+        foreach(glc, ctx->memo->groups)
+            ((PgMemoGroup *) lfirst(glc))->optimized = false;
+
         pg_rewrite_apply_rules_recursive(ctx, ctx->memo->root_group,
                                           g_rules_final_cleanup, num_cleanup);
         if (ctx->debug)
@@ -405,6 +426,10 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
         int num_combo;
         PgCombinationRule *combo_rules;
         int ci;
+
+        /* Phase 7: Clear visited flags before combination rules */
+        foreach(glc, ctx->memo->groups)
+            ((PgMemoGroup *) lfirst(glc))->optimized = false;
 
         combo_rules = pg_cascades_get_combination_rules(&num_combo);
 
@@ -469,6 +494,10 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
             pfree(combo_stage_rules);
         }
     }
+
+    /* Phase 7: Clear visited flags so task scheduler starts clean */
+    foreach(glc, ctx->memo->groups)
+        ((PgMemoGroup *) lfirst(glc))->optimized = false;
 
     return PG_CASCADES_OK;
 }
