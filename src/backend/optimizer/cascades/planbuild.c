@@ -123,38 +123,47 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
             case PG_CASCADES_LOGICAL_PROJECT:
             {
                 PgMemoGroup *child = (PgMemoGroup *) linitial(logical->inputs);
-                List *proj_tlist;
 
                 child_plan = pg_cascades_build_logical_plan(ctx, child);
                 if (child_plan == NULL)
                     break;
 
-                proj_tlist = ctx->upper->sub_tlist;
-
                 /*
-                 * Mirror the standard planner's approach (planner.c:1442):
-                 * If the child plan is projection-capable, replace its
-                 * targetlist with sub_tlist.  Otherwise, wrap with Result.
+                 * If there is no aggregation, no grouping, and no window
+                 * functions, the subplan's output columns already match the
+                 * query's needs.  Return the child plan directly, matching
+                 * the standard planner's behavior when need_tlist_eval is
+                 * false (see planner.c:1442).
                  *
-                 * Note: for join plans (which are not projection-capable),
-                 * the Result wrapper may not always work correctly with
-                 * set_plan_references in standard_planner.  This is a
-                 * known limitation for complex projections (e.g., multi-table
-                 * joins with column aliases).  Such queries gracefully
-                 * fall back to the PG standard planner.
+                 * For queries with aggregation/grouping/windows, the
+                 * LOGICAL_AGG case handles the projection through make_agg.
+                 * The LOGICAL_PROJECT case should not add any wrapper.
                  */
-                if (is_projection_capable_plan(child_plan))
+                if (ctx->upper->numGroupCols == 0 &&
+                    !ctx->upper->hasAggs &&
+                    ctx->upper->activeWindows == NIL)
                 {
-                    child_plan->targetlist = proj_tlist;
                     return child_plan;
                 }
-                else
+
+                /*
+                 * Fallback: if there IS aggregation/grouping but the
+                 * LOGICAL_AGG case wasn't reached (e.g., tree structure
+                 * has Project above Agg), ensure the projection is handled.
+                 */
                 {
-                    result = (Plan *) make_result(ctx->root,
-                        proj_tlist,
-                        NULL,
-                        child_plan);
-                    return result;
+                    List *proj_tlist = ctx->upper->sub_tlist;
+                    if (is_projection_capable_plan(child_plan))
+                    {
+                        child_plan->targetlist = proj_tlist;
+                        return child_plan;
+                    }
+                    else
+                    {
+                        result = (Plan *) make_result(ctx->root,
+                            proj_tlist, NULL, child_plan);
+                        return result;
+                    }
                 }
             }
 
