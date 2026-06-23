@@ -129,18 +129,33 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
                 if (child_plan == NULL)
                     break;
 
-                /*
-                 * Use sub_tlist (no Aggrefs) for projection below upper ops.
-                 * sub_tlist provides the base columns needed by Agg/Sort etc.
-                 * For non-Agg queries, sub_tlist ≈ tlist so this is safe.
-                 */
                 proj_tlist = ctx->upper->sub_tlist;
 
-                result = (Plan *) make_result(ctx->root,
-                    proj_tlist,
-                    NULL, /* resconstantqual */
-                    child_plan);
-                return result;
+                /*
+                 * Mirror the standard planner's approach (planner.c:1442):
+                 * If the child plan is projection-capable, replace its
+                 * targetlist with sub_tlist.  Otherwise, wrap with Result.
+                 *
+                 * Note: for join plans (which are not projection-capable),
+                 * the Result wrapper may not always work correctly with
+                 * set_plan_references in standard_planner.  This is a
+                 * known limitation for complex projections (e.g., multi-table
+                 * joins with column aliases).  Such queries gracefully
+                 * fall back to the PG standard planner.
+                 */
+                if (is_projection_capable_plan(child_plan))
+                {
+                    child_plan->targetlist = proj_tlist;
+                    return child_plan;
+                }
+                else
+                {
+                    result = (Plan *) make_result(ctx->root,
+                        proj_tlist,
+                        NULL,
+                        child_plan);
+                    return result;
+                }
             }
 
             case PG_CASCADES_LOGICAL_AGG:
