@@ -340,6 +340,85 @@ SELECT cas_run_test(44, 'T44: full complex query',
       ORDER BY total_val DESC LIMIT 10$$);
 
 -- ============================================================================
+-- Part 9: Deep Coverage — 未覆盖规则 + 边界路径 (T45-T60)
+-- ============================================================================
+\echo '=== T45-T60: Deep Coverage ==='
+
+-- T45: WHERE false → empty join set, triggers E1 PruneEmptyJoin
+SELECT cas_run_test(45, 'T45: empty join (prune empty)',
+    $$SELECT t1.id AS id1, t2.id AS id2 FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      WHERE false$$);
+
+-- T46: No agg + no GROUP BY → triggers F1 EliminateAgg (should skip Agg node)
+SELECT cas_run_test(46, 'T46: no agg no group (eliminate agg)',
+    $$SELECT id, a FROM cascades_test_t WHERE a > 10 ORDER BY id$$);
+
+-- T47: GROUP BY with ORDER BY same keys → GroupAgg sorted path
+SELECT cas_run_test(47, 'T47: group+order same keys (GroupAgg)',
+    $$SELECT a, count(*) AS cnt FROM cascades_test_t
+      GROUP BY a ORDER BY a LIMIT 10$$);
+
+-- T48: DISTINCT without ORDER → Unique unordered
+SELECT cas_run_test(48, 'T48: distinct no order',
+    $$SELECT DISTINCT a FROM cascades_test_t LIMIT 10$$);
+
+-- T49: HAVING without GROUP BY (aggregate only)
+SELECT cas_run_test(49, 'T49: having without group',
+    $$SELECT count(*) AS cnt FROM cascades_test_t HAVING count(*) > 0$$);
+
+-- T50: Agg(Filter) → should trigger predicate interaction
+SELECT cas_run_test(50, 'T50: agg with filter (predicate agg)',
+    $$SELECT a, count(*) FROM cascades_test_t WHERE b > 10
+      GROUP BY a ORDER BY a$$);
+
+-- T51: INNER JOIN with LIMIT → triggers D2 PushDownLimitJoin
+SELECT cas_run_test(51, 'T51: join with limit (limit pushdown)',
+    $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id LIMIT 5$$);
+
+-- T52: ORDER BY + LIMIT 1 → tight limit, tests TopN path
+SELECT cas_run_test(52, 'T52: order+limit 1 (TopN)',
+    $$SELECT * FROM cascades_test_t ORDER BY a DESC LIMIT 1$$);
+
+-- T53: GROUP BY multiple cols → tests multi-key grouping
+SELECT cas_run_test(53, 'T53: group by multi cols',
+    $$SELECT a, b, count(*) AS cnt FROM cascades_test_t
+      GROUP BY a, b ORDER BY a, b LIMIT 10$$);
+
+-- T54: Agg with WHERE IS NOT NULL → filter interaction
+SELECT cas_run_test(54, 'T54: agg with not-null filter',
+    $$SELECT a, count(*) FROM cascades_test_t WHERE b IS NOT NULL
+      GROUP BY a ORDER BY a LIMIT 10$$);
+
+-- T55: 2-table LEFT JOIN + GROUP BY → complex outer join interaction
+SELECT cas_run_test(55, 'T55: left join+group',
+    $$SELECT t1.val AS v1, count(t2.val) AS cnt FROM cascades_test_j1 t1
+      LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      GROUP BY t1.val ORDER BY t1.val LIMIT 10$$);
+
+-- T56: LIMIT large offset → tests offset handling
+SELECT cas_run_test(56, 'T56: limit large offset',
+    $$SELECT * FROM cascades_test_t ORDER BY id LIMIT 5 OFFSET 100$$);
+
+-- T57: Boolean column filter → tests simple predicate
+SELECT cas_run_test(57, 'T57: simple count star',
+    $$SELECT count(*) FROM cascades_test_t WHERE a > 50$$);
+
+-- T58: ORDER BY descending + LIMIT → tests reverse sort
+SELECT cas_run_test(58, 'T58: order desc+limit',
+    $$SELECT * FROM cascades_test_t ORDER BY id DESC, a ASC LIMIT 10$$);
+
+-- T59: IN with subquery → tests semi-join rewrite
+SELECT cas_run_test(59, 'T59: in subquery',
+    $$SELECT * FROM cascades_test_j1 t1 WHERE t1.id IN
+      (SELECT j1_id FROM cascades_test_j2 WHERE val > 10) LIMIT 10$$);
+
+-- T60: MAX/MIN aggregate → tests simple aggregate plan
+SELECT cas_run_test(60, 'T60: max min aggregate',
+    $$SELECT max(a), min(b), avg(a) FROM cascades_test_t WHERE a > 10$$);
+
+-- ============================================================================
 -- TEST SUMMARY
 -- ============================================================================
 \echo ''
