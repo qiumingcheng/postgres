@@ -67,13 +67,13 @@ DECLARE
     pg_ok_val   BOOLEAN := false;
     cas_ok_val  BOOLEAN := false;
     cas_path_val TEXT := 'ERROR';
+    dummy       INTEGER;
 BEGIN
     -- PG original planner
     SET enable_cascades_planner = off;
     BEGIN
-        EXECUTE 'CREATE TEMP TABLE _t AS ' || sql_text;
+        EXECUTE 'SELECT count(*) FROM (' || sql_text || ') AS _sub' INTO dummy;
         pg_ok_val := true;
-        DROP TABLE IF EXISTS _t;
     EXCEPTION WHEN OTHERS THEN
         pg_ok_val := false;
     END;
@@ -81,18 +81,16 @@ BEGIN
     -- Cascades planner
     SET enable_cascades_planner = on;
     BEGIN
-        EXECUTE 'CREATE TEMP TABLE _t AS ' || sql_text;
+        EXECUTE 'SELECT count(*) FROM (' || sql_text || ') AS _sub' INTO dummy;
         cas_ok_val := true;
         cas_path_val := 'CASCADES';
-        DROP TABLE IF EXISTS _t;
     EXCEPTION WHEN OTHERS THEN
         -- Fallback: try PG original planner
         BEGIN
             SET enable_cascades_planner = off;
-            EXECUTE 'CREATE TEMP TABLE _t AS ' || sql_text;
+            EXECUTE 'SELECT count(*) FROM (' || sql_text || ') AS _sub' INTO dummy;
             cas_ok_val := true;
             cas_path_val := 'FALLBACK';
-            DROP TABLE IF EXISTS _t;
         EXCEPTION WHEN OTHERS THEN
             cas_ok_val := false;
             cas_path_val := 'BOTH_FAIL';
