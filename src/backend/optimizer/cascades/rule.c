@@ -2207,6 +2207,12 @@ pg_cascades_get_impl_rules_phase2_scan(int *num_rules)
     return g_impl_rules_phase2_scan;
 }
 
+static List *
+pg_rule_dummy_noop(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
+{
+    (void) ctx; (void) expr;
+    return NIL;
+}
 /* Phase 2: Join-only rules (safe for tree-based Memo with PG Path import) */
 PgRule *
 pg_cascades_get_impl_rules_phase2_join(int *num_rules)

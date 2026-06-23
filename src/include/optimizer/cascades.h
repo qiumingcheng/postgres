@@ -623,8 +623,6 @@ extern Relids pg_cascades_group_relids(PgPlannerCascadesContext *ctx,
                                         PgMemoGroup *group);
 
 /* pg_adapter.c */
-extern PgGroupExpr *pg_cascades_build_logical_root(
-    PgPlannerCascadesContext *ctx);
 extern PgCascadesOpKind pg_cascades_pathtype_to_opkind(NodeTag pathtype);
 
 /* planbuild.c */

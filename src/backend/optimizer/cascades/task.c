@@ -641,6 +641,11 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             new_expr->applied_rules = bms_add_member(expr->applied_rules,
                                                        rule->rule_bit);
 
+            /* Phase 6: Inherit explored_rules to prevent re-exploring
+             * already-tried rules on derived expressions. */
+            if (expr->explored_rules != NULL)
+                new_expr->explored_rules = bms_copy(expr->explored_rules);
+
             group = pg_memo_insert_expression(ctx, ctx->memo, new_expr,
                                                expr->owner_group);
             if (group == NULL)

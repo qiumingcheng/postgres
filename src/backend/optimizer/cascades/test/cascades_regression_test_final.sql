@@ -9,6 +9,7 @@
 -- 确保 fallback_on_error 开启
 SET cascades_planner_fallback_on_error = on;
 SET cascades_planner_debug = off;
+SET cascades_planner_max_tasks = 5000;
 SET client_min_messages = warning;
 
 -- ============================================================================
