@@ -230,6 +230,116 @@ SELECT cas_run_test(21, 'T21: for update',
     $$SELECT id, a, b FROM cascades_test_t WHERE id = 1 FOR UPDATE$$);
 
 -- ============================================================================
+-- Part 8: Extended Coverage — 变换规则 + Enforcer + Property 全覆盖 (T25-T44)
+-- ============================================================================
+\echo '=== T25-T44: Extended Coverage ==='
+
+-- T25: 3-table all INNER JOIN → triggers C2 JoinAssociativity
+SELECT cas_run_test(25, 'T25: 3-inner-join (associativity)',
+    $$SELECT t1.val AS v1, t2.val AS v2, t3.val AS v3
+      FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id$$);
+
+-- T26: LEFT JOIN where right side unreferenced → triggers G2 OuterJoinElimination
+SELECT cas_run_test(26, 'T26: left join unreferenced (outer elim)',
+    $$SELECT t1.id, t1.val FROM cascades_test_j1 t1
+      LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+
+-- T27: INNER JOIN with dual WHERE → triggers A2 PushDownPredicateJoin
+SELECT cas_run_test(27, 'T27: join+filter (predicate pushdown join)',
+    $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      WHERE t1.val > 20 AND t2.val > 10$$);
+
+-- T28: INNER JOIN with WHERE on both sides → triggers filter interaction with join
+SELECT cas_run_test(28, 'T28: join with filter on both sides',
+    $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      WHERE t1.val > 10 AND t2.val > 5$$);
+
+-- T29: ORDER BY without matching index → forces Sort enforcer
+SELECT cas_run_test(29, 'T29: sort enforcer (no index)',
+    $$SELECT * FROM cascades_test_t ORDER BY name LIMIT 10$$);
+
+-- T30: GROUP BY + ORDER BY different columns → tests pathkey interaction
+SELECT cas_run_test(30, 'T30: group+order diff cols',
+    $$SELECT a, count(*) AS cnt FROM cascades_test_t
+      GROUP BY a ORDER BY cnt DESC LIMIT 5$$);
+
+-- T31: DISTINCT + ORDER BY same column → Unique sorted path
+SELECT cas_run_test(31, 'T31: distinct+order same col',
+    $$SELECT DISTINCT b FROM cascades_test_t ORDER BY b LIMIT 10$$);
+
+-- T32: LIMIT without ORDER → tests pure Limit path
+SELECT cas_run_test(32, 'T32: limit no order',
+    $$SELECT * FROM cascades_test_t LIMIT 3$$);
+
+-- T33: Aggregate without GROUP BY → HashAgg single-group
+SELECT cas_run_test(33, 'T33: agg no group (single-group HashAgg)',
+    $$SELECT count(*), sum(a), avg(b) FROM cascades_test_t WHERE a > 10$$);
+
+-- T34: GROUP BY + HAVING with aggregation condition
+SELECT cas_run_test(34, 'T34: having with agg condition',
+    $$SELECT a, count(*) AS cnt, sum(b) AS s FROM cascades_test_t
+      GROUP BY a HAVING count(*) > 1 AND sum(b) > 10 ORDER BY a LIMIT 10$$);
+
+-- T35: LIMIT with OFFSET
+SELECT cas_run_test(35, 'T35: limit with offset',
+    $$SELECT * FROM cascades_test_t ORDER BY id LIMIT 5 OFFSET 10$$);
+
+-- T36: 2-table self-join → tests dedup with same table twice
+SELECT cas_run_test(36, 'T36: semi join (inner unique)',
+    $$SELECT t1.* FROM cascades_test_j1 t1
+      WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2
+                    WHERE t2.j1_id = t1.id AND t2.val > 5)$$);
+
+-- T37: Composite ORDER BY with LIMIT → tests multi-key sort
+SELECT cas_run_test(37, 'T37: multi-key sort',
+    $$SELECT * FROM cascades_test_t ORDER BY a DESC, b ASC LIMIT 15$$);
+
+-- T38: NOT IN (anti-join with subquery)
+SELECT cas_run_test(38, 'T38: not in subquery',
+    $$SELECT * FROM cascades_test_j1 t1
+      WHERE t1.id NOT IN (SELECT j1_id FROM cascades_test_j2 WHERE val > 10)
+      LIMIT 10$$);
+
+-- T39: Correlated EXISTS with aggregation
+SELECT cas_run_test(39, 'T39: correlated exists agg',
+    $$SELECT * FROM cascades_test_j1 t1
+      WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2
+                    WHERE t2.j1_id = t1.id AND t2.val > 15)$$);
+
+-- T40: SELECT with expression in target list → tests Project cost
+SELECT cas_run_test(40, 'T40: expr in target list',
+    $$SELECT a + b AS sum_ab, a * b AS prod_ab, name || '_suffix' AS labeled
+      FROM cascades_test_t WHERE a > 10 ORDER BY sum_ab LIMIT 10$$);
+
+-- T41: Aggregate with DISTINCT inside (count distinct)
+SELECT cas_run_test(41, 'T41: count distinct',
+    $$SELECT count(DISTINCT a) AS distinct_a, count(DISTINCT b) AS distinct_b
+      FROM cascades_test_t$$);
+
+-- T42: 2-table LEFT JOIN → tests outer join handling
+SELECT cas_run_test(42, 'T42: left join with filter',
+    $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_j1 t1
+      LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      WHERE t1.val > 10 LIMIT 15$$);
+
+-- T43: IS NULL filter → empty set edge case
+SELECT cas_run_test(43, 'T43: is null filter',
+    $$SELECT * FROM cascades_test_t WHERE name IS NULL LIMIT 5$$);
+
+-- T44: Complex: JOIN + WHERE + GROUP + HAVING + ORDER + LIMIT
+SELECT cas_run_test(44, 'T44: full complex query',
+    $$SELECT t1.a, count(*) AS cnt, sum(t2.val) AS total_val
+      FROM cascades_test_t t1
+      JOIN cascades_test_j2 t2 ON t1.b = t2.val
+      WHERE t1.a > 10
+      GROUP BY t1.a HAVING count(*) > 1
+      ORDER BY total_val DESC LIMIT 10$$);
+
+-- ============================================================================
 -- TEST SUMMARY
 -- ============================================================================
 \echo ''
