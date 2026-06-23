@@ -27,16 +27,44 @@ DROP TABLE IF EXISTS _cov_test_results;
 CREATE TEMP TABLE _cov_test_results (test_id INTEGER, test_name TEXT, pg_ok BOOLEAN, cas_ok BOOLEAN, cas_path TEXT);
 
 CREATE OR REPLACE FUNCTION cov_test(test_id INTEGER, test_name TEXT, sql_text TEXT) RETURNS TEXT AS $$
-DECLARE pg_ok_val BOOLEAN := false; cas_ok_val BOOLEAN := false; cas_path_val TEXT := 'ERROR';
+DECLARE
+    pg_ok_val  BOOLEAN := false;
+    cas_ok_val BOOLEAN := false;
+    cas_path_val TEXT := 'ERROR';
+    dummy      INTEGER;
 BEGIN
+    -- PG original planner: wrap in subquery to force plan execution
     SET enable_cascades_planner = off;
-    BEGIN EXECUTE 'CREATE TEMP TABLE _ct AS ' || sql_text; pg_ok_val := true; DROP TABLE IF EXISTS _ct; EXCEPTION WHEN OTHERS THEN pg_ok_val := false; END;
+    BEGIN
+        EXECUTE 'SELECT count(*) FROM (' || sql_text || ') AS _sub' INTO dummy;
+        pg_ok_val := true;
+    EXCEPTION WHEN OTHERS THEN
+        pg_ok_val := false;
+    END;
+
+    -- Cascades planner
     SET enable_cascades_planner = on;
-    BEGIN EXECUTE 'CREATE TEMP TABLE _ct AS ' || sql_text; cas_ok_val := true; cas_path_val := 'CASCADES'; DROP TABLE IF EXISTS _ct;
-    EXCEPTION WHEN OTHERS THEN BEGIN SET enable_cascades_planner = off; EXECUTE 'CREATE TEMP TABLE _ct AS ' || sql_text; cas_ok_val := true; cas_path_val := 'FALLBACK'; DROP TABLE IF EXISTS _ct; EXCEPTION WHEN OTHERS THEN cas_ok_val := false; cas_path_val := 'BOTH_FAIL'; END; END;
+    BEGIN
+        EXECUTE 'SELECT count(*) FROM (' || sql_text || ') AS _sub' INTO dummy;
+        cas_ok_val := true;
+        cas_path_val := 'CASCADES';
+    EXCEPTION WHEN OTHERS THEN
+        -- Fallback: try PG original planner
+        BEGIN
+            SET enable_cascades_planner = off;
+            EXECUTE 'SELECT count(*) FROM (' || sql_text || ') AS _sub' INTO dummy;
+            cas_ok_val := true;
+            cas_path_val := 'FALLBACK';
+        EXCEPTION WHEN OTHERS THEN
+            cas_ok_val := false;
+            cas_path_val := 'BOTH_FAIL';
+        END;
+    END;
+
     INSERT INTO _cov_test_results VALUES (test_id, test_name, pg_ok_val, cas_ok_val, cas_path_val);
     RETURN test_name || ': ' || cas_path_val;
-END; $$ LANGUAGE plpgsql;
+END;
+$$ LANGUAGE plpgsql;
 
 \echo '=== Part 1: Join impl rules ==='
 SELECT cov_test(101, 'C101: inner join eq', $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);

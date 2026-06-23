@@ -709,7 +709,46 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     (PgRequiredProperty *) pg_safe_linitial_child_req(best),
                     child_best, &child_out);
 
-                /* Wrap with Result. Use sub_tlist (no Aggrefs) for safety. */
+                /*
+                 * For queries without aggregation, the sub_tlist's Var
+                 * references should match the child plan's output after
+                 * set_plan_references in standard_planner.  We have two
+                 * strategies depending on the child plan type:
+                 *
+                 * 1. Projection-capable (Scan, Sort, etc.):
+                 *    Replace the plan's targetlist with sub_tlist.
+                 *    This works because set_plan_references can map
+                 *    the Vars correctly for simple plans.
+                 *
+                 * 2. Not projection-capable (Join plans):
+                 *    Return the child directly without wrapping.
+                 *    The join plan's output (from make_one_rel's
+                 *    reltarget) already contains all needed columns.
+                 *    set_plan_references maps the query tlist to the
+                 *    join output — exactly like the standard planner
+                 *    does when need_tlist_eval is false.
+                 *
+                 * StarRocks reference: OptExpression tree's Project
+                 * node is resolved by mapping ColumnRefOperators,
+                 * not by wrapping with a separate projection node.
+                 */
+                if (ctx->upper->numGroupCols == 0 &&
+                    !ctx->upper->hasAggs &&
+                    ctx->upper->activeWindows == NIL)
+                {
+                    if (is_projection_capable_plan(child))
+                    {
+                        child->targetlist = ctx->upper->sub_tlist;
+                        return child;
+                    }
+                    else
+                    {
+                        /* Join plan: return directly, let set_plan_references handle it */
+                        return child;
+                    }
+                }
+
+                /* Agg/grouping: wrap with Result for safety */
                 result = (Plan *) make_result(ctx->root,
                     ctx->upper->sub_tlist,
                     NULL,
