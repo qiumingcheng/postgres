@@ -80,6 +80,15 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
         Plan *child_plan = NULL;
         Plan *result = NULL;
 
+        /*
+         * Guard: the compiler optimizes linitial(NIL) into an unconditional
+         * trap (ud2/mov 0x0,%rax) for PG_CASCADES_LOGICAL_PROJECT, _AGG,
+         * _SORT, _LIMIT, _DISTINCT cases.  If a logical expression has no
+         * inputs (e.g., malformed by rewrite), skip it rather than crashing.
+         */
+        if (logical->inputs == NIL)
+            continue;
+
         switch (logical->op)
         {
             case PG_CASCADES_LOGICAL_JOIN:
@@ -312,6 +321,23 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
     return NULL;
 }
 
+/*
+ * pg_safe_linitial_child_req:
+ *   Safe accessor for linitial(best->child_required_props).
+ *   Must be NOINLINE so the compiler cannot optimize away the NULL check
+ *   and insert a trap (ud2).  With -O2, gcc treats linitial(NIL) as
+ *   undefined behavior and replaces it with a deliberate crash.
+ *
+ *   Returns NULL when child_required_props is NIL (graceful fallback).
+ */
+static __attribute__((noinline)) PgRequiredProperty *
+pg_safe_linitial_child_req(PgGroupBestEntry *best)
+{
+    if (best->child_required_props == NIL)
+        return NULL;
+    return (PgRequiredProperty *) linitial(best->child_required_props);
+}
+
 /* ========================================================================
  * Recursive Plan Builder
  * ======================================================================== */
@@ -327,17 +353,6 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
     Plan       *result = NULL;
 
     *output = best->output;
-
-    /*
-     * Guard: for upper ops (HashAgg, GroupAgg, Sort, Unique, Limit),
-     * the compiler optimizes linitial(best->child_required_props) into
-     * a trap before the foreach loop.  When enforcer rules create entries
-     * without child requirements, child_required_props is NIL and we
-     * cannot recurse — return NULL.  Leaf/join IMPORTED_PATH entries
-     * never have children, so this guard does not apply to them.
-     */
-    if (expr->inputs != NIL && best->child_required_props == NIL)
-        return NULL;
 
     switch (expr->op)
     {
@@ -361,6 +376,8 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 PgMemoGroup *child_group;
                 ListCell *lc;
 
+                if (expr->inputs == NIL)
+                    return NULL;
                 child_group = (PgMemoGroup *) linitial(expr->inputs);
                 if (child_group->best_entries == NIL)
                     return NULL;
@@ -371,7 +388,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
                     if (best->child_required_props != NIL &&
                         pg_required_property_equal(e->required,
-                            (PgRequiredProperty *) linitial(best->child_required_props)))
+                            (PgRequiredProperty *) pg_safe_linitial_child_req(best)))
                     {
                         child_best = e;
                         break;
@@ -382,7 +399,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
 
                 child = pg_cascades_build_plan_recurse(ctx,
                     (PgMemoGroup *) linitial(expr->inputs),
-                    (PgRequiredProperty *) linitial(best->child_required_props),
+                    (PgRequiredProperty *) pg_safe_linitial_child_req(best),
                     child_best, &child_out);
 
                 result = (Plan *) make_sort_from_pathkeys(ctx->root, child,
@@ -443,7 +460,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                              e->expr->op, e->required->pathkeys);
                     if (best->child_required_props != NIL &&
                         pg_required_property_equal(e->required,
-                            (PgRequiredProperty *) linitial(best->child_required_props)))
+                            (PgRequiredProperty *) pg_safe_linitial_child_req(best)))
                     {
                         child_best = e;
                         break;
@@ -464,7 +481,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
 
                 child = pg_cascades_build_plan_recurse(ctx,
                     (PgMemoGroup *) linitial(expr->inputs),
-                    (PgRequiredProperty *) linitial(best->child_required_props),
+                    (PgRequiredProperty *) pg_safe_linitial_child_req(best),
                     child_best, &child_out);
                 if (child == NULL)
                 {
@@ -514,7 +531,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
                     if (best->child_required_props != NIL &&
                         pg_required_property_equal(e->required,
-                            (PgRequiredProperty *) linitial(best->child_required_props)))
+                            (PgRequiredProperty *) pg_safe_linitial_child_req(best)))
                     {
                         child_best = e;
                         break;
@@ -525,7 +542,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
 
                 child = pg_cascades_build_plan_recurse(ctx,
                     (PgMemoGroup *) linitial(expr->inputs),
-                    (PgRequiredProperty *) linitial(best->child_required_props),
+                    (PgRequiredProperty *) pg_safe_linitial_child_req(best),
                     child_best, &child_out);
                 if (child == NULL)
                     return NULL;
@@ -565,6 +582,8 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 PgMemoGroup *child_group;
                 ListCell *lc;
 
+                if (expr->inputs == NIL)
+                    return NULL;
                 child_group = (PgMemoGroup *) linitial(expr->inputs);
                 if (child_group->best_entries == NIL)
                     return NULL;
@@ -574,7 +593,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
                     if (best->child_required_props != NIL &&
                         pg_required_property_equal(e->required,
-                            (PgRequiredProperty *) linitial(best->child_required_props)))
+                            (PgRequiredProperty *) pg_safe_linitial_child_req(best)))
                     {
                         child_best = e;
                         break;
@@ -585,7 +604,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
 
                 child = pg_cascades_build_plan_recurse(ctx,
                     (PgMemoGroup *) linitial(expr->inputs),
-                    (PgRequiredProperty *) linitial(best->child_required_props),
+                    (PgRequiredProperty *) pg_safe_linitial_child_req(best),
                     child_best, &child_out);
 
                 result = (Plan *) make_unique(child, ctx->upper->distinctClause);
@@ -600,6 +619,8 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 PgMemoGroup *child_group;
                 ListCell *lc;
 
+                if (expr->inputs == NIL)
+                    return NULL;
                 child_group = (PgMemoGroup *) linitial(expr->inputs);
                 if (child_group->best_entries == NIL)
                     return NULL;
@@ -609,7 +630,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
                     if (best->child_required_props != NIL &&
                         pg_required_property_equal(e->required,
-                            (PgRequiredProperty *) linitial(best->child_required_props)))
+                            (PgRequiredProperty *) pg_safe_linitial_child_req(best)))
                     {
                         child_best = e;
                         break;
@@ -620,7 +641,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
 
                 child = pg_cascades_build_plan_recurse(ctx,
                     (PgMemoGroup *) linitial(expr->inputs),
-                    (PgRequiredProperty *) linitial(best->child_required_props),
+                    (PgRequiredProperty *) pg_safe_linitial_child_req(best),
                     child_best, &child_out);
 
                 result = (Plan *) make_limit(child,
@@ -639,6 +660,8 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 PgMemoGroup *child_group;
                 ListCell *lc;
 
+                if (expr->inputs == NIL)
+                    return NULL;
                 child_group = (PgMemoGroup *) linitial(expr->inputs);
                 if (child_group->best_entries == NIL)
                     return NULL;
@@ -648,7 +671,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
                     if (best->child_required_props != NIL &&
                         pg_required_property_equal(e->required,
-                            (PgRequiredProperty *) linitial(best->child_required_props)))
+                            (PgRequiredProperty *) pg_safe_linitial_child_req(best)))
                     {
                         child_best = e;
                         break;
@@ -659,7 +682,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
 
                 child = pg_cascades_build_plan_recurse(ctx,
                     (PgMemoGroup *) linitial(expr->inputs),
-                    (PgRequiredProperty *) linitial(best->child_required_props),
+                    (PgRequiredProperty *) pg_safe_linitial_child_req(best),
                     child_best, &child_out);
 
                 /* Wrap with Result. Use sub_tlist (no Aggrefs) for safety. */
