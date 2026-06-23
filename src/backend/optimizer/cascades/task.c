@@ -158,7 +158,7 @@ pg_task_optimize_group(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
      */
     if (group->lower_bound_cost > 0 &&
         ctx->upper_bound_cost > 0 &&
-        group->lower_bound_cost >= ctx->upper_bound_cost)
+        group->lower_bound_cost > ctx->upper_bound_cost)
     {
         group->optimized = true;  /* don't retry */
         if (ctx->debug)
@@ -724,7 +724,7 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
 
         /* Phase 4: upper-bound pruning */
         if (ctx->upper_bound_cost > 0 &&
-            path->total_cost >= ctx->upper_bound_cost)
+            path->total_cost > ctx->upper_bound_cost)
             return PG_CASCADES_OK;
 
         entry = (PgGroupBestEntry *) palloc0(sizeof(PgGroupBestEntry));
@@ -811,7 +811,7 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                      */
                     if (child_group->lower_bound_cost > 0 &&
                         ctx->upper_bound_cost > 0 &&
-                        child_group->lower_bound_cost >= ctx->upper_bound_cost)
+                        child_group->lower_bound_cost > ctx->upper_bound_cost)
                     {
                         /* Record failure on parent too */
                         if (ctx->upper_bound_cost > 0)
@@ -993,7 +993,7 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
 
             /* Phase 4 + Phase 6: upper-bound pruning with lower-bound recording */
             if (ctx->upper_bound_cost > 0 &&
-                task->total_cost >= ctx->upper_bound_cost)
+                task->total_cost > ctx->upper_bound_cost)
             {
                 /*
                  * Phase 6: Record lower bound on this group.

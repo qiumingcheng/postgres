@@ -407,6 +407,33 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     /* Re-derive logical properties after rewrite */
     pg_memo_derive_logical_property_v2(ctx.memo, &ctx);
 
+    /*
+     * Phase 6: After rewrite, root_group may point to an empty group
+     * (merged away by EliminateLimit/EliminateProject).  Find the
+     * first non-empty group and make it the new root.
+     */
+    {
+        PgMemoGroup *root_g = ctx.memo->root_group;
+        if (root_g != NULL &&
+            root_g->logical_exprs == NIL &&
+            root_g->physical_exprs == NIL)
+        {
+            ListCell *lc;
+            foreach(lc, ctx.memo->groups)
+            {
+                PgMemoGroup *g = (PgMemoGroup *) lfirst(lc);
+                if (g->logical_exprs != NIL || g->physical_exprs != NIL)
+                {
+                    ctx.memo->root_group = g;
+                    if (ctx.debug)
+                        elog(NOTICE, "Cascades: updated root_group from %d to %d after rewrite",
+                             root_g->id, g->id);
+                    break;
+                }
+            }
+        }
+    }
+
     /* 8. Run task scheduler */
     {
         PgOptimizerTask *root_task;
