@@ -152,16 +152,66 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
     pg_memo_build_hash_key(&key, expr);
 
     /*
-     * Phase 4: Global hash table dedup for logical expressions.
-     * Check if an equivalent expression already exists in any group.
+     * Phase 4 + Phase 6: Global hash table dedup for logical expressions.
+     *
+     * Phase 6: When a duplicate expression is found in a DIFFERENT group
+     * than its first occurrence, automatically merge the two groups.
+     * This is the StarRocks "copyIn auto-merge" behavior:
+     *   if the same (op + child groups) expression appears in two groups,
+     *   those groups are semantically equivalent → merge them.
      */
     if ((int)expr->op < PG_CASCADES_PHYSICAL_SEQSCAN &&
         expr->mode != PG_PHYS_EXPR_IMPORTED_PATH &&
         memo->group_expr_table != NULL)
     {
-        (void) hash_search(memo->group_expr_table, &key, HASH_ENTER, &found);
+        PgExprHashEntry *entry;
+        bool             found;
+
+        entry = (PgExprHashEntry *)
+            hash_search(memo->group_expr_table, &key, HASH_ENTER, &found);
+
         if (found)
-            return NULL;  /* Duplicate — skip */
+        {
+            /*
+             * Duplicate found in global hash table.
+             * entry->owner_group_id tells us which group owns the first copy.
+             */
+            PgMemoGroup *owner_group = NULL;
+            ListCell    *gc;
+
+            foreach(gc, memo->groups)
+            {
+                PgMemoGroup *g = (PgMemoGroup *) lfirst(gc);
+                if (g->id == entry->owner_group_id)
+                {
+                    owner_group = g;
+                    break;
+                }
+            }
+
+            if (owner_group == NULL)
+                return NULL;  /* shouldn't happen, but be safe */
+
+            /*
+             * If a parent_group is given AND it differs from the owner,
+             * the same expression exists in two groups — they are equivalent.
+             * Merge the parent (typically the rule's target) into the owner.
+             */
+            if (parent_group != NULL && parent_group != owner_group)
+            {
+                pg_memo_merge_group(ctx, owner_group, parent_group);
+                if (ctx->debug)
+                    elog(NOTICE, "Cascades: auto-merged group %d into group %d "
+                         "(duplicate expr op=%d)",
+                         parent_group->id, owner_group->id, (int)expr->op);
+            }
+
+            return owner_group;  /* use the existing group */
+        }
+        else
+        {
+            /* First occurrence — will set owner_group_id after group is determined */
+        }
     }
 
     /*
@@ -196,6 +246,26 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
     }
     else
         group = pg_memo_new_group(ctx);
+
+    /*
+     * Phase 6: If this was the first occurrence of this expression,
+     * record the group ID in the hash entry for future auto-merge.
+     */
+    if ((int)expr->op < PG_CASCADES_PHYSICAL_SEQSCAN &&
+        expr->mode != PG_PHYS_EXPR_IMPORTED_PATH &&
+        memo->group_expr_table != NULL)
+    {
+        PgExprHashEntry *entry;
+        bool             dummy_found;
+
+        entry = (PgExprHashEntry *)
+            hash_search(memo->group_expr_table, &key, HASH_FIND, &dummy_found);
+        if (entry != NULL && found)
+        {
+            /* entry was newly inserted by HASH_ENTER above — set owner */
+            entry->owner_group_id = group->id;
+        }
+    }
 
     /* Add as logical or physical */
     if (expr->mode == PG_PHYS_EXPR_IMPORTED_PATH ||
@@ -311,10 +381,13 @@ pg_memo_init(PgPlannerCascadesContext *ctx, PgGroupExpr *logical_root)
     memo->groups = NIL;
     memo->root_group = NULL;
 
-    /* Phase 4: Create hash table for GroupExpression dedup */
+    /* Phase 4: Create hash table for GroupExpression dedup.
+     * keysize = sizeof(PgExprHashKey) — only the key part is hashed/compared.
+     * entrysize = sizeof(PgExprHashEntry) — stores key + owner_group_id
+     *   for automatic group merging on duplicate detection. */
     MemSet(&hash_ctl, 0, sizeof(hash_ctl));
     hash_ctl.keysize = sizeof(PgExprHashKey);
-    hash_ctl.entrysize = sizeof(PgExprHashKey);
+    hash_ctl.entrysize = sizeof(PgExprHashEntry);
     hash_ctl.hash = pg_memo_hash_key;
     hash_ctl.match = pg_memo_match_key;
     hash_ctl.hcxt = ctx->memo_cxt;

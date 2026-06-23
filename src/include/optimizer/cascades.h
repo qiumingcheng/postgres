@@ -437,6 +437,18 @@ typedef struct PgExprHashKey
     int32           group_ids[PG_MEMO_HASH_MAX_INPUTS];
 } PgExprHashKey;
 
+/*
+ * PgExprHashEntry: hash table entry for global GroupExpression dedup.
+ * The hash key (op + group_ids) is used for lookup; owner_group_id
+ * records which group first created this expression.  When a duplicate
+ * is later inserted into a different group, the two groups are merged.
+ */
+typedef struct PgExprHashEntry
+{
+    PgExprHashKey  key;              /* hash key (op + input group IDs) */
+    int32          owner_group_id;    /* group that first inserted this expr */
+} PgExprHashEntry;
+
 /* ========================================================================
  * 上下文结构
  * ======================================================================== */
