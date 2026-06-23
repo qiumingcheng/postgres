@@ -328,6 +328,17 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
 
     *output = best->output;
 
+    /*
+     * Guard: for upper ops (HashAgg, GroupAgg, Sort, Unique, Limit),
+     * the compiler optimizes linitial(best->child_required_props) into
+     * a trap before the foreach loop.  When enforcer rules create entries
+     * without child requirements, child_required_props is NIL and we
+     * cannot recurse — return NULL.  Leaf/join IMPORTED_PATH entries
+     * never have children, so this guard does not apply to them.
+     */
+    if (expr->inputs != NIL && best->child_required_props == NIL)
+        return NULL;
+
     switch (expr->op)
     {
         /* === IMPORTED_PATH: call create_plan directly === */
@@ -347,10 +358,15 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 Plan *child;
                 PgGroupBestEntry *child_best = NULL;
                 PgOutputProperty child_out;
+                PgMemoGroup *child_group;
                 ListCell *lc;
 
+                child_group = (PgMemoGroup *) linitial(expr->inputs);
+                if (child_group->best_entries == NIL)
+                    return NULL;
+
                 /* find child best */
-                foreach(lc, ((PgMemoGroup *)linitial(expr->inputs))->best_entries)
+                foreach(lc, child_group->best_entries)
                 {
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
                     if (best->child_required_props != NIL &&
@@ -382,7 +398,36 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 PgMemoGroup *child_group;
                 ListCell *lc;
 
+                /*
+                 * Guard: expr->inputs may be NIL if the task scheduler
+                 * produced an expression without setting inputs (e.g.,
+                 * after rewrite rules removed children).  The compiler
+                 * treats linitial(NIL) as unreachable and inserts a trap,
+                 * so we must check explicitly.
+                 */
+                if (expr->inputs == NIL)
+                    return NULL;
+
                 child_group = (PgMemoGroup *) linitial(expr->inputs);
+
+                /*
+                 * Guard: best_entries may be NIL if the task scheduler has not
+                 * yet populated this group (e.g., after group merging or when
+                 * the join path generation was incomplete).  The compiler may
+                 * optimize foreach/linitial on NIL into an unreachable trap,
+                 * so we must check explicitly and return NULL unconditionally.
+                 */
+                if (child_group->best_entries == NIL)
+                    return NULL;
+
+                /*
+                 * Guard: best->child_required_props may be NIL when enforcer
+                 * rules create entries without child required properties.
+                 * The compiler optimizes linitial(NIL) into a trap before
+                 * the foreach loop, so we must check explicitly.
+                 */
+                if (best->child_required_props == NIL)
+                    return NULL;
 
                 if (cascades_planner_debug)
                     elog(NOTICE, "planbuild HashAgg: child_group=%d best_entries=%d child_required_props=%s",
@@ -446,9 +491,25 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 Plan *child;
                 PgGroupBestEntry *child_best = NULL;
                 PgOutputProperty child_out;
+                PgMemoGroup *child_group;
                 ListCell *lc;
 
-                foreach(lc, ((PgMemoGroup *)linitial(expr->inputs))->best_entries)
+                /* Guard: same as HashAgg case above */
+                if (expr->inputs == NIL)
+                    return NULL;
+
+                child_group = (PgMemoGroup *) linitial(expr->inputs);
+
+                /* Guard: same as HashAgg case above */
+                if (child_group->best_entries == NIL)
+                {
+                    if (cascades_planner_debug)
+                        elog(WARNING, "planbuild GroupAgg: child_group=%d best_entries is NIL",
+                             child_group->id);
+                    return NULL;
+                }
+
+                foreach(lc, child_group->best_entries)
                 {
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
                     if (best->child_required_props != NIL &&
@@ -501,9 +562,14 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 Plan *child;
                 PgGroupBestEntry *child_best = NULL;
                 PgOutputProperty child_out;
+                PgMemoGroup *child_group;
                 ListCell *lc;
 
-                foreach(lc, ((PgMemoGroup *)linitial(expr->inputs))->best_entries)
+                child_group = (PgMemoGroup *) linitial(expr->inputs);
+                if (child_group->best_entries == NIL)
+                    return NULL;
+
+                foreach(lc, child_group->best_entries)
                 {
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
                     if (best->child_required_props != NIL &&
@@ -531,9 +597,14 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 Plan *child;
                 PgGroupBestEntry *child_best = NULL;
                 PgOutputProperty child_out;
+                PgMemoGroup *child_group;
                 ListCell *lc;
 
-                foreach(lc, ((PgMemoGroup *)linitial(expr->inputs))->best_entries)
+                child_group = (PgMemoGroup *) linitial(expr->inputs);
+                if (child_group->best_entries == NIL)
+                    return NULL;
+
+                foreach(lc, child_group->best_entries)
                 {
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
                     if (best->child_required_props != NIL &&
@@ -565,9 +636,14 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 Plan *child;
                 PgGroupBestEntry *child_best = NULL;
                 PgOutputProperty child_out;
+                PgMemoGroup *child_group;
                 ListCell *lc;
 
-                foreach(lc, ((PgMemoGroup *)linitial(expr->inputs))->best_entries)
+                child_group = (PgMemoGroup *) linitial(expr->inputs);
+                if (child_group->best_entries == NIL)
+                    return NULL;
+
+                foreach(lc, child_group->best_entries)
                 {
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
                     if (best->child_required_props != NIL &&

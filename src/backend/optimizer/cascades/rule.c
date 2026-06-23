@@ -455,9 +455,14 @@ pg_rule_prune_empty_scan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 static List *
 pg_rule_eliminate_project(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
-    PgMemoGroup *child_group = (PgMemoGroup *) linitial(expr->inputs);
+    PgMemoGroup *child_group;
     PgGroupExpr *child = NULL;
     ListCell   *lc;
+
+    if (expr->inputs == NIL)
+        return NIL;
+
+    child_group = (PgMemoGroup *) linitial(expr->inputs);
 
     /* Find LogicalProject in child group's logical expressions */
     foreach(lc, child_group->logical_exprs)
@@ -502,12 +507,18 @@ pg_rule_eliminate_project(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 static List *
 pg_rule_pushdown_predicate_scan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
-    PgMemoGroup *child_group = (PgMemoGroup *) linitial(expr->inputs);
+    PgMemoGroup *child_group;
     List        *filter_quals = (List *) expr->op_private;
-    RelOptInfo  *rel = child_group->rel;
+    RelOptInfo  *rel;
     ListCell    *lc;
     List        *pushable = NIL;
     List        *remain   = NIL;
+
+    if (expr->inputs == NIL)
+        return NIL;
+
+    child_group = (PgMemoGroup *) linitial(expr->inputs);
+    rel = child_group->rel;
 
     if (rel == NULL || filter_quals == NIL)
         return NIL;
