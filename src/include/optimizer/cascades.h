@@ -111,7 +111,10 @@ typedef enum PgCascadesOpKind
 #define PG_RULE_BIT_JOIN_TO_NESTLOOP_PHASE4  44  /* Phase4 NestLoop */
 #define PG_RULE_BIT_JOIN_TO_MERGEJOIN_PHASE4 45  /* Phase4 MergeJoin */
 
-#define PG_RULE_BIT_MAX                   46
+/* Phase 6: additional transformation rules */
+#define PG_RULE_BIT_MERGE_LIMIT_CHILD_LIMIT 46  /* H5 */
+
+#define PG_RULE_BIT_MAX                   47
 
 /* Physical expression 模式：导入的完整 Path vs 可组合算子 */
 typedef enum PgPhysicalExprMode
@@ -214,6 +217,7 @@ struct PgGroupExpr
     Bitmapset  *explored_rules;     /* Phase 4: 已尝试探索规则 */
     uint32      expr_hash;           /* Phase 4: hash for dedup */
     bool        stats_derived;      /* 统计信息是否已推导 */
+    Cost        best_cost;           /* Phase 6: cached best total_cost for pruning */
 
     void       *op_private;         /* Path*, RTE, RestrictInfo list, Agg info 等 */
 

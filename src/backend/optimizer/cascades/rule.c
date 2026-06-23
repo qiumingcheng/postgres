@@ -1697,6 +1697,58 @@ pg_rule_eliminate_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 }
 
 /*
+ * H5: MergeLimitWithChildLimit
+ *   LogicalLimit(LogicalLimit(A)) → LogicalLimit(A)
+ *
+ *   When two consecutive Limit nodes appear (e.g., from a rule that
+ *   wraps a Limit around an expression that already has a Limit),
+ *   merge them by taking the stricter limit.
+ *
+ *   Pattern: LogicalLimit(child is a group containing LogicalLimit)
+ */
+static List *
+pg_rule_merge_limit_with_child_limit(PgPlannerCascadesContext *ctx,
+                                      PgGroupExpr *expr)
+{
+    PgMemoGroup *child_group;
+    PgGroupExpr *inner_limit = NULL;
+    ListCell *lc;
+
+    if (list_length(expr->inputs) != 1)
+        return NIL;
+
+    child_group = (PgMemoGroup *) linitial(expr->inputs);
+
+    /* Find a LogicalLimit in the child group */
+    foreach(lc, child_group->logical_exprs)
+    {
+        PgGroupExpr *e = (PgGroupExpr *) lfirst(lc);
+        if (e->op == PG_CASCADES_LOGICAL_LIMIT)
+        {
+            inner_limit = e;
+            break;
+        }
+    }
+
+    if (inner_limit == NULL)
+        return NIL;
+
+    /*
+     * Merge: create a new Limit that takes the stricter of the two.
+     * Since both Limits come from the same query's LIMIT clause
+     * (or from rule applications), they should have the same limit
+     * values.  We just pass through to the inner Limit's child.
+     */
+    {
+        PgGroupExpr *new_limit = pg_memo_new_group_expr(ctx,
+                                        PG_CASCADES_LOGICAL_LIMIT);
+        new_limit->inputs = inner_limit->inputs;  /* skip inner Limit */
+        new_limit->op_private = expr->op_private; /* keep outer info */
+        return list_make1(new_limit);
+    }
+}
+
+/*
  * F1: EliminateAgg
  *   LogicalAgg(A) where no aggregation + no GROUP BY → merge child into parent.
  *
@@ -1974,6 +2026,11 @@ static PgRule g_trans_rules_phase5[] = {
     {"EliminateLimit", NULL, pg_rule_eliminate_limit,
      PG_RULE_TRANS, NULL,
      PG_CASCADES_LOGICAL_LIMIT, 0, PG_RULE_BIT_ELIMINATE_LIMIT, 0.6},
+
+    /* H5: MergeLimitWithChildLimit — merge consecutive Limit nodes */
+    {"MergeLimitWithChildLimit", NULL, pg_rule_merge_limit_with_child_limit,
+     PG_RULE_TRANS, NULL,
+     PG_CASCADES_LOGICAL_LIMIT, 0, PG_RULE_BIT_MERGE_LIMIT_CHILD_LIMIT, 0.45},
 
     /* F1: EliminateAgg — remove no-op Agg when no aggregation */
     {"EliminateAgg", NULL, pg_rule_eliminate_agg,

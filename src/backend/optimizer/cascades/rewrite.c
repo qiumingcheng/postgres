@@ -76,6 +76,7 @@ static PgRewriteRule g_rules_final_cleanup[] = {
     {"EliminateSortWithConstKey",    PG_CASCADES_LOGICAL_SORT,    NULL, 0, 0.5},
     {"PruneEmptyScan",               PG_CASCADES_LOGICAL_SCAN,    NULL, 0, 0.9},
     {"EliminateLimit",               PG_CASCADES_LOGICAL_LIMIT,   NULL, 0, 0.6},
+    {"MergeLimitWithChildLimit",     PG_CASCADES_LOGICAL_LIMIT,   NULL, 0, 0.45},
     {"EliminateAgg",                 PG_CASCADES_LOGICAL_AGG,     NULL, 0, 0.6},
     {NULL, 0, NULL, 0, 0.0}
 };

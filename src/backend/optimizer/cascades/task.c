@@ -366,8 +366,10 @@ push_property_task(PgPlannerCascadesContext *ctx, PgGroupExpr *expr,
         req = (PgRequiredProperty *) palloc0(sizeof(PgRequiredProperty));
         req->pathkeys = pathkeys;
         req->required_outer = NULL;
-        req->tuple_fraction = ctx->upper->tuple_fraction;
-        req->limit_tuples = ctx->upper->limit_tuples;
+        /* Note: tuple_fraction and limit_tuples stay at 0.0 (palloc0).
+         * Setting them to non-zero values would break pg_required_property_equal
+         * matching in ENFORCE_OPTIMIZE_CHILDREN when searching for child best
+         * entries, because child tasks use palloc0 too. */
 
         t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
         t->type = PG_TASK_ENFORCE_AND_COST;
@@ -401,36 +403,26 @@ pg_cascades_push_enforce_and_cost_tasks(PgPlannerCascadesContext *ctx,
                                          PgMemoGroup *group,
                                          PgGroupExpr *expr)
 {
-    PgRequiredProperty *req1;
-    PgRequiredProperty *req2;
-    PgOptimizerTask *t;
+    List *pushed = NIL;
 
     (void) group;  /* unused in this function */
 
-    /* required = NIL pathkeys */
-    req1 = (PgRequiredProperty *) palloc0(sizeof(PgRequiredProperty));
-    req1->pathkeys = NIL;
-    req1->required_outer = NULL;
+    /* 1. No ordering — always needed as baseline */
+    push_property_task(ctx, expr, NIL, &pushed);
 
-    t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
-    t->type = PG_TASK_ENFORCE_AND_COST;
-    t->expr = expr;
-    t->required = req1;
-    task_stack_push(ctx, t);
-
-    /* required = root sort_pathkeys (if any) */
+    /* 2. Sort ordering from ORDER BY clause */
     if (ctx->upper->sort_pathkeys != NIL)
-    {
-        req2 = (PgRequiredProperty *) palloc0(sizeof(PgRequiredProperty));
-        req2->pathkeys = ctx->upper->sort_pathkeys;
-        req2->required_outer = NULL;
+        push_property_task(ctx, expr, ctx->upper->sort_pathkeys, &pushed);
 
-        t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
-        t->type = PG_TASK_ENFORCE_AND_COST;
-        t->expr = expr;
-        t->required = req2;
-        task_stack_push(ctx, t);
-    }
+    /* 3. Group ordering from GROUP BY clause (for GroupAgg) */
+    if (ctx->upper->group_pathkeys != NIL)
+        push_property_task(ctx, expr, ctx->upper->group_pathkeys, &pushed);
+
+    /* 4. Distinct ordering from DISTINCT clause (for Unique sorted) */
+    if (ctx->upper->distinct_pathkeys != NIL)
+        push_property_task(ctx, expr, ctx->upper->distinct_pathkeys, &pushed);
+
+    list_free(pushed);
 }
 
 /* ========================================================================
@@ -833,7 +825,15 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             Cost child_total   = task->total_cost;
             double input_rows = 0;
             int    input_width = 0;
-            bool   pg_cost_called = false;
+
+            /*
+             * Phase 6: Per-expression cost caching.
+             * If we already have a best cost for this expression (from a
+             * previous EnforceAndCostTask with different required property),
+             * and the child costs alone exceed it, skip computing local cost.
+             */
+            if (expr->best_cost > 0 && child_total >= expr->best_cost)
+                return PG_CASCADES_OK;
 
             /*
              * Get child output properties (rows, width) for cost
@@ -880,7 +880,6 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                              child_startup, child_total, input_rows);
                     task->startup_cost = dummy_path.startup_cost;
                     task->total_cost = dummy_path.total_cost;
-                    pg_cost_called = true;
                     break;
                 }
                 case PG_CASCADES_PHYSICAL_GROUPAGG:
@@ -895,7 +894,6 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                              child_startup, child_total, input_rows);
                     task->startup_cost = dummy_path.startup_cost;
                     task->total_cost = dummy_path.total_cost;
-                    pg_cost_called = true;
                     break;
                 }
                 case PG_CASCADES_PHYSICAL_SORT:
@@ -913,7 +911,6 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                               (limit_tuples > 0) ? limit_tuples : -1.0);
                     task->startup_cost = dummy_path.startup_cost;
                     task->total_cost = dummy_path.total_cost;
-                    pg_cost_called = true;
                     break;
                 }
                 case PG_CASCADES_PHYSICAL_UNIQUE:
@@ -928,7 +925,6 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                               0.0, work_mem, -1.0);
                     task->startup_cost = dummy_path.startup_cost;
                     task->total_cost = dummy_path.total_cost;
-                    pg_cost_called = true;
                     break;
                 }
                 case PG_CASCADES_PHYSICAL_LIMIT:
@@ -957,7 +953,7 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                     task->total_cost = child_total + 0.01;
                     break;
             }
-            (void) pg_cost_called;  /* suppress unused warning */
+            (void) 0;
 
             /* Phase 4: upper-bound pruning */
             if (ctx->upper_bound_cost > 0 &&
@@ -990,6 +986,16 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                 entry->output = task->output_property;
 
                 pg_group_update_best(expr->owner_group, entry);
+
+                /*
+                 * Phase 6: Per-expression cost caching.
+                 * Cache the best cost for this expression to enable
+                 * early pruning in subsequent EnforceAndCostTask runs
+                 * (for different required properties).
+                 */
+                if (expr->best_cost == 0 ||
+                    task->total_cost < expr->best_cost)
+                    expr->best_cost = task->total_cost;
 
                 /* Update global upper bound */
                 if (ctx->upper_bound_cost == 0 ||
