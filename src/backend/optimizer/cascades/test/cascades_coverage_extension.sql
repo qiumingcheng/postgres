@@ -5,9 +5,10 @@
 -- ============================================================================
 
 \set ON_ERROR_STOP off
+SET enable_cascades_planner = on;
 SET cascades_planner_fallback_on_error = on;
 SET cascades_planner_debug = off;
-SET cascades_planner_max_tasks = 5000;
+SET cascades_planner_max_tasks = 50000;
 SET client_min_messages = warning;
 
 -- 额外测试表
