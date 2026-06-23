@@ -146,8 +146,26 @@ pg_task_optimize_group(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
     PgMemoGroup *group = task->group;
     ListCell   *lc;
 
-    if (group->best_entries != NIL)
-        return PG_CASCADES_OK;  /* already optimized */
+    /* Already optimized? Skip */
+    if (group->best_entries != NIL || group->optimized)
+        return PG_CASCADES_OK;
+
+    /*
+     * Phase 6: Cost lower-bound pruning (StarRocks parity).
+     * If this group's lower bound already exceeds the current global
+     * upper bound, no plan using this group can beat the best plan
+     * found so far — skip the entire group.
+     */
+    if (group->lower_bound_cost > 0 &&
+        ctx->upper_bound_cost > 0 &&
+        group->lower_bound_cost >= ctx->upper_bound_cost)
+    {
+        group->optimized = true;  /* don't retry */
+        if (ctx->debug)
+            elog(NOTICE, "Cascades: pruned group %d (lower_bound=%.2f >= upper=%.2f)",
+                 group->id, group->lower_bound_cost, ctx->upper_bound_cost);
+        return PG_CASCADES_OK;
+    }
 
     /* Step 1: push EnforceAndCostTask for physical exprs FIRST.
      * LIFO means they execute last (after children and rule application). */
@@ -786,6 +804,24 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                 if (child_best == NULL)
                 {
                     /*
+                     * Phase 6: Cost lower-bound pruning.
+                     * If the child already has a lower bound that exceeds
+                     * the global upper bound, this child group has been
+                     * proven too expensive — skip.
+                     */
+                    if (child_group->lower_bound_cost > 0 &&
+                        ctx->upper_bound_cost > 0 &&
+                        child_group->lower_bound_cost >= ctx->upper_bound_cost)
+                    {
+                        /* Record failure on parent too */
+                        if (ctx->upper_bound_cost > 0)
+                            expr->owner_group->lower_bound_cost =
+                                ctx->upper_bound_cost;
+                        task->enforce_state = ENFORCE_COMPLETE;
+                        return PG_CASCADES_OK;
+                    }
+
+                    /*
                      * Child not ready for this required property.
                      * Clone self to resume after child is optimized,
                      * then push OptimizeGroupTask for child.
@@ -955,10 +991,21 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             }
             (void) 0;
 
-            /* Phase 4: upper-bound pruning */
+            /* Phase 4 + Phase 6: upper-bound pruning with lower-bound recording */
             if (ctx->upper_bound_cost > 0 &&
                 task->total_cost >= ctx->upper_bound_cost)
+            {
+                /*
+                 * Phase 6: Record lower bound on this group.
+                 * If this expression's cost already exceeds the global
+                 * upper bound, future OptimizeGroupTasks for this group
+                 * can skip it entirely.
+                 */
+                if (expr->owner_group->lower_bound_cost == 0 ||
+                    ctx->upper_bound_cost < expr->owner_group->lower_bound_cost)
+                    expr->owner_group->lower_bound_cost = ctx->upper_bound_cost;
                 return PG_CASCADES_OK;
+            }
 
             /* Check if output satisfies required property */
             if (!pg_output_satisfies_required(&task->output_property,

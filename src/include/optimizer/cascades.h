@@ -248,6 +248,8 @@ struct PgMemoGroup
     List       *best_entries;       /* List<PgGroupBestEntry *> */
     RelOptInfo *rel;               /* 仅当此 group 映射到一个 PG 关系时 */
     PgLogicalProperty logical_prop; /* Phase 4: derived logical property */
+    double      lower_bound_cost;   /* Phase 6: cost lower bound for pruning */
+    bool        optimized;          /* Phase 6: has this group been optimized? */
 };
 
 /* Memo: Cascades 搜索空间 */
