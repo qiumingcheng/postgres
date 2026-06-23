@@ -218,3 +218,53 @@ SELECT count(*) AS total_tests, sum(CASE WHEN pg_ok AND cas_ok THEN 1 ELSE 0 END
 \echo '========================================'
 \echo '  ALL EXTENDED TESTS COMPLETE'
 \echo '========================================'
+
+-- ============================================================================
+-- Part 13: SEMIJOIN_DEDUP rules
+-- ============================================================================
+\echo '=== Part 13: SEMIJOIN_DEDUP ==='
+
+-- EliminateJoinWithConst: Join with 1-row table (cascades_single)
+SELECT cov_test(1301, 'C1301: eliminate join const', $$SELECT t.val, s.val FROM cascades_test_j1 t JOIN cascades_single s ON t.id = s.id$$);
+-- OuterJoinElimination: LEFT JOIN where right side filtered out
+SELECT cov_test(1302, 'C1302: outer join elimination', $$SELECT t.id, s.val FROM cascades_test_j1 t LEFT JOIN cascades_single s ON t.id = s.id WHERE s.val IS NOT NULL$$);
+-- MergeFilterWithJoin: Filter applied to JOIN
+SELECT cov_test(1303, 'C1303: merge filter join', $$SELECT t.val, b.val FROM cascades_test_j1 t JOIN cascades_test_j2 b ON t.id = b.j1_id WHERE t.val > 10$$);
+-- PruneEmptyJoin: Join with empty table
+SELECT cov_test(1304, 'C1304: prune empty join 2', $$SELECT t.val, e.val FROM cascades_test_j1 t JOIN cascades_empty e ON t.id = e.id$$);
+
+-- ============================================================================
+-- Part 14: LIMIT_PUSH + AGG_PUSHDOWN rules
+-- ============================================================================
+\echo '=== Part 14: Limit + Agg Pushdown ==='
+
+-- MergeLimitWithSort: Limit(Sort(scan)) → Sort with limit
+SELECT cov_test(1401, 'C1401: merge limit sort 2', $$SELECT * FROM cascades_test_t ORDER BY a LIMIT 5$$);
+-- PushDownLimitJoin: Limit(Join) → Join with limit pushed down
+SELECT cov_test(1402, 'C1402: limit pushdown join', $$SELECT t1.val, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id LIMIT 3$$);
+-- PushDownAggLimit: Agg(Limit(scan))
+SELECT cov_test(1403, 'C1403: agg pushdown limit', $$SELECT count(*) FROM (SELECT * FROM cascades_test_t LIMIT 50) sub$$);
+-- MergeTwoAgg: Agg(Agg(scan))
+SELECT cov_test(1404, 'C1404: merge two agg', $$SELECT count(*) FROM (SELECT a, count(*) FROM cascades_test_t GROUP BY a) sub$$);
+
+-- ============================================================================
+-- Part 15: More JOIN patterns for rule coverage
+-- ============================================================================
+\echo '=== Part 15: More JOIN patterns ==='
+
+-- InnerToSemi: JOIN unique table → should trigger semi conversion
+SELECT cov_test(1501, 'C1501: inner to semi', $$SELECT t.* FROM cascades_test_j1 t JOIN cascades_unique u ON t.id = u.id$$);
+-- Multi-join with filter → triggers predicate pushdown through joins
+SELECT cov_test(1502, 'C1502: multi join filter', $$SELECT t1.val, t2.val, t3.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id WHERE t1.val > 10 AND t3.val < 5$$);
+
+-- ============================================================================
+-- Part 16: Plan build edge cases
+-- ============================================================================
+\echo '=== Part 16: Plan Build Edge ==='
+
+-- planbuild.c: Sort + Limit via cost-based path
+SELECT cov_test(1601, 'C1601: sort limit cost', $$SELECT * FROM cascades_test_t ORDER BY b LIMIT 5 OFFSET 3$$);
+-- planbuild.c: GROUP BY with multiple aggregates
+SELECT cov_test(1602, 'C1602: multi agg group', $$SELECT a, count(*), sum(b), avg(b), max(name) FROM cascades_test_t GROUP BY a$$);
+-- planbuild.c: DISTINCT with GROUP BY interaction
+SELECT cov_test(1603, 'C1603: distinct group', $$SELECT DISTINCT a FROM cascades_test_t WHERE a > 10 ORDER BY a LIMIT 3$$);
