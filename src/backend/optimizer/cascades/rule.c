@@ -2218,6 +2218,33 @@ pg_cascades_get_impl_rules_phase2_join(int *num_rules)
     return g_impl_rules_phase2_join;
 }
 
+/* Phase 4: Path-generation join rules (call make_join_rel internally) */
+static PgRule g_impl_rules_phase4_join[] = {
+    {"LogicalJoin->PhysicalHashJoin_Phase4", NULL,
+     pg_rule_join_to_hashjoin_phase4,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_HASHJOIN,
+     PG_RULE_BIT_JOIN_TO_HASHJOIN_PHASE4, 0.9},
+    {"LogicalJoin->PhysicalNestLoop_Phase4", NULL,
+     pg_rule_join_to_nestloop_phase4,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_NESTLOOP,
+     PG_RULE_BIT_JOIN_TO_NESTLOOP_PHASE4, 0.9},
+    {"LogicalJoin->PhysicalMergeJoin_Phase4", NULL,
+     pg_rule_join_to_mergejoin_phase4,
+     PG_RULE_IMPL, NULL, PG_CASCADES_LOGICAL_JOIN, PG_CASCADES_PHYSICAL_MERGEJOIN,
+     PG_RULE_BIT_JOIN_TO_MERGEJOIN_PHASE4, 0.9},
+    {NULL, NULL, NULL, 0, NULL, 0, 0, 0, 0.0}  /* sentinel */
+};
+
+PgRule *
+pg_cascades_get_impl_rules_phase4_join(int *num_rules)
+{
+    int i = 0;
+    while (g_impl_rules_phase4_join[i].name != NULL)
+        i++;
+    *num_rules = i;
+    return g_impl_rules_phase4_join;
+}
+
 /* Phase 5: Transformation rules (26 rules) */
 PgRule *
 pg_cascades_get_trans_rules_phase5(int *num_rules)
@@ -2496,6 +2523,9 @@ pg_rule_join_to_hashjoin_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
     List *result = NIL;
     ListCell *lc;
 
+    if (expr == NULL || expr->inputs == NIL)
+        return NIL;
+
     if (list_length(expr->inputs) != 2)
         return NIL;
 
@@ -2546,6 +2576,9 @@ pg_rule_join_to_nestloop_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
     List *result = NIL;
     ListCell *lc;
 
+    if (expr == NULL || expr->inputs == NIL)
+        return NIL;
+
     if (list_length(expr->inputs) != 2)
         return NIL;
 
@@ -2595,6 +2628,9 @@ pg_rule_join_to_mergejoin_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *exp
     RelOptInfo *outer_rel, *inner_rel, *joinrel;
     List *result = NIL;
     ListCell *lc;
+
+    if (expr == NULL || expr->inputs == NIL)
+        return NIL;
 
     if (list_length(expr->inputs) != 2)
         return NIL;

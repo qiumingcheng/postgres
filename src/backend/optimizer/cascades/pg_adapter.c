@@ -3,6 +3,7 @@
  *    PG 适配层：在 Cascades 世界和 PG 世界之间转换。
  *    - build logical root from PG structures
  *    - Path type to Cascades op kind mapping
+ *    - Phase 7: build LogicalJoin tree from PG joinlist
  *-------------------------------------------------------------------------
  */
 
@@ -10,6 +11,7 @@
 #include "optimizer/cascades.h"
 #include "optimizer/pathnode.h"
 #include "nodes/primnodes.h"
+#include "optimizer/paths.h"
 
 /* ========================================================================
  * Path 类型 → Cascades Op Kind
@@ -33,18 +35,116 @@ pg_cascades_pathtype_to_opkind(NodeTag pathtype)
 }
 
 /* ========================================================================
+ * Helper: build LogicalJoin tree from PG's joinlist (Phase 7)
+ * ======================================================================== */
+
+static PgGroupExpr *
+pg_cascades_build_join_tree(PgPlannerCascadesContext *ctx, List *joinlist)
+{
+    ListCell   *lc;
+    PgGroupExpr *result = NULL;
+
+    if (joinlist == NIL)
+        return NULL;
+
+    /* Single element: could be RangeTblRef or sub-joinlist */
+    if (list_length(joinlist) == 1)
+    {
+        Node *jlnode = (Node *) linitial(joinlist);
+
+        if (IsA(jlnode, RangeTblRef))
+        {
+            /* Leaf: base relation */
+            RangeTblRef *rtr = (RangeTblRef *) jlnode;
+            RelOptInfo  *rel = ctx->root->simple_rel_array[rtr->rtindex];
+
+            if (rel == NULL)
+                return NULL;
+
+            result = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_SCAN);
+            result->inputs = NIL;
+            result->op_private = rel;
+            return result;
+        }
+        else if (IsA(jlnode, List))
+        {
+            /* Sub-joinlist: recurse */
+            return pg_cascades_build_join_tree(ctx, (List *) jlnode);
+        }
+        else
+        {
+            elog(ERROR, "unrecognized joinlist node type: %d",
+                 (int) nodeTag(jlnode));
+            return NULL;
+        }
+    }
+
+    /* Multiple elements: build left-deep join tree */
+    foreach(lc, joinlist)
+    {
+        Node       *jlnode = (Node *) lfirst(lc);
+        PgGroupExpr *child;
+
+        if (IsA(jlnode, RangeTblRef))
+        {
+            RangeTblRef *rtr = (RangeTblRef *) jlnode;
+            RelOptInfo  *rel = ctx->root->simple_rel_array[rtr->rtindex];
+
+            if (rel == NULL)
+                continue;
+
+            child = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_SCAN);
+            child->inputs = NIL;
+            child->op_private = rel;
+        }
+        else if (IsA(jlnode, List))
+        {
+            child = pg_cascades_build_join_tree(ctx, (List *) jlnode);
+        }
+        else
+        {
+            continue;
+        }
+
+        if (child == NULL)
+            continue;
+
+        if (result == NULL)
+        {
+            result = child;
+        }
+        else
+        {
+            /* Create a LogicalJoin(previous_result, new_child) */
+            PgGroupExpr *join;
+            PgJoinPrivate *jp;
+
+            jp = (PgJoinPrivate *) palloc0(sizeof(PgJoinPrivate));
+            jp->jointype = JOIN_INNER;
+            jp->restrictlist = NIL;  /* quals handled by PG Path internally */
+            jp->joinlist = NIL;
+
+            join = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_JOIN);
+            join->inputs = list_make2(result, child);
+            join->op_private = jp;
+            result = join;
+        }
+    }
+
+    return result;
+}
+
+/* ========================================================================
  * pg_cascades_build_initial_tree:
- *    Phase 4: Build a standalone OptExpression tree from the PG parse tree.
- *    This tree is NOT inserted into Memo — it's used for pre-Memo rewrite.
- *
- *    Returns the root PgGroupExpr (logical tree).
- *    After rewrite, the caller converts it to Memo via pg_memo_init().
+ *    Phase 7: Build OptExpression tree with individual base relation
+ *    LogicalScan nodes and LogicalJoin tree from the PG joinlist.
  *
  *    Structure:  LogicalLimit → LogicalSort → LogicalDistinct →
- *                LogicalAgg → LogicalProject → LogicalJoin → LogicalScan
+ *                LogicalAgg → LogicalProject → LogicalJoin(s) →
+ *                LogicalScan(s) [one per base relation]
  *
- *    First version: use path-import approach (make_one_rel already done),
- *    wrap the lower group with upper logical ops as a standalone tree.
+ *    Each LogicalScan has op_private = RelOptInfo * for its base relation.
+ *    Each LogicalJoin has op_private = PgJoinPrivate * (JOIN_INNER).
  */
 PgGroupExpr *
 pg_cascades_build_initial_tree(PgPlannerCascadesContext *ctx)
@@ -53,9 +153,16 @@ pg_cascades_build_initial_tree(PgPlannerCascadesContext *ctx)
     PgGroupExpr *current = NULL;
 
     /*
-     * Build the lower Scan node: represents the entire FROM/JOIN/WHERE result.
-     * Use a dummy LogicalScan whose op_private is the final_rel pointer
-     * — rewrite rules use this to access relation info.
+     * Phase 4-6: Build the lower Scan node representing the entire
+     * FROM/JOIN/WHERE result.  Op_private is the final_rel from
+     * make_one_rel, which contains all PG join paths.
+     *
+     * Phase 7 (in progress): pg_cascades_build_join_tree() above builds
+     * individual LogicalScan per base relation + LogicalJoin tree.
+     * When stable, replace this single-scan approach with:
+     *   current = pg_cascades_build_join_tree(ctx, ctx->prep->joinlist);
+     * Known issue: task scheduler crashes during ApplyRuleTask processing
+     * of Phase 4 join rules on the join tree structure.
      */
     current = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_SCAN);
     current->inputs = NIL;

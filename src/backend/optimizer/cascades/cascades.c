@@ -237,7 +237,7 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
         int num_impl, num_trans;
 
         /*
-         * Merge: Phase 1 impl + Phase 2 join + Enforcer rules.
+         * Merge: Phase 1 impl + Phase 4 join (make_join_rel) + Enforcer rules.
          *
          * Note: Phase 2 scan rules (bits 6-8) are NOT merged here.
          * In the tree-based Memo (Phase 6), LogicalScan groups already
@@ -245,6 +245,12 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
          * Re-running scan impl rules would create COMPOSABLE_OP scan
          * expressions whose op_private is RelOptInfo* (not Path*),
          * causing SIGSEGV in pg_derive_child_properties.
+         *
+         * Phase 4 join rules (bits 43-45) call make_join_rel internally
+         * to generate real PG join paths with proper join quals, cost,
+         * and pathkeys.  These rules depend on Phase 7's LogicalJoin tree
+         * (built from PG's joinlist) to provide the LogicalJoin expressions
+         * that trigger them.
          */
         rules = pg_cascades_get_impl_rules(&num_impl);
         {
@@ -254,9 +260,9 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
             int     total_p1_enforcer;
             PgRule *merged_p1_enforcer;
 
-            /* Merge: Phase 1 + Phase 2 join + Enforcer */
+            /* Merge: Phase 1 + Phase 4 join (make_join_rel) + Enforcer */
             enf_rules = pg_cascades_get_enforcer_rules(&num_enforcer);
-            join_rules = pg_cascades_get_impl_rules_phase2_join(&num_join);
+            join_rules = pg_cascades_get_impl_rules_phase4_join(&num_join);
             total_p1_enforcer = num_impl + num_enforcer + num_join;
             merged_p1_enforcer = (PgRule *) palloc(sizeof(PgRule) * (total_p1_enforcer + 1));
 
