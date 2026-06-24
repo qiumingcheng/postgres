@@ -617,7 +617,90 @@ SELECT cov_test(2801, 'C2801: multi self join', $$SELECT a.id, b.id, c.id FROM c
 SELECT cov_test(2802, 'C2802: join subquery both', $$SELECT s1.a, s2.val FROM (SELECT id AS a, a AS x FROM cascades_test_t WHERE a > 10) s1 JOIN (SELECT id AS a, val FROM cascades_test_j1) s2 ON s1.a = s2.a$$);
 -- C2803: Complex 4-table join → multi-level group_to_rel recursion
 SELECT cov_test(2803, 'C2803: 4 table chain', $$SELECT t1.id, t2.val, t3.val, t4.a FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id JOIN cascades_test_t t4 ON t3.val = t4.b$$);
+-- ============================================================================
+-- Part 29: Push all files to 80% coverage
+-- Targets: property.c 78→80, memo.c 73→80, postopt.c 71→80,
+--          task.c 60→80, rule.c 54→80, rewrite.c 53→80, planbuild.c 47→80
+-- ============================================================================
+\echo '=== Part 29: Coverage Push ==='
 
+-- === property.c: required_outer + pathkey comparison ===
+-- LEFT JOIN with extra WHERE (exercises required_outer checks)
+SELECT cov_test(2900, 'C2900: left join filter', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t2.val > 10$$);
+-- RIGHT JOIN (exercises opposite required_outer)
+SELECT cov_test(2901, 'C2901: right join filter', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 RIGHT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t1.id > 10$$);
+-- DISTINCT + ORDER with different keys (exercises distinct_pathkeys)
+SELECT cov_test(2902, 'C2902: distinct order diff', $$SELECT DISTINCT a, b FROM cascades_test_t ORDER BY b$$);
+-- GROUP BY + ORDER BY with different keys (exercises group_pathkeys vs sort_pathkeys)
+SELECT cov_test(2903, 'C2903: group sort diff keys', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a ORDER BY count(*)$$);
+-- FULL JOIN (exercises required_outer with both sides nullable)
+SELECT cov_test(2904, 'C2904: full outer join', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 FULL JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+
+-- === memo.c: hash dedup + group merge edge cases ===
+-- Self-join same table twice (exercises hash key matching with same group id)
+SELECT cov_test(2905, 'C2905: self join', $$SELECT a.id, b.id FROM cascades_test_t a JOIN cascades_test_t b ON a.a = b.a$$);
+-- Triple self-join (exercises multi-level group equivalence)
+SELECT cov_test(2906, 'C2906: triple self join', $$SELECT a.id, b.id, c.id FROM cascades_test_t a JOIN cascades_test_t b ON a.a = b.a JOIN cascades_test_t c ON b.a = c.b WHERE a.b > 10$$);
+-- Join with expressions (exercises non-Var hash keys)
+SELECT cov_test(2907, 'C2907: join expression', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id + 1 = t2.j1_id + 1$$);
+-- Cross join (exercises empty qual join)
+SELECT cov_test(2908, 'C2908: cross join', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 CROSS JOIN cascades_test_j2 t2$$);
+
+-- === postopt.c: materialize + validator edge cases ===
+-- NestLoop forced with Sort inner → Materialize
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+SELECT cov_test(2909, 'C2909: nl sort inner', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id < t2.j1_id ORDER BY t1.id$$);
+SET enable_hashjoin = on; SET enable_mergejoin = on;
+-- NestLoop forced with HashAgg inner → Materialize
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+SELECT cov_test(2910, 'C2910: nl agg inner', $$SELECT t1.id, sub.cnt FROM cascades_test_j1 t1 JOIN (SELECT j1_id, count(*) AS cnt FROM cascades_test_j2 GROUP BY j1_id) sub ON t1.id = sub.j1_id$$);
+SET enable_hashjoin = on; SET enable_mergejoin = on;
+-- LIMIT 0 (exercises constant Result, empty plan)
+SELECT cov_test(2911, 'C2911: limit zero', $$SELECT * FROM cascades_test_t LIMIT 0$$);
+-- UNION ALL (exercises Append/MergeAppend plan types)
+SELECT cov_test(2912, 'C2912: union all', $$SELECT id FROM cascades_test_j1 UNION ALL SELECT id FROM cascades_test_j2$$);
+-- Simple constant (exercises Result plan without subplan)
+SELECT cov_test(2913, 'C2913: constant select', $$SELECT 1, 'hello'$$);
+
+-- === task.c: ENFORCE_AND_COST + property derivation ===
+-- Multi-column GROUP BY with ORDER (exercises group_pathkeys derivation)
+SELECT cov_test(2914, 'C2914: multi group order', $$SELECT a, b, count(*) FROM cascades_test_t GROUP BY a, b ORDER BY a DESC, b$$);
+-- Complex aggregate with DISTINCT inside
+SELECT cov_test(2915, 'C2915: count distinct', $$SELECT count(DISTINCT a) FROM cascades_test_t$$);
+-- Subquery in FROM with aggregation
+SELECT cov_test(2916, 'C2916: from subquery agg', $$SELECT a, cnt FROM (SELECT a, count(*) AS cnt FROM cascades_test_t GROUP BY a) sub WHERE cnt > 10$$);
+
+-- === rule.c: trigger more Phase 5 rules ===
+-- Window function (exercises WindowAgg path)
+SELECT cov_test(2917, 'C2917: window row number', $$SELECT id, a, row_number() OVER (ORDER BY a) AS rn FROM cascades_test_t$$);
+-- Multiple window functions
+SELECT cov_test(2918, 'C2918: multi window', $$SELECT id, a, row_number() OVER (ORDER BY a), rank() OVER (PARTITION BY b ORDER BY a) FROM cascades_test_t$$);
+-- LEFT JOIN converted to INNER by rule G2
+SELECT cov_test(2919, 'C2919: left to inner', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t2.val IS NOT NULL$$);
+-- IN with subquery (exercises semi-join rewrite)
+SELECT cov_test(2920, 'C2920: in subquery simple', $$SELECT * FROM cascades_test_j1 WHERE id IN (SELECT j1_id FROM cascades_test_j2)$$);
+-- NOT IN (exercises anti-join)
+SELECT cov_test(2921, 'C2921: not in subquery', $$SELECT * FROM cascades_test_j1 WHERE id NOT IN (SELECT j1_id FROM cascades_test_j2 WHERE j1_id IS NOT NULL)$$);
+
+-- === rewrite.c: trigger more rewrite stages ===
+-- Join with explicit ON clause referencing both sides
+SELECT cov_test(2922, 'C2922: join both side qual', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id AND t1.val > 10 AND t2.val < 50$$);
+-- Multiple subquery levels
+SELECT cov_test(2923, 'C2923: nested subquery', $$SELECT * FROM (SELECT * FROM (SELECT a, b FROM cascades_test_t WHERE a > 10) s1 WHERE b > 10) s2$$);
+-- CASE expression in target list
+SELECT cov_test(2924, 'C2924: case expression', $$SELECT CASE WHEN a > 50 THEN 'high' ELSE 'low' END, count(*) FROM cascades_test_t GROUP BY 1$$);
+
+-- === planbuild.c: more physical operator types ===
+-- GroupAgg (sorted input, exercises GroupAgg path)
+SELECT cov_test(2925, 'C2925: group agg sorted', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a ORDER BY a$$);
+-- DISTINCT with ORDER BY
+SELECT cov_test(2926, 'C2926: distinct order', $$SELECT DISTINCT a FROM cascades_test_t ORDER BY a DESC$$);
+-- OFFSET without LIMIT
+SELECT cov_test(2927, 'C2927: offset only', $$SELECT * FROM cascades_test_t ORDER BY id OFFSET 10$$);
+-- Subquery in SELECT (scalar subquery)
+SELECT cov_test(2928, 'C2928: scalar subquery', $$SELECT id, (SELECT max(val) FROM cascades_test_j2 WHERE j1_id = t1.id) FROM cascades_test_j1 t1$$);
+-- Coalesce/COALESCE expression
+SELECT cov_test(2929, 'C2929: coalesce', $$SELECT coalesce(t2.val, 0) FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
 \echo ''
 \echo '========================================'
 \echo '  FINAL EXTENDED COVERAGE TEST SUMMARY'
