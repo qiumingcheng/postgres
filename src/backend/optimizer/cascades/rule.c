@@ -228,6 +228,9 @@ pg_rule_join_commutativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     left_child = (PgMemoGroup *) linitial(expr->inputs);
     right_child = (PgMemoGroup *) lsecond(expr->inputs);
 
+    if (left_child == NULL || right_child == NULL)
+        return NIL;
+
     /* Don't swap if both children are the same (self-join handled elsewhere) */
     if (left_child == right_child)
         return NIL;
@@ -1512,6 +1515,9 @@ pg_rule_join_associativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     left_grp = (PgMemoGroup *) linitial(expr->inputs);
     right_grp = (PgMemoGroup *) lsecond(expr->inputs);
 
+    if (left_grp == NULL || right_grp == NULL)
+        return NIL;
+
     /* Find a JOIN expression inside left_grp */
     inner_join = NULL;
     foreach(lc, left_grp->logical_exprs)
@@ -1586,6 +1592,9 @@ pg_rule_join_left_asscom(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 
     left_grp = (PgMemoGroup *) linitial(expr->inputs);
     right_grp = (PgMemoGroup *) lsecond(expr->inputs);
+
+    if (left_grp == NULL || right_grp == NULL)
+        return NIL;
 
     /* Find a JOIN expression inside right_grp */
     inner_join = NULL;
@@ -2487,8 +2496,8 @@ static PgCombinationRule g_combination_rules[] = {
      * GP_JOIN_REORDER: Join reorder group.
      *   JoinCommutativity, JoinAssociativity, JoinLeftAsscom
      */
-    /* Phase 7: GP_JOIN_REORDER disabled */
-    {"GP_JOIN_REORDER", NULL, false},
+    /* Phase 7: re-enabled with safety guards */
+    {"GP_JOIN_REORDER", NULL, true},
 
     /*
      * GP_PRUNE_EMPTY: Empty set pruning group.

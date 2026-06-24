@@ -268,3 +268,19 @@ SELECT cov_test(1601, 'C1601: sort limit cost', $$SELECT * FROM cascades_test_t 
 SELECT cov_test(1602, 'C1602: multi agg group', $$SELECT a, count(*), sum(b), avg(b), max(name) FROM cascades_test_t GROUP BY a$$);
 -- planbuild.c: DISTINCT with GROUP BY interaction
 SELECT cov_test(1603, 'C1603: distinct group', $$SELECT DISTINCT a FROM cascades_test_t WHERE a > 10 ORDER BY a LIMIT 3$$);
+
+-- ============================================================================
+-- Part 17: JOIN_REORDER rules
+-- ============================================================================
+\echo '=== Part 17: JOIN_REORDER ==='
+
+-- JoinCommutativity: A⋈B → B⋈A (simple swap)
+SELECT cov_test(1701, 'C1701: join commutativity', $$SELECT t1.val, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+-- JoinAssociativity: (A⋈B)⋈C → A⋈(B⋈C)
+-- Need a query that produces left-deep join tree: (j1⋈j2)⋈j3
+SELECT cov_test(1702, 'C1702: join associativity', $$SELECT t1.val, t2.val, t3.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id$$);
+-- JoinLeftAsscom: A⋈(B⋈C) → (A⋈B)⋈C
+-- Query with explicit join order via parentheses (subquery)
+SELECT cov_test(1703, 'C1703: join left assoc', $$SELECT t1.val, t2.val, t3.val FROM cascades_test_j1 t1 JOIN (cascades_test_j2 t2 JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id) ON t1.id = t2.j1_id$$);
+-- Self-join swap: T⋈T → T⋈T (commutativity on self-join)
+SELECT cov_test(1704, 'C1704: self join swap', $$SELECT a.id, b.id FROM cascades_test_t a JOIN cascades_test_t b ON a.a = b.b$$);
