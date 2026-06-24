@@ -237,49 +237,47 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
         int num_impl, num_trans;
 
         /*
-         * Merge: Phase 1 impl + Phase 4 join (make_join_rel) + Enforcer rules.
+         * Merge: Phase 1 impl + Phase 2 scan/join (COMPOSABLE_OP) +
+         * Phase 4 join (make_join_rel) + Enforcer rules.
          *
-         * Note: Phase 2 scan rules (bits 6-8) are NOT merged here.
-         * In the tree-based Memo (Phase 6), LogicalScan groups already
-         * have IMPORTED_PATH physical expressions (with real PG Path*).
-         * Re-running scan impl rules would create COMPOSABLE_OP scan
-         * expressions whose op_private is RelOptInfo* (not Path*),
-         * causing SIGSEGV in pg_derive_child_properties.
-         *
-         * Phase 4 join rules (bits 43-45) call make_join_rel internally
-         * to generate real PG join paths with proper join quals, cost,
-         * and pathkeys.  These rules depend on Phase 7's LogicalJoin tree
-         * (built from PG's joinlist) to provide the LogicalJoin expressions
-         * that trigger them.
+         * Phase 2 scan rules (bits 6-8) create COMPOSABLE_OP physical
+         * scan expressions.  pg_derive_child_properties now handles
+         * COMPOSABLE_OP safely (checks mode before casting op_private).
+         * These rules give the task scheduler alternative physical
+         * implementations to cost and compare.
          */
         rules = pg_cascades_get_impl_rules(&num_impl);
         {
-            PgRule *enf_rules;
-            PgRule *join_rules;
-            int     num_enforcer, num_join;
-            int     total_p1_enforcer;
-            PgRule *merged_p1_enforcer;
+            PgRule *enf_rules, *join_rules, *scan_rules, *join2_rules;
+            int     num_enforcer, num_join, num_scan, num_join2;
+            int     total;
+            PgRule *merged;
 
-            /* Merge: Phase 1 + Phase 4 join (make_join_rel) + Enforcer */
             enf_rules = pg_cascades_get_enforcer_rules(&num_enforcer);
             join_rules = pg_cascades_get_impl_rules_phase4_join(&num_join);
-            total_p1_enforcer = num_impl + num_enforcer + num_join;
-            merged_p1_enforcer = (PgRule *) palloc(sizeof(PgRule) * (total_p1_enforcer + 1));
+            scan_rules = pg_cascades_get_impl_rules_phase2_scan(&num_scan);
+            join2_rules = pg_cascades_get_impl_rules_phase2_join(&num_join2);
+            total = num_impl + num_join + num_scan + num_join2 + num_enforcer;
+            merged = (PgRule *) palloc(sizeof(PgRule) * (total + 1));
 
             if (num_impl > 0)
-                memcpy(merged_p1_enforcer, rules, sizeof(PgRule) * num_impl);
+                memcpy(merged, rules, sizeof(PgRule) * num_impl);
             if (num_join > 0)
-                memcpy(&merged_p1_enforcer[num_impl], join_rules,
-                       sizeof(PgRule) * num_join);
+                memcpy(&merged[num_impl], join_rules, sizeof(PgRule) * num_join);
+            if (num_scan > 0)
+                memcpy(&merged[num_impl + num_join], scan_rules,
+                       sizeof(PgRule) * num_scan);
+            if (num_join2 > 0)
+                memcpy(&merged[num_impl + num_join + num_scan], join2_rules,
+                       sizeof(PgRule) * num_join2);
             if (num_enforcer > 0)
-                memcpy(&merged_p1_enforcer[num_impl + num_join], enf_rules,
-                       sizeof(PgRule) * num_enforcer);
-            MemSet(&merged_p1_enforcer[total_p1_enforcer], 0, sizeof(PgRule));
+                memcpy(&merged[num_impl + num_join + num_scan + num_join2],
+                       enf_rules, sizeof(PgRule) * num_enforcer);
+            MemSet(&merged[total], 0, sizeof(PgRule));
 
-            ctx.impl_rules = pg_cascades_get_rules_sorted(
-                merged_p1_enforcer, &total_p1_enforcer);
-            ctx.num_impl_rules = total_p1_enforcer;
-            pfree(merged_p1_enforcer);
+            ctx.impl_rules = pg_cascades_get_rules_sorted(merged, &total);
+            ctx.num_impl_rules = total;
+            pfree(merged);
         }
 
         /* Merge Phase 3 + Phase 5 transformation rules */

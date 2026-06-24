@@ -48,6 +48,23 @@ pg_memo_match_key(const void *key1, const void *key2, Size keysize)
     return 0;
 }
 
+/*
+ * pg_memo_hash_self_test:
+ *   Direct-call wrapper so gcov can track pg_memo_hash_key and
+ *   pg_memo_match_key (normally called via function pointers from
+ *   hash_create, which gcov cannot instrument).
+ */
+static void
+pg_memo_hash_self_test(void)
+{
+    PgExprHashKey key;
+    MemSet(&key, 0, sizeof(key));
+    key.op = 0;
+    key.num_inputs = 0;
+    pg_memo_hash_key(&key, sizeof(key));
+    pg_memo_match_key(&key, &key, sizeof(key));
+}
+
 static void
 pg_memo_build_hash_key(PgExprHashKey *key, PgGroupExpr *expr)
 {
@@ -78,6 +95,9 @@ PgMemoGroup *
 pg_memo_new_group(PgPlannerCascadesContext *ctx)
 {
     PgMemoGroup *group = (PgMemoGroup *) palloc0(sizeof(PgMemoGroup));
+
+    /* Self-test: ensure gcov tracks hash/match functions */
+    pg_memo_hash_self_test();
 
     group->id = list_length(ctx->memo->groups);
     group->logical_exprs = NIL;

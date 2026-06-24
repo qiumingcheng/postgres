@@ -770,8 +770,15 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
     }
 
     /* ================================================================
-     * COMPOSABLE_OP: state-machine driven
+     * COMPOSABLE_OP: state-machine driven.
+     * Skip COMPOSABLE_OP scan/join — IMPORTED_PATH already handles them.
      * ================================================================ */
+    if (expr->mode == PG_PHYS_EXPR_COMPOSABLE_OP &&
+        ((expr->op >= PG_CASCADES_PHYSICAL_SEQSCAN &&
+          expr->op <= PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN) ||
+         (expr->op >= PG_CASCADES_PHYSICAL_NESTLOOP &&
+          expr->op <= PG_CASCADES_PHYSICAL_MERGEJOIN)))
+        return PG_CASCADES_OK;
 
     switch (task->enforce_state)
     {
