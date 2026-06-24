@@ -700,7 +700,56 @@ SELECT cov_test(2927, 'C2927: offset only', $$SELECT * FROM cascades_test_t ORDE
 -- Subquery in SELECT (scalar subquery)
 SELECT cov_test(2928, 'C2928: scalar subquery', $$SELECT id, (SELECT max(val) FROM cascades_test_j2 WHERE j1_id = t1.id) FROM cascades_test_j1 t1$$);
 -- Coalesce/COALESCE expression
-SELECT cov_test(2929, 'C2929: coalesce', $$SELECT coalesce(t2.val, 0) FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+SELECT cov_test(2929, 'C2929: coalesce', $${S}ELECT coalesce(t2.val, 0) FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+
+-- ============================================================================
+-- Part 30: Aggressive coverage push (round 2)
+-- ============================================================================
+\echo '=== Part 30: Coverage Push Round 2 ==='
+
+-- === property.c: pathkey comparison edge cases ===
+SELECT cov_test(3000, 'C3000: multi order mixed', $$SELECT a, b FROM cascades_test_t ORDER BY a ASC, b DESC LIMIT 10$$);
+SELECT cov_test(3001, 'C3001: group expr order', $$SELECT a % 10 AS g, count(*) FROM cascades_test_t GROUP BY 1 ORDER BY 2 DESC$$);
+SELECT cov_test(3002, 'C3002: distinct on', $$SELECT DISTINCT ON (a) a, b FROM cascades_test_t ORDER BY a, b$$);
+
+-- === memo.c: hash dedup stress ===
+SELECT cov_test(3003, 'C3003: repeated joins', $$SELECT t1.id FROM cascades_test_j1 t1 JOIN cascades_test_j1 t2 ON t1.id = t2.id$$);
+SELECT cov_test(3004, 'C3004: multi qual join', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id AND t1.val > 0 AND t2.val > 0$$);
+SELECT cov_test(3005, 'C3005: subq join source', $$SELECT s1.cnt, t2.val FROM (SELECT j1_id, count(*) AS cnt FROM cascades_test_j2 GROUP BY j1_id) s1 JOIN cascades_test_j3 t2 ON s1.j1_id = t2.j2_id$$);
+
+-- === task.c: ENFORCE_AND_COST variants ===
+SELECT cov_test(3006, 'C3006: where order limit', $$SELECT * FROM cascades_test_t WHERE a > 20 ORDER BY b LIMIT 10$$);
+SELECT cov_test(3007, 'C3007: full pipeline', $$SELECT t1.a, count(*) FROM cascades_test_t t1 JOIN cascades_test_j2 t2 ON t1.b = t2.val WHERE t1.a > 10 GROUP BY t1.a ORDER BY count(*) DESC LIMIT 5$$);
+
+-- === postopt.c: NestLoop materialize ===
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+SELECT cov_test(3008, 'C3008: nl sort outer', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id < t2.j1_id ORDER BY t2.val DESC$$);
+SET enable_hashjoin = on; SET enable_mergejoin = on;
+
+-- === planbuild.c: more plan types ===
+SELECT cov_test(3009, 'C3009: null filter', $$SELECT * FROM cascades_test_j2 WHERE val IS NOT NULL ORDER BY val$$);
+SELECT cov_test(3010, 'C3010: between filter', $$SELECT * FROM cascades_test_t WHERE a BETWEEN 20 AND 50$$);
+SELECT cov_test(3011, 'C3011: like filter', $$SELECT * FROM cascades_test_t WHERE name LIKE 'item_1%'$$);
+SELECT cov_test(3012, 'C3012: or filter', $$SELECT * FROM cascades_test_t WHERE a = 10 OR b = 20$$);
+
+-- === rule.c: trigger more rules ===
+SELECT cov_test(3013, 'C3013: having complex', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a HAVING count(*) > 5 AND max(b) > 50$$);
+SELECT cov_test(3014, 'C3014: from agg subq', $$SELECT avg(cnt) FROM (SELECT a, count(*) AS cnt FROM cascades_test_t GROUP BY a) sub$$);
+SELECT cov_test(3015, 'C3015: multi agg', $$SELECT count(*), sum(a), avg(b), min(a), max(b) FROM cascades_test_t$$);
+
+-- === rewrite.c: more rewrite patterns ===
+SELECT cov_test(3016, 'C3016: nested join subq', $$SELECT t1.id, sub.val FROM cascades_test_j1 t1 JOIN (SELECT j1_id, val FROM cascades_test_j2 WHERE val > 10) sub ON t1.id = sub.j1_id$$);
+SELECT cov_test(3017, 'C3017: natural style join', $$SELECT * FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t1.id = t2.j1_id$$);
+SELECT cov_test(3018, 'C3018: mixed join types', $$SELECT t1.id, t2.val, t3.val FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id$$);
+
+-- === property.c: required_outer paths ===
+SELECT cov_test(3019, 'C3019: left join where right', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id AND t2.val > 20$$);
+
+-- === Boundary/edge cases ===
+SELECT cov_test(3020, 'C3020: empty filter', $$SELECT * FROM cascades_test_t WHERE a < 0$$);
+SELECT cov_test(3021, 'C3021: unique lookup', $$SELECT * FROM cascades_unique WHERE id = 25$$);
+SELECT cov_test(3022, 'C3022: order nulls', $$SELECT * FROM cascades_test_j2 ORDER BY val DESC NULLS FIRST$$);
+
 \echo ''
 \echo '========================================'
 \echo '  FINAL EXTENDED COVERAGE TEST SUMMARY'
