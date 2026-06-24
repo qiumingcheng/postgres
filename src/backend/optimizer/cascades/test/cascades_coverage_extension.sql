@@ -779,7 +779,7 @@ SELECT cov_test(3107, 'C3107: const expr', $$SELECT 1+2 AS three, 'hello' AS gre
 SELECT cov_test(3201, 'C3201: from subq agg', $$SELECT a, cnt FROM (SELECT a, count(*) AS cnt FROM cascades_test_t GROUP BY a) sub WHERE cnt > 1$$);
 -- task: Complex HAVING with multiple conditions
 SELECT cov_test(3202, 'C3202: multi having', $$SELECT a, count(*), avg(b) FROM cascades_test_t GROUP BY a HAVING count(*) > 1 AND avg(b) > 30$$);
--- task: 3-table join with sort (simplified to avoid known 3-table join bug)
+-- task: 3-table join with sort (simplified to 2-table to avoid Phase 4 Var ref issue)
 SELECT cov_test(3203, 'C3203: triple sort', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id ORDER BY t1.id LIMIT 5$$);
 -- task: OR filter (forces bitmap OR path)
 SELECT cov_test(3204, 'C3204: or multi cond', $$SELECT * FROM cascades_test_t WHERE a = 10 OR a = 30 OR a = 50$$);

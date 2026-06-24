@@ -1073,6 +1073,30 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     foreach(lc, rel->reltargetlist)
     {
         Var *var = (Var *) lfirst(lc);
+        int ndx = var->varattno - rel->min_attr;
+
+        /*
+         * Phase 6: Always keep columns that the standard planner marked
+         * as needed (attr_needed bitmap non-empty).  These columns are
+         * required by join quals at higher levels and pruning them would
+         * cause "variable not found in subplan target lists" in setrefs.c.
+         *
+         * The attr_needed bitmap is computed during standard planning
+         * and accounts for ALL references — including those from join
+         * quals that our Cascades column-propagation may not have seen yet.
+         */
+        if (ndx >= 0 && ndx < rel->max_attr - rel->min_attr + 1)
+        {
+            if (!bms_is_empty(rel->attr_needed[ndx]))
+            {
+                if (ctx->debug)
+                    elog(NOTICE, "Cascades: PruneScanColumns keeping varno=%d varattno=%d — attr_needed",
+                         (int)var->varno, (int)var->varattno);
+                new_tlist = lappend(new_tlist, var);
+                continue;  /* keep: needed by some join */
+            }
+        }
+
         if (bms_is_member(var->varattno, needed))
             new_tlist = lappend(new_tlist, var);
         else
