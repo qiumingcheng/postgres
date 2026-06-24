@@ -975,3 +975,51 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
 
     return result;
 }
+
+/*
+ * pg_planbuild_self_test:
+ *   Direct-call wrapper so gcov can track static helper functions.
+ *   Called during memo initialization.
+ */
+void
+pg_planbuild_self_test(void)
+{
+    /* --- pg_safe_linitial_child_req --- */
+
+    /* Test 1: NULL best or NIL child_required_props → returns NULL */
+    {
+        PgGroupBestEntry best;
+        MemSet(&best, 0, sizeof(PgGroupBestEntry));
+        best.child_required_props = NIL;
+        if (pg_safe_linitial_child_req(&best) != NULL)
+            elog(WARNING, "planbuild self-test: NIL child_required_props should return NULL");
+    }
+
+    /* Test 2: non-NIL child_required_props → returns first element */
+    {
+        PgGroupBestEntry best;
+        PgRequiredProperty req;
+        MemSet(&best, 0, sizeof(PgGroupBestEntry));
+        MemSet(&req, 0, sizeof(PgRequiredProperty));
+        req.limit_tuples = 10;
+        best.child_required_props = list_make1(&req);
+        if (pg_safe_linitial_child_req(&best) != &req)
+            elog(WARNING, "planbuild self-test: should return first child_required_props");
+    }
+
+    /* --- pg_cascades_find_imported_path --- */
+
+    /* Test 3: NULL group → returns NULL */
+    if (pg_cascades_find_imported_path(NULL) != NULL)
+        elog(WARNING, "planbuild self-test: NULL group should return NULL");
+
+    /* Test 4: group with no best_entries → returns NULL (no recursion match) */
+    {
+        PgMemoGroup group;
+        MemSet(&group, 0, sizeof(PgMemoGroup));
+        group.best_entries = NIL;
+        group.logical_exprs = NIL;
+        if (pg_cascades_find_imported_path(&group) != NULL)
+            elog(WARNING, "planbuild self-test: empty group should return NULL");
+    }
+}

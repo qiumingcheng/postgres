@@ -750,6 +750,80 @@ SELECT cov_test(3020, 'C3020: empty filter', $$SELECT * FROM cascades_test_t WHE
 SELECT cov_test(3021, 'C3021: unique lookup', $$SELECT * FROM cascades_unique WHERE id = 25$$);
 SELECT cov_test(3022, 'C3022: order nulls', $$SELECT * FROM cascades_test_j2 ORDER BY val DESC NULLS FIRST$$);
 
+-- ============================================================================
+-- Part N+1: planbuild.c deep coverage (50% → 65%)
+-- ============================================================================
+\echo '=== Part N+1: planbuild deep ==='
+
+-- planbuild: Sort with multiple columns
+SELECT cov_test(3101, 'C3101: multi col sort', $$SELECT * FROM cascades_test_t ORDER BY a, b DESC$$);
+-- planbuild: Limit with no offset
+SELECT cov_test(3102, 'C3102: limit no offset', $$SELECT * FROM cascades_test_t ORDER BY id LIMIT 3$$);
+-- planbuild: Aggregate with GROUP BY + ORDER BY
+SELECT cov_test(3103, 'C3103: agg group sort', $$SELECT a, sum(b) AS s FROM cascades_test_t GROUP BY a ORDER BY s DESC$$);
+-- planbuild: HashAgg (no GROUP BY)
+SELECT cov_test(3104, 'C3104: global agg', $$SELECT count(*), sum(a), avg(b), min(id), max(id) FROM cascades_test_t$$);
+-- planbuild: Filter → Sort → Limit combo
+SELECT cov_test(3105, 'C3105: filter sort limit', $$SELECT * FROM cascades_test_t WHERE b > 30 ORDER BY a LIMIT 3$$);
+-- planbuild: Scan with WHERE on pk
+SELECT cov_test(3106, 'C3106: pk scan filter', $$SELECT * FROM cascades_test_t WHERE id = 42$$);
+-- planbuild: Project only (no table scan needed)
+SELECT cov_test(3107, 'C3107: const expr', $$SELECT 1+2 AS three, 'hello' AS greeting$$);
+
+-- ============================================================================
+-- Part N+2: task.c deep coverage (60% → 70%)
+-- ============================================================================
+\echo '=== Part N+2: task deep ==='
+
+-- task: Subquery in FROM with aggregation
+SELECT cov_test(3201, 'C3201: from subq agg', $$SELECT a, cnt FROM (SELECT a, count(*) AS cnt FROM cascades_test_t GROUP BY a) sub WHERE cnt > 1$$);
+-- task: Complex HAVING with multiple conditions
+SELECT cov_test(3202, 'C3202: multi having', $$SELECT a, count(*), avg(b) FROM cascades_test_t GROUP BY a HAVING count(*) > 1 AND avg(b) > 30$$);
+-- task: 3-table join with sort
+SELECT cov_test(3203, 'C3203: triple sort', $$SELECT t1.id, t2.val, t3.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id ORDER BY t1.id LIMIT 5$$);
+-- task: OR filter (forces bitmap OR path)
+SELECT cov_test(3204, 'C3204: or multi cond', $$SELECT * FROM cascades_test_t WHERE a = 10 OR a = 30 OR a = 50$$);
+-- task: NOT IN subquery
+SELECT cov_test(3205, 'C3205: not in subq', $$SELECT * FROM cascades_test_j1 WHERE id NOT IN (SELECT j1_id FROM cascades_test_j2 WHERE j1_id IS NOT NULL)$$);
+-- task: inequality join
+SELECT cov_test(3206, 'C3206: inequality join', $$SELECT t1.id, t2.id FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.val > t2.val$$);
+
+-- ============================================================================
+-- Part N+3: rule.c deep coverage (61% → 70%)
+-- ============================================================================
+\echo '=== Part N+3: rule deep ==='
+
+-- rule: bitmap scan forced with OR
+SET enable_seqscan = off;
+SELECT cov_test(3301, 'C3301: bitmap or force', $$SELECT * FROM cascades_test_t WHERE a < 20 OR a > 80$$);
+SET enable_seqscan = on;
+-- rule: index scan with specific condition
+SELECT cov_test(3302, 'C3302: idx cond', $$SELECT * FROM cascades_test_j1 WHERE val BETWEEN 20 AND 50$$);
+-- rule: Semi-join (EXISTS)
+SELECT cov_test(3303, 'C3303: semi join', $$SELECT t1.* FROM cascades_test_j1 t1 WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2 WHERE t2.j1_id = t1.id AND t2.val > 10)$$);
+-- rule: Anti-join (NOT EXISTS)
+SELECT cov_test(3304, 'C3304: anti join', $$SELECT t1.* FROM cascades_test_j1 t1 WHERE NOT EXISTS (SELECT 1 FROM cascades_test_j2 t2 WHERE t2.j1_id = t1.id AND t2.val > 80)$$);
+-- rule: JOIN with complex ON condition
+SELECT cov_test(3305, 'C3305: complex on', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id AND t1.val <> t2.val$$);
+-- rule: Aggregate pushdown into subquery
+SELECT cov_test(3306, 'C3306: agg pushdown', $$SELECT * FROM (SELECT j1_id, max(val) AS mv FROM cascades_test_j2 GROUP BY j1_id) sub WHERE mv > 50$$);
+
+-- ============================================================================
+-- Part N+4: rewrite.c deep coverage (52% → 65%)
+-- ============================================================================
+\echo '=== Part N+4: rewrite deep ==='
+
+-- rewrite: Multi-level predicate pushdown
+SELECT cov_test(3401, 'C3401: deep pushdown', $$SELECT t1.id FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id WHERE t1.val > 5 AND t3.val > 1$$);
+-- rewrite: Column pruning with aggregation
+SELECT cov_test(3402, 'C3402: col prune agg', $$SELECT a, count(*) FROM cascades_test_t WHERE b > 20 GROUP BY a$$);
+-- rewrite: Join reorder multi-table
+SELECT cov_test(3403, 'C3403: join reorder', $$SELECT t1.id, t2.val, t3.val FROM cascades_test_j3 t3 JOIN cascades_test_j2 t2 ON t3.j2_id = t2.id JOIN cascades_test_j1 t1 ON t2.j1_id = t1.id$$);
+-- rewrite: Semi-join dedup with DISTINCT
+SELECT cov_test(3404, 'C3404: semi dedup', $$SELECT DISTINCT t1.val FROM cascades_test_j1 t1 WHERE t1.id IN (SELECT j1_id FROM cascades_test_j2)$$);
+-- rewrite: Limit pushdown through join
+SELECT cov_test(3405, 'C3405: limit push join', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id ORDER BY t1.id LIMIT 3$$);
+
 \echo ''
 \echo '========================================'
 \echo '  FINAL EXTENDED COVERAGE TEST SUMMARY'

@@ -140,6 +140,56 @@ pg_decorrelate_targetlist(PgDecorrelateContext *ctx)
 }
 
 /* ========================================================================
+ * Custom Var walker for correlation var extraction
+ *
+ * PG 9.2's pull_var_clause has subtle behavioral differences; this
+ * custom walker reliably extracts Vars from the subquery's WHERE
+ * clause, separating inner vars (varlevelsup=0) from correlated
+ * outer vars (varlevelsup>0).
+ * ======================================================================== */
+
+typedef struct PgVarCollectCtx
+{
+    List *inner_vars;    /* varlevelsup == 0 */
+    List *outer_vars;    /* varlevelsup > 0 */
+} PgVarCollectCtx;
+
+static bool
+pg_collect_correlation_vars_walker(Node *node, void *context)
+{
+    PgVarCollectCtx *ctx = (PgVarCollectCtx *) context;
+
+    if (node == NULL)
+        return false;
+
+    if (IsA(node, Var))
+    {
+        Var *v = (Var *) node;
+        if (v->varattno <= 0)
+            return false;
+        if (v->varlevelsup == 0)
+            ctx->inner_vars = list_append_unique_ptr(ctx->inner_vars, v);
+        else if (v->varlevelsup > 0)
+            ctx->outer_vars = list_append_unique_ptr(ctx->outer_vars, v);
+        return false;
+    }
+
+    return expression_tree_walker(node, pg_collect_correlation_vars_walker,
+                                   context);
+}
+
+static void
+pg_collect_correlation_vars(Node *node, List **inner, List **outer)
+{
+    PgVarCollectCtx ctx;
+    ctx.inner_vars = NIL;
+    ctx.outer_vars = NIL;
+    pg_collect_correlation_vars_walker(node, &ctx);
+    *inner = ctx.inner_vars;
+    *outer = ctx.outer_vars;
+}
+
+/* ========================================================================
  * EXPR_SUBLINK decorrelation
  * ======================================================================== */
 
@@ -150,18 +200,6 @@ pg_decorrelate_expr_sublink(PgDecorrelateContext *ctx,
     Query      *subquery;
     List       *corr_outer = NIL;
     List       *corr_inner = NIL;
-    ListCell   *lc;
-    int         new_rtindex;
-    RangeTblEntry *rte;
-    Alias      *alias;
-    Var        *inner_var, *outer_var;
-    TargetEntry *group_te, *first_te;
-    SortGroupClause *sgc;
-    JoinExpr   *jexpr;
-    RangeTblRef *rtr;
-    Var        *result_var, *inner_key_var;
-    OpExpr     *join_qual;
-    FromExpr   *new_from;
 
     if (sublink->subselect == NULL || !IsA(sublink->subselect, Query))
         return false;
@@ -170,190 +208,59 @@ pg_decorrelate_expr_sublink(PgDecorrelateContext *ctx,
     if (subquery->jointree == NULL || subquery->jointree->fromlist == NIL)
         return false;
 
-    /* Extract correlation Vars from subquery WHERE */
+    /* Extract correlation Vars using custom walker (more reliable than
+     * pull_var_clause for PG 9.2). */
     if (subquery->jointree->quals != NULL)
-    {
-        List *qual_vars = pull_var_clause(
-            (Node *) subquery->jointree->quals,
-            PVC_REJECT_AGGREGATES, PVC_REJECT_PLACEHOLDERS);
+        pg_collect_correlation_vars((Node *) subquery->jointree->quals,
+                                     &corr_inner, &corr_outer);
 
-        if (cascades_planner_debug)
-            elog(NOTICE, "Cascades decorrelation: pull_var_clause returned %d vars",
-                 list_length(qual_vars));
-
-        foreach(lc, qual_vars)
-        {
-            Var *v = (Var *) lfirst(lc);
-            if (cascades_planner_debug)
-                elog(NOTICE, "  var: varno=%d varattno=%d varlevelsup=%d type=%u",
-                     v->varno, v->varattno, v->varlevelsup, v->vartype);
-            if (v->varlevelsup > 0)
-                corr_outer = lappend(corr_outer, v);
-            else if (v->varlevelsup == 0)
-                corr_inner = lappend(corr_inner, v);
-        }
-    }
-
-    /*
-     * Also try to find correlation vars from subquery's targetList.
-     * Some PG versions store the correlation info differently.
-     */
-    if (list_length(corr_outer) == 0 && subquery->targetList != NIL)
+    /* Also scan targetList for correlation vars */
     {
         ListCell *tlc;
         foreach(tlc, subquery->targetList)
         {
-            TargetEntry *te = (TargetEntry *) lfirst(tlc);
-            List *tvars = pull_var_clause((Node *) te->expr,
-                PVC_REJECT_AGGREGATES, PVC_REJECT_PLACEHOLDERS);
-            ListCell *vlc;
-            foreach(vlc, tvars)
-            {
-                Var *v = (Var *) lfirst(vlc);
-                if (v->varlevelsup > 0)
-                    corr_outer = lappend(corr_outer, v);
-            }
+            TargetEntry *te2 = (TargetEntry *) lfirst(tlc);
+            List *t_inner = NIL, *t_outer = NIL;
+            pg_collect_correlation_vars((Node *) te2->expr, &t_inner, &t_outer);
+            corr_outer = list_concat_unique_ptr(corr_outer, t_outer);
+            list_free(t_inner);
+            list_free(t_outer);
         }
     }
 
-    if (list_length(corr_outer) != 1 || list_length(corr_inner) != 1)
+    if (list_length(corr_outer) != 1)
     {
         if (cascades_planner_debug)
-            elog(NOTICE, "Cascades decorrelation: wrong var counts "
-                 "(outer=%d inner=%d), skipping",
-                 list_length(corr_outer), list_length(corr_inner));
+            elog(NOTICE, "Cascades decorrelation: need exactly 1 outer var "
+                 "(got %d)", list_length(corr_outer));
+        return false;
+    }
+    if (list_length(corr_inner) < 1)
+    {
+        if (cascades_planner_debug)
+            elog(NOTICE, "Cascades decorrelation: need at least 1 inner var");
         return false;
     }
 
     /*
-     * Copy the correlation Vars BEFORE clearing the subquery's quals.
-     * Also adjust: outer_var becomes a parent-level reference (varlevelsup=0).
-     */
-    {
-        Var *tmp_outer = (Var *) linitial(corr_outer);
-        Var *tmp_inner = (Var *) linitial(corr_inner);
-
-        outer_var = makeVar(tmp_outer->varno,
-                            tmp_outer->varattno,
-                            tmp_outer->vartype,
-                            tmp_outer->vartypmod,
-                            tmp_outer->varcollid,
-                            0 /* varlevelsup=0 at parent level */);
-        inner_var = makeVar(tmp_inner->varno,
-                            tmp_inner->varattno,
-                            tmp_inner->vartype,
-                            tmp_inner->vartypmod,
-                            tmp_inner->varcollid,
-                            0);
-    }
-
-    /*
-     * Step 1: Add GROUP BY on the inner correlation column to subquery.
-     */
-    group_te = makeTargetEntry((Expr *) copyObject(inner_var),
-                                list_length(subquery->targetList) + 1,
-                                pstrdup("decorr_key"), true);
-    subquery->targetList = lappend(subquery->targetList, group_te);
-
-    sgc = makeNode(SortGroupClause);
-    sgc->tleSortGroupRef = group_te->resno;
-    sgc->eqop = InvalidOid;
-    sgc->sortop = InvalidOid;
-    sgc->nulls_first = false;
-
-    subquery->groupClause = lappend(subquery->groupClause, sgc);
-    subquery->hasAggs = true;
-
-    /*
-     * Step 2: Remove the correlation condition from subquery's WHERE
-     * (it becomes the JOIN ON clause).  Then decrement varlevelsup
-     * for any remaining outer refs.
+     * TODO: Full decorrelation pipeline (GROUP BY + LEFT JOIN).
+     * The custom var walker above correctly identifies correlation
+     * variables. The remaining work is to:
+     *   1. Add GROUP BY on inner_var to subquery (with proper ressortgroupref)
+     *   2. Remove correlation from subquery WHERE
+     *   3. Register subquery as new RTE via addRangeTableEntryForSubquery
+     *   4. Wrap parent FROM in LEFT JOIN with properly-looked-up join qual
+     *   5. Replace the SubLink target entry with a Var referencing the subquery
      *
-     * First version: only decorrelate when the WHERE clause contains
-     * just the correlation condition (simple equality).  More complex
-     * WHERE clauses are left for future work.
+     * Known issue: the LEFT JOIN approach produces "variable not found
+     * in subplan target lists" from setrefs.c because manually-constructed
+     * join quals don't survive PG's plan reference fixing.  This needs
+     * deeper integration with PG's query tree construction.
      */
-    subquery->jointree->quals = NULL;
-
-    pg_adjust_var_levels((Node *) subquery, -1, 1);
-
-    /*
-     * Step 3: Register modified subquery as new RTE in parent.
-     */
-    alias = makeNode(Alias);
-    alias->aliasname = pstrdup("cascades_decorr");
-    alias->colnames = NIL;
-
-    rte = addRangeTableEntryForSubquery(NULL, subquery, alias, false);
-    ctx->parse->rtable = lappend(ctx->parse->rtable, rte);
-    new_rtindex = list_length(ctx->parse->rtable);
-
-    /*
-     * Step 4: Build replacement Var for the TargetEntry.
-     * Column 1 = aggregate result from subquery.
-     */
-    if (subquery->targetList == NIL)
-        goto rollback;
-
-    first_te = (TargetEntry *) linitial(subquery->targetList);
-    result_var = makeVar(new_rtindex, 1,
-                         exprType((Node *) first_te->expr),
-                         exprTypmod((Node *) first_te->expr),
-                         0, 0);
-    te->expr = (Expr *) result_var;
-
-    /*
-     * Step 5: Build LEFT JOIN.
-     *   ON parent.outer_col = new_subquery.col2 (the GROUP BY key)
-     */
-    inner_key_var = makeVar(new_rtindex, 2,  /* col2 = GROUP BY key */
-                             exprType((Node *) inner_var),
-                             exprTypmod((Node *) inner_var), 0, 0);
-
-    join_qual = makeNode(OpExpr);
-    join_qual->opno = InvalidOid;       /* resolved during analysis */
-    join_qual->opfuncid = InvalidOid;
-    join_qual->opresulttype = BOOLOID;
-    join_qual->opretset = false;
-    join_qual->opcollid = InvalidOid;
-    join_qual->inputcollid = InvalidOid;
-    join_qual->args = list_make2((Node *) outer_var,
-                                  (Node *) inner_key_var);
-    join_qual->location = -1;
-
-    rtr = makeNode(RangeTblRef);
-    rtr->rtindex = new_rtindex;
-
-    jexpr = makeNode(JoinExpr);
-    jexpr->jointype = JOIN_LEFT;
-    jexpr->rarg = (Node *) rtr;
-    jexpr->quals = (Node *) join_qual;
-    jexpr->usingClause = NIL;
-    jexpr->alias = NULL;
-    jexpr->rtindex = 0;
-
-    /*
-     * Step 6: Wrap existing jointree in LEFT JOIN.
-     */
-    {
-        FromExpr *old_jt = ctx->parse->jointree;
-
-        new_from = makeNode(FromExpr);
-        new_from->fromlist = list_make1(jexpr);
-        new_from->quals = old_jt->quals;
-
-        jexpr->larg = (Node *) makeNode(FromExpr);
-        ((FromExpr *) jexpr->larg)->fromlist = old_jt->fromlist;
-        ((FromExpr *) jexpr->larg)->quals = NULL;
-
-        ctx->parse->jointree = new_from;
-    }
-
-    return true;
-
-rollback:
-    ctx->parse->rtable = list_truncate(ctx->parse->rtable,
-                                        list_length(ctx->parse->rtable) - 1);
+    if (cascades_planner_debug)
+        elog(NOTICE, "Cascades decorrelation: found %d outer / %d inner "
+             "correlation vars; full pipeline not yet implemented",
+             list_length(corr_outer), list_length(corr_inner));
     return false;
 }
 

@@ -629,6 +629,7 @@ extern PgCascadesOpKind pg_cascades_pathtype_to_opkind(NodeTag pathtype);
 
 /* planbuild.c */
 extern Plan *pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx);
+extern void pg_planbuild_self_test(void);
 
 /* postopt.c */
 extern void pg_cascades_validate_plan(Plan *plan);
