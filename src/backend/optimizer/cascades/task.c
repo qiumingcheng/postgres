@@ -97,6 +97,19 @@ pg_cascades_run_tasks(PgPlannerCascadesContext *ctx)
 
         CHECK_FOR_INTERRUPTS();
 
+        if (task->type == PG_TASK_OPTIMIZE_EXPRESSION ||
+            task->type == PG_TASK_ENFORCE_AND_COST ||
+            task->type == PG_TASK_APPLY_RULE ||
+            task->type == PG_TASK_DERIVE_STATS)
+        {
+            if (task->expr == NULL)
+            {
+                elog(WARNING, "Cascades: NULL expr in task type=%d, skipping", task->type);
+                pfree(task);
+                continue;
+            }
+        }
+
         status = pg_cascades_check_limits(ctx);
         if (status != PG_CASCADES_OK)
             return status;
@@ -204,6 +217,8 @@ pg_task_optimize_group(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         foreach(cl, expr->inputs)
         {
             PgMemoGroup *child = (PgMemoGroup *) lfirst(cl);
+            if (child == group)
+                continue;
             if (child->best_entries == NIL)
             {
                 PgOptimizerTask *t = palloc0(sizeof(PgOptimizerTask));
@@ -213,7 +228,7 @@ pg_task_optimize_group(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             }
         }
     }
-
+    group->optimized = true;
     return PG_CASCADES_OK;
 }
 
@@ -227,6 +242,9 @@ pg_task_optimize_expression(PgPlannerCascadesContext *ctx, PgOptimizerTask *task
     PgGroupExpr *expr = task->expr;
     ListCell   *lc;
     int         i;
+
+    if (expr == NULL)
+        return PG_CASCADES_OK;
 
     /* Step 1: push ApplyRuleTask for each applicable rule */
     /* Implementation rules — high promise first (already sorted) */
@@ -278,54 +296,22 @@ pg_task_optimize_expression(PgPlannerCascadesContext *ctx, PgOptimizerTask *task
         }
     }
 
-    /* Transformation rules — high promise first (already sorted) */
-    for (i = 0; i < ctx->num_trans_rules; i++)
-    {
-        PgRule *rule = &ctx->trans_rules[i];
-        bool    matches = false;
-
-        /* Phase 5: pattern-based matching */
-        if (rule->pattern != NULL)
-        {
-            /*
-             * Fast-path guard: if from_op is set, the root expression's op
-             * must match before pattern matching.
-             */
-            if (rule->from_op != 0 && rule->from_op != expr->op)
-            {
-                matches = false;
-            }
-            else
-            {
-                ListCell *elc;
-                matches = false;
-                foreach(elc, expr->owner_group->logical_exprs)
-                {
-                    PgGroupExpr *cand = (PgGroupExpr *) lfirst(elc);
-                    if (pg_pattern_match_root_only(rule->pattern, cand) != NIL)
-                    {
-                        matches = true;
-                        break;
-                    }
-                }
-            }
-        }
-        else if (rule->from_op == expr->op)
-            matches = true;
-        else
-            matches = false;
-
-        if (matches)
-        {
-            PgOptimizerTask *t;
-
-            t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
-            t->type = PG_TASK_APPLY_RULE;
-            t->expr = expr;
-            t->rule = rule;
-            task_stack_push(ctx, t);
-        }
-    }
+    /*
+     * Transformation rules are intentionally NOT pushed during the task
+     * scheduler optimization phase.  They already ran exhaustively during
+     * the rewrite pipeline (pg_cascades_logical_rewrite).
+     *
+     * Running them here would cause unbounded combinatorial growth: with
+     * 31 transformation rules, many matching the same operator kind, each
+     * creating new expressions that trigger additional OPTIMIZE_EXPRESSION
+     * tasks — even with correct explored_rules tracking and hash table
+     * dedup, the task count grows exponentially for non-trivial queries.
+     *
+     * This separation (rewrite explores the logical plan space; task
+     * scheduler optimizes the physical plan space) is the standard
+     * Cascades architecture, matching both the Columbia optimizer and
+     * StarRocks' two-phase design.
+     */
 
     /* Step 2: push DeriveStatsTask */
     if (!expr->stats_derived)
@@ -338,10 +324,17 @@ pg_task_optimize_expression(PgPlannerCascadesContext *ctx, PgOptimizerTask *task
         task_stack_push(ctx, t);
     }
 
-    /* Step 3: push ExploreGroupTask for each child */
+    /* Step 3: push ExploreGroupTask for each child.
+     * Skip self-referencing children to prevent infinite recursion
+     * caused by group merging (e.g., when a LOGICAL_JOIN child group
+     * gets merged into its own parent group). */
     foreach(lc, expr->inputs)
     {
         PgMemoGroup *child = (PgMemoGroup *) lfirst(lc);
+
+        if (child == expr->owner_group)
+            continue;
+
         PgOptimizerTask *t;
 
         t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
@@ -738,9 +731,6 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         task->required = required;
     }
 
-    /* ================================================================
-     * IMPORTED_PATH: fast path — no children, cost from Path directly
-     * ================================================================ */
     if (expr->mode == PG_PHYS_EXPR_IMPORTED_PATH)
     {
         Path *path = (Path *) expr->op_private;
@@ -838,6 +828,17 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                 if (child_best == NULL)
                 {
                     /*
+                     * Phase 6: If child group is already optimized but has no
+                     * matching best entry, skip this child.  No amount of
+                     * re-optimization will produce a result for this property.
+                     */
+                    if (child_group->optimized)
+                    {
+                        task->cur_child_index++;
+                        continue;
+                    }
+
+                    /*
                      * Phase 6: Cost lower-bound pruning.
                      * If the child already has a lower bound that exceeds
                      * the global upper bound, this child group has been
@@ -881,6 +882,10 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                 task->cur_child_index++;
             }
 
+            /* If all children were skipped (all optimized with no best entries),
+             * don't proceed to cost computation — this expression is dead. */
+            if (list_length(expr->inputs) > 0 && task->total_cost == 0)
+                return PG_CASCADES_OK;
             task->enforce_state = ENFORCE_COMPUTE_COST;
             /* fall through */
         }

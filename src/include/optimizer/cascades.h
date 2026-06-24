@@ -291,6 +291,7 @@ struct PgOptimizerTask
     /* Phase 4: Enforcer state machine */
     PgEnforceState enforce_state;   /* current state */
     int         cur_child_index;    /* current child being optimized */
+    int         prev_child_index;   /* StarRocks-style: last child we tried to optimize */
     PgOutputProperty output_property; /* derived output */
     List       *child_required_props; /* per-child required properties */
     double      total_cost;         /* accumulated cost */

@@ -398,7 +398,7 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
 
             MemSet(&hash_ctl, 0, sizeof(hash_ctl));
             hash_ctl.keysize = sizeof(PgExprHashKey);
-            hash_ctl.entrysize = sizeof(PgExprHashKey);
+            hash_ctl.entrysize = sizeof(PgExprHashEntry);
             hash_ctl.hcxt = ctx.memo_cxt;
             memo->group_expr_table = hash_create("Memo GroupExpr Table", 256,
                                                   &hash_ctl,
@@ -444,17 +444,21 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
             root_g->physical_exprs == NIL)
         {
             ListCell *lc;
+            PgMemoGroup *best = NULL;
+            /* Find the LAST non-empty group: outermost wrappers
+             * (Limit, Agg, Project) are added last. */
             foreach(lc, ctx.memo->groups)
             {
                 PgMemoGroup *g = (PgMemoGroup *) lfirst(lc);
                 if (g->logical_exprs != NIL || g->physical_exprs != NIL)
-                {
-                    ctx.memo->root_group = g;
-                    if (ctx.debug)
-                        elog(NOTICE, "Cascades: updated root_group from %d to %d after rewrite",
-                             root_g->id, g->id);
-                    break;
-                }
+                    best = g;
+            }
+            if (best != NULL)
+            {
+                ctx.memo->root_group = best;
+                if (ctx.debug)
+                    elog(NOTICE, "Cascades: updated root_group from %d to %d after rewrite",
+                         root_g->id, best->id);
             }
         }
     }
@@ -462,7 +466,9 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     /* 8. Run task scheduler */
     {
         PgOptimizerTask *root_task;
-
+        ListCell       *lc_go;
+        foreach(lc_go, ctx.memo->groups)
+            ((PgMemoGroup *) lfirst(lc_go))->optimized = false;
         root_task = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
         root_task->type = PG_TASK_OPTIMIZE_GROUP;
         root_task->group = ctx.memo->root_group;

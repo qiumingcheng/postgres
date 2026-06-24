@@ -17,6 +17,7 @@ static Plan *pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
     PgMemoGroup *group, PgRequiredProperty *required,
     PgGroupBestEntry *best, PgOutputProperty *output);
 static Path *pg_cascades_find_imported_path(PgMemoGroup *group);
+static void pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan);
 
 /* ========================================================================
  * Helper: find imported Path by walking through LogicalProject chain
@@ -80,41 +81,105 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
         Plan *child_plan = NULL;
         Plan *result = NULL;
 
+        if (cascades_planner_debug)
+            elog(NOTICE, "build_logical: group=%d op=%d",
+                 group->id, logical->op);
+
         /*
          * Guard: the compiler optimizes linitial(NIL) into an unconditional
          * trap (ud2/mov 0x0,%rax) for PG_CASCADES_LOGICAL_PROJECT, _AGG,
          * _SORT, _LIMIT, _DISTINCT cases.  If a logical expression has no
          * inputs (e.g., malformed by rewrite), skip it rather than crashing.
          */
-        if (logical->inputs == NIL)
+        if (logical->inputs == NIL &&
+            logical->op != PG_CASCADES_LOGICAL_SCAN &&
+            logical->op != PG_CASCADES_LOGICAL_FILTER)
             continue;
 
         switch (logical->op)
         {
+            case PG_CASCADES_LOGICAL_SCAN:
+            case PG_CASCADES_LOGICAL_FILTER:
+            {
+                /*
+                 * Only process LOGICAL_SCAN/FILTER if this group is actually
+                 * a base-table group (not a merged join group).  After group
+                 * merging, a group may contain both LOGICAL_JOIN and
+                 * LOGICAL_SCAN expressions; we should let the LOGICAL_JOIN
+                 * case handle the plan building.
+                 */
+                {
+                    bool has_join_expr = false;
+                    ListCell *check_lc;
+                    foreach(check_lc, group->logical_exprs)
+                    {
+                        PgGroupExpr *e = (PgGroupExpr *) lfirst(check_lc);
+                        if (e->op == PG_CASCADES_LOGICAL_JOIN)
+                        {
+                            has_join_expr = true;
+                            break;
+                        }
+                    }
+                    if (has_join_expr)
+                        break;  /* let LOGICAL_JOIN case handle it */
+                }
+
+                imported_path = pg_cascades_find_imported_path(group);
+                if (imported_path != NULL)
+                {
+                    result = create_plan(ctx->root, imported_path);
+                    if (result != NULL)
+                        pg_cascades_fix_empty_targetlists(ctx->root, result);
+                    return result;
+                }
+                break;
+            }
+
             case PG_CASCADES_LOGICAL_JOIN:
             {
                 /*
                  * Phase 3: Join paths are imported as IMPORTED_PATH entries
-                 * in the join group. Find the best matching entry and build
-                 * the plan from the Path directly.
+                 * in the join group.
+                 *
+                 * After group merging, the join group may also contain
+                 * scan-type IMPORTED_PATHs (SeqScan, IndexScan) from merged
+                 * base table groups.  Their best entries may have lower
+                 * cost and appear in the best_entries list instead of the
+                 * join best entries.  So we search ALL physical expressions,
+                 * not just the best_entries list.
                  */
-                PgGroupBestEntry *best = NULL;
+                Path *join_path = NULL;
                 ListCell *blc;
 
-                /* Find best entry in this group */
-                foreach(blc, group->best_entries)
+                /* Try each join type in order, prefer HashJoin */
                 {
-                    PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(blc);
-                    if (e->expr->mode == PG_PHYS_EXPR_IMPORTED_PATH)
+                    int join_ops[] = {
+                        PG_CASCADES_PHYSICAL_HASHJOIN,
+                        PG_CASCADES_PHYSICAL_MERGEJOIN,
+                        PG_CASCADES_PHYSICAL_NESTLOOP
+                    };
+                    int j;
+
+                    for (j = 0; j < 3 && join_path == NULL; j++)
                     {
-                        best = e;
-                        break;
+                        foreach(blc, group->physical_exprs)
+                        {
+                            PgGroupExpr *pe = (PgGroupExpr *) lfirst(blc);
+                            if (pe->mode == PG_PHYS_EXPR_IMPORTED_PATH &&
+                                pe->op == join_ops[j])
+                            {
+                                join_path = (Path *) pe->op_private;
+                                break;
+                            }
+                        }
                     }
                 }
 
-                if (best != NULL)
+                if (join_path != NULL)
                 {
-                    result = create_plan(ctx->root, (Path *) best->expr->op_private);
+                    result = create_plan(ctx->root, join_path);
+                    if (result != NULL)
+                        pg_cascades_fix_empty_targetlists(ctx->root, result);
                     return result;
                 }
                 break;
@@ -362,6 +427,72 @@ pg_safe_linitial_child_req(PgGroupBestEntry *best)
     return (PgRequiredProperty *) linitial(best->child_required_props);
 }
 
+/*
+ * pg_cascades_fix_empty_targetlists:
+ *   Walk a plan tree and fix any node with an empty targetlist.
+ *
+ *   For scan nodes (SeqScan, IndexScan, IndexOnlyScan, BitmapHeapScan),
+ *   the targetlist is derived from the relation's reltargetlist.
+ *   If column pruning cleared it, we reconstruct from the plan's
+ *   targetlist by looking up the RelOptInfo from simple_rel_array.
+ */
+static void
+pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
+{
+    Index       relid = 0;
+
+    if (plan == NULL)
+        return;
+
+    /* Recurse into children first */
+    if (plan->lefttree != NULL)
+        pg_cascades_fix_empty_targetlists(root, plan->lefttree);
+    if (plan->righttree != NULL)
+        pg_cascades_fix_empty_targetlists(root, plan->righttree);
+
+    /* Fix this node if targetlist is empty */
+    if (plan->targetlist == NIL)
+    {
+        /* Try lefttree targetlist first (for joins) */
+        if (plan->lefttree != NULL)
+        {
+            plan->targetlist = plan->lefttree->targetlist;
+            return;
+        }
+        if (plan->righttree != NULL)
+        {
+            plan->targetlist = plan->righttree->targetlist;
+            return;
+        }
+
+        /* For scan nodes, get relid from the scan node */
+        switch (nodeTag(plan))
+        {
+            case T_SeqScan:
+                relid = ((SeqScan *) plan)->scanrelid;
+                break;
+            case T_IndexScan:
+                relid = ((IndexScan *) plan)->scan.scanrelid;
+                break;
+            case T_IndexOnlyScan:
+                relid = ((IndexOnlyScan *) plan)->scan.scanrelid;
+                break;
+            case T_BitmapHeapScan:
+                relid = ((BitmapHeapScan *) plan)->scan.scanrelid;
+                break;
+            default:
+                break;
+        }
+
+        if (relid > 0 && relid <= root->simple_rel_array_size)
+        {
+            RelOptInfo *rel = root->simple_rel_array[relid];
+            if (rel != NULL && rel->reltargetlist != NIL)
+                plan->targetlist = rel->reltargetlist;
+        }
+    }
+}
+
 /* ========================================================================
  * Recursive Plan Builder
  * ======================================================================== */
@@ -387,7 +518,11 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
         case PG_CASCADES_PHYSICAL_NESTLOOP:
         case PG_CASCADES_PHYSICAL_HASHJOIN:
         case PG_CASCADES_PHYSICAL_MERGEJOIN:
+            if (expr->mode != PG_PHYS_EXPR_IMPORTED_PATH)
+                return NULL;
             result = create_plan(ctx->root, (Path *) expr->op_private);
+            if (result != NULL)
+                pg_cascades_fix_empty_targetlists(ctx->root, result);
             break;
 
         /* === Upper Ops: recursive build + wrap === */

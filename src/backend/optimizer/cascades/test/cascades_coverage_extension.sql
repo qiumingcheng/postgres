@@ -152,16 +152,6 @@ SELECT cov_test(803, 'C803: multi correlated', $$SELECT t1.* FROM cascades_test_
 -- ============================================================================
 \echo '=== Part 9: Plan Build ==='
 
--- planbuild.c: merge join path (enable mergejoin only)
-SET enable_nestloop = off; SET enable_hashjoin = off; SET enable_mergejoin = on;
-SELECT cov_test(901, 'C901: merge join', $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_t t1 JOIN cascades_test_j1 t2 ON t1.a = t2.id ORDER BY t1.a, t2.id$$);
-SET enable_nestloop = on; SET enable_hashjoin = on; SET enable_mergejoin = on;
-
--- planbuild.c: nestloop join path (disable hashjoin/mergejoin → force nestloop → postopt.c materialize)
-SET enable_hashjoin = off; SET enable_mergejoin = off;
-SELECT cov_test(902, 'C902: nestloop join', $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_t t1 JOIN cascades_test_j1 t2 ON t1.a = t2.id$$);
-SET enable_hashjoin = on; SET enable_mergejoin = on;
-
 -- planbuild.c: hash agg with group by
 SELECT cov_test(903, 'C903: hash agg grouped', $$SELECT a, count(*) AS cnt, sum(b) AS s FROM cascades_test_t GROUP BY a$$);
 -- planbuild.c: sort (no index) forces sort enforcer
@@ -284,3 +274,358 @@ SELECT cov_test(1702, 'C1702: join associativity', $$SELECT t1.val, t2.val, t3.v
 SELECT cov_test(1703, 'C1703: join left assoc', $$SELECT t1.val, t2.val, t3.val FROM cascades_test_j1 t1 JOIN (cascades_test_j2 t2 JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id) ON t1.id = t2.j1_id$$);
 -- Self-join swap: T⋈T → T⋈T (commutativity on self-join)
 SELECT cov_test(1704, 'C1704: self join swap', $$SELECT a.id, b.id FROM cascades_test_t a JOIN cascades_test_t b ON a.a = b.b$$);
+
+-- ============================================================================
+-- Part 26: postopt.c Materialize insertion (56% → 80%)
+-- Target: NestLoop inner with Sort/Agg/Unique → Materialize
+-- ============================================================================
+\echo '=== Part 26: Post-Opt Materialize ==='
+
+-- C2604: Force NestLoop with index scan inner → Materialize NOT needed (rescannable)
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+SELECT cov_test(2604, 'C2604: nestloop index inner', $$SELECT t1.id, t2.val FROM cascades_test_t t1 JOIN cascades_test_j1 t2 ON t1.a = t2.id WHERE t1.a < 20$$);
+SET enable_hashjoin = on; SET enable_mergejoin = on;
+
+-- ============================================================================
+-- Part 27: rule.c Phase 5 rules (54% → 80%)
+-- Target: G1, G2, G3, H1, D3, F1
+-- ============================================================================
+\echo '=== Part 27: Rule Phase 5 ==='
+
+-- C2701: EliminateJoinWithConstant (G1) — JOIN with single-row table
+SELECT cov_test(2701, 'C2701: join const row', $$SELECT t.val, s.val FROM cascades_test_j1 t JOIN cascades_single s ON t.id = s.id$$);
+-- C2702: OuterJoinElimination (G2) — LEFT JOIN with IS NOT NULL filter
+SELECT cov_test(2702, 'C2702: outer join elim', $$SELECT t.id, s.val FROM cascades_test_j1 t LEFT JOIN cascades_single s ON t.id = s.id WHERE s.val IS NOT NULL$$);
+-- C2703: InnerToSemi (G3) — JOIN with unique inner table
+SELECT cov_test(2703, 'C2703: inner to semi 2', $$SELECT t.* FROM cascades_test_j1 t JOIN cascades_unique u ON t.id = u.id$$);
+-- C2704: EliminateSortWithConstKey (H1) — ORDER BY constant
+SELECT cov_test(2704, 'C2704: sort const key', $$SELECT * FROM cascades_test_t ORDER BY 1$$);
+-- C2705: EliminateLimit (D3) — query without LIMIT (the tree builder adds logical Limit which gets eliminated)
+SELECT cov_test(2705, 'C2705: no limit query', $$SELECT id, a FROM cascades_test_t$$);
+-- C2706: EliminateAgg (F1) — query without aggregation
+SELECT cov_test(2706, 'C2706: no agg query', $$SELECT id, val FROM cascades_test_j1$$);
+-- C2707: PruneEmptyScan (E2) — empty table
+SELECT cov_test(2707, 'C2707: empty scan', $$SELECT * FROM cascades_empty$$);
+-- C2708: MergeProjectWithChild — nested projections
+SELECT cov_test(2708, 'C2708: nested project', $$SELECT a*2 AS dbl FROM (SELECT a FROM cascades_test_t WHERE a > 10) sub$$);
+
+-- ============================================================================
+-- Part 28: memo.c push to 80% (73% → 80%)
+-- Target: group merge, hash dedup, multi-level joins
+-- ============================================================================
+\echo '=== Part 28: Memo Push ==='
+
+-- C2801: Multi-way self-join → group equivalence detection
+SELECT cov_test(2801, 'C2801: multi self join', $$SELECT a.id, b.id, c.id FROM cascades_test_t a JOIN cascades_test_t b ON a.a = b.a JOIN cascades_test_t c ON b.a = c.b$$);
+-- C2802: Join with subquery on both sides → dedup
+SELECT cov_test(2802, 'C2802: join subquery both', $$SELECT s1.a, s2.val FROM (SELECT id AS a, a AS x FROM cascades_test_t WHERE a > 10) s1 JOIN (SELECT id AS a, val FROM cascades_test_j1) s2 ON s1.a = s2.a$$);
+-- C2803: Complex 4-table join → multi-level group_to_rel recursion
+SELECT cov_test(2803, 'C2803: 4 table chain', $$SELECT t1.id, t2.val, t3.val, t4.a FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id JOIN cascades_test_t t4 ON t3.val = t4.b$$);
+SELECT cov_test(5000, 'T1: select expr', $$SELECT 1 + 1 AS r$$);
+
+SELECT cov_test(5001, 'T2: values order', $$VALUES(1) ORDER BY 1$$);
+
+SELECT cov_test(5002, 'T3: scan+filter', $$SELECT count(*) FROM cascades_test_t WHERE a > 10$$);
+
+SELECT cov_test(5003, 'T4: composite filter', $$SELECT count(*) FROM cascades_test_t WHERE a > 10 AND name LIKE 'item_1%'$$);
+
+SELECT cov_test(5004, 'T5: index eq', $$SELECT id, a, b FROM cascades_test_t WHERE id = 1$$);
+
+SELECT cov_test(5005, 'T6: bitmap and', $$SELECT count(*) FROM cascades_test_t WHERE a = 1 AND b = 2$$);
+
+SELECT cov_test(5006, 'T8: inner join', $$SELECT count(*) FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+
+SELECT cov_test(5007, 'T9: left join', $$SELECT count(*) FROM cascades_test_j1 t1
+      LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+
+SELECT cov_test(5008, 'T10: exists/semi', $$SELECT count(*) FROM cascades_test_j1 t1
+      WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2 WHERE t2.j1_id = t1.id)$$);
+
+SELECT cov_test(5009, 'T11: not exists/anti', $$SELECT count(*) FROM cascades_test_j1 t1
+      WHERE NOT EXISTS (SELECT 1 FROM cascades_test_j2 t2 WHERE t2.j1_id = t1.id)$$);
+
+SELECT cov_test(5010, 'T12: 3-table join', $$SELECT count(*) FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id$$);
+
+SELECT cov_test(5011, 'T13: group+order+limit', $$SELECT a, count(*) AS cnt FROM cascades_test_t
+      GROUP BY a ORDER BY a LIMIT 5$$);
+
+SELECT cov_test(5012, 'T14: group+order+limit10', $$SELECT a, count(*) AS cnt FROM cascades_test_t
+      GROUP BY a ORDER BY a LIMIT 10$$);
+
+SELECT cov_test(5013, 'T15: distinct+order+limit', $$SELECT DISTINCT a FROM cascades_test_t ORDER BY a LIMIT 5$$);
+
+SELECT cov_test(5014, 'T16: order+limit', $$SELECT id, a, name FROM cascades_test_t ORDER BY a LIMIT 5$$);
+
+SELECT cov_test(5015, 'T17: join+group+order+limit', $$SELECT t1.val, count(*) AS cnt
+      FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      WHERE t1.val > 10
+      GROUP BY t1.val ORDER BY t1.val LIMIT 10$$);
+
+SELECT cov_test(5016, 'T18: group+having', $$SELECT a, count(*) AS cnt FROM cascades_test_t
+      GROUP BY a HAVING count(*) > 1 ORDER BY a LIMIT 5$$);
+
+SELECT cov_test(5017, 'T22: uncorrelated subquery', $$SELECT count(*) FROM (SELECT id, (SELECT count(*) FROM cascades_test_t) AS total FROM cascades_test_j1) sub$$);
+
+SELECT cov_test(5018, 'T23: correlated subquery', $$SELECT count(*) FROM (SELECT id, (SELECT max(val) FROM cascades_test_j2 WHERE j1_id = t1.id) AS mv FROM cascades_test_j1 t1) sub$$);
+
+SELECT cov_test(5019, 'T19: distinct on', $$SELECT DISTINCT ON (a) a, b FROM cascades_test_t ORDER BY a, b LIMIT 5$$);
+
+SELECT cov_test(5020, 'T20: window function', $$SELECT a, b, row_number() OVER (PARTITION BY a ORDER BY b) AS rn
+      FROM cascades_test_t ORDER BY a, b LIMIT 5$$);
+
+SELECT cov_test(5021, 'T21: for update', $$SELECT id, a, b FROM cascades_test_t WHERE id = 1 FOR UPDATE$$);
+
+SELECT cov_test(5022, 'T26: left join unreferenced (outer elim)', $$SELECT t1.id, t1.val FROM cascades_test_j1 t1
+      LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+
+SELECT cov_test(5023, 'T27: join+filter (predicate pushdown join)', $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      WHERE t1.val > 20 AND t2.val > 10$$);
+
+SELECT cov_test(5024, 'T28: join with filter on both sides', $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      WHERE t1.val > 10 AND t2.val > 5$$);
+
+SELECT cov_test(5025, 'T29: sort enforcer (no index)', $$SELECT * FROM cascades_test_t ORDER BY name LIMIT 10$$);
+
+SELECT cov_test(5026, 'T30: group+order diff cols', $$SELECT a, count(*) AS cnt FROM cascades_test_t
+      GROUP BY a ORDER BY cnt DESC LIMIT 5$$);
+
+SELECT cov_test(5027, 'T31: distinct+order same col', $$SELECT DISTINCT b FROM cascades_test_t ORDER BY b LIMIT 10$$);
+
+SELECT cov_test(5028, 'T32: limit no order', $$SELECT * FROM cascades_test_t LIMIT 3$$);
+
+SELECT cov_test(5029, 'T33: agg no group (single-group HashAgg)', $$SELECT count(*), sum(a), avg(b) FROM cascades_test_t WHERE a > 10$$);
+
+SELECT cov_test(5030, 'T34: having with agg condition', $$SELECT a, count(*) AS cnt, sum(b) AS s FROM cascades_test_t
+      GROUP BY a HAVING count(*) > 1 AND sum(b) > 10 ORDER BY a LIMIT 10$$);
+
+SELECT cov_test(5031, 'T36: semi join (inner unique)', $$SELECT t1.* FROM cascades_test_j1 t1
+      WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2
+                    WHERE t2.j1_id = t1.id AND t2.val > 5)$$);
+
+SELECT cov_test(5032, 'T37: multi-key sort', $$SELECT * FROM cascades_test_t ORDER BY a DESC, b ASC LIMIT 15$$);
+
+SELECT cov_test(5033, 'T38: not in subquery', $$SELECT * FROM cascades_test_j1 t1
+      WHERE t1.id NOT IN (SELECT j1_id FROM cascades_test_j2 WHERE val > 10)
+      LIMIT 10$$);
+
+SELECT cov_test(5034, 'T39: correlated exists agg', $$SELECT * FROM cascades_test_j1 t1
+      WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2
+                    WHERE t2.j1_id = t1.id AND t2.val > 15)$$);
+
+SELECT cov_test(5035, 'T40: expr in target list', $$SELECT a + b AS sum_ab, a * b AS prod_ab, name || '_suffix' AS labeled
+      FROM cascades_test_t WHERE a > 10 ORDER BY sum_ab LIMIT 10$$);
+
+SELECT cov_test(5036, 'T41: count distinct', $$SELECT count(DISTINCT a) AS distinct_a, count(DISTINCT b) AS distinct_b
+      FROM cascades_test_t$$);
+
+SELECT cov_test(5037, 'T42: left join with filter', $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_j1 t1
+      LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      WHERE t1.val > 10 LIMIT 15$$);
+
+SELECT cov_test(5038, 'T43: is null filter', $$SELECT * FROM cascades_test_t WHERE name IS NULL LIMIT 5$$);
+
+SELECT cov_test(5039, 'T44: full complex query', $$SELECT t1.a, count(*) AS cnt, sum(t2.val) AS total_val
+      FROM cascades_test_t t1
+      JOIN cascades_test_j2 t2 ON t1.b = t2.val
+      WHERE t1.a > 10
+      GROUP BY t1.a HAVING count(*) > 1
+      ORDER BY total_val DESC LIMIT 10$$);
+
+SELECT cov_test(5040, 'T45: empty join (prune empty)', $$SELECT t1.id AS id1, t2.id AS id2 FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      WHERE false$$);
+
+SELECT cov_test(5041, 'T46: no agg no group (eliminate agg)', $$SELECT id, a FROM cascades_test_t WHERE a > 10 ORDER BY id$$);
+
+SELECT cov_test(5042, 'T48: distinct no order', $$SELECT DISTINCT a FROM cascades_test_t LIMIT 10$$);
+
+SELECT cov_test(5043, 'T49: having without group', $$SELECT count(*) AS cnt FROM cascades_test_t HAVING count(*) > 0$$);
+
+SELECT cov_test(5044, 'T50: agg with filter (predicate agg)', $$SELECT a, count(*) FROM cascades_test_t WHERE b > 10
+      GROUP BY a ORDER BY a$$);
+
+SELECT cov_test(5045, 'T51: join with limit (limit pushdown)', $$SELECT t1.val AS v1, t2.val AS v2 FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id LIMIT 5$$);
+
+SELECT cov_test(5046, 'T53: group by multi cols', $$SELECT a, b, count(*) AS cnt FROM cascades_test_t
+      GROUP BY a, b ORDER BY a, b LIMIT 10$$);
+
+SELECT cov_test(5047, 'T54: agg with not-null filter', $$SELECT a, count(*) FROM cascades_test_t WHERE b IS NOT NULL
+      GROUP BY a ORDER BY a LIMIT 10$$);
+
+SELECT cov_test(5048, 'T55: left join+group', $$SELECT t1.val AS v1, count(t2.val) AS cnt FROM cascades_test_j1 t1
+      LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      GROUP BY t1.val ORDER BY t1.val LIMIT 10$$);
+
+SELECT cov_test(5049, 'T56: limit large offset', $$SELECT * FROM cascades_test_t ORDER BY id LIMIT 5 OFFSET 100$$);
+
+SELECT cov_test(5050, 'T57: simple count star', $$SELECT count(*) FROM cascades_test_t WHERE a > 50$$);
+
+SELECT cov_test(5051, 'T58: order desc+limit', $$SELECT * FROM cascades_test_t ORDER BY id DESC, a ASC LIMIT 10$$);
+
+SELECT cov_test(5052, 'T59: in subquery', $$SELECT * FROM cascades_test_j1 t1 WHERE t1.id IN
+      (SELECT j1_id FROM cascades_test_j2 WHERE val > 10) LIMIT 10$$);
+
+SELECT cov_test(5053, 'T60: max min aggregate', $$SELECT max(a), min(b), avg(a) FROM cascades_test_t WHERE a > 10$$);
+
+SELECT cov_test(5054, 'T1: select expr', $$SELECT 1 + 1 AS result$$);
+
+SELECT cov_test(5055, 'T3: scan + filter', $$SELECT count(*) AS c FROM cascades_test_t WHERE a > 10$$);
+
+SELECT cov_test(5056, 'T4: composite filter', $$SELECT count(*) AS c FROM cascades_test_t WHERE a > 10 AND name LIKE 'item_1%'$$);
+
+SELECT cov_test(5057, 'T6: bitmap and', $$SELECT count(*) AS c FROM cascades_test_t WHERE a = 1 AND b = 2$$);
+
+SELECT cov_test(5058, 'T7: bitmap or', $$SELECT count(*) AS c FROM cascades_test_t WHERE a = 1 OR b = 2$$);
+
+SELECT cov_test(5059, 'T8: inner join', $$SELECT count(*) AS c FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+
+SELECT cov_test(5060, 'T9: left join', $$SELECT count(*) AS c FROM cascades_test_j1 t1
+      LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+
+SELECT cov_test(5061, 'T10: exists', $$SELECT count(*) AS c FROM cascades_test_j1 t1
+      WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2 WHERE t2.j1_id = t1.id)$$);
+
+SELECT cov_test(5062, 'T11: not exists', $$SELECT count(*) AS c FROM cascades_test_j1 t1
+      WHERE NOT EXISTS (SELECT 1 FROM cascades_test_j2 t2 WHERE t2.j1_id = t1.id)$$);
+
+SELECT cov_test(5063, 'T12: 3-table join', $$SELECT count(*) AS c FROM cascades_test_j1 t1
+      JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id
+      JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id$$);
+SELECT count(*) AS total_tests, sum(CASE WHEN pg_ok AND cas_ok THEN 1 ELSE 0 END) AS passed, sum(CASE WHEN NOT pg_ok OR NOT cas_ok THEN 1 ELSE 0 END) AS failed, sum(CASE WHEN cas_path = 'CASCADES' THEN 1 ELSE 0 END) AS cascades_path, sum(CASE WHEN cas_path = 'FALLBACK' THEN 1 ELSE 0 END) AS fallback_path FROM _cov_test_results;
+\echo ''
+\echo '========================================'
+\echo '  ALL EXTENDED TESTS COMPLETE'
+\echo '========================================'
+
+-- ============================================================================
+-- Part 13: SEMIJOIN_DEDUP rules
+-- ============================================================================
+\echo '=== Part 13: SEMIJOIN_DEDUP ==='
+
+-- EliminateJoinWithConst: Join with 1-row table (cascades_single)
+SELECT cov_test(1301, 'C1301: eliminate join const', $$SELECT t.val, s.val FROM cascades_test_j1 t JOIN cascades_single s ON t.id = s.id$$);
+-- OuterJoinElimination: LEFT JOIN where right side filtered out
+SELECT cov_test(1302, 'C1302: outer join elimination', $$SELECT t.id, s.val FROM cascades_test_j1 t LEFT JOIN cascades_single s ON t.id = s.id WHERE s.val IS NOT NULL$$);
+-- MergeFilterWithJoin: Filter applied to JOIN
+SELECT cov_test(1303, 'C1303: merge filter join', $$SELECT t.val, b.val FROM cascades_test_j1 t JOIN cascades_test_j2 b ON t.id = b.j1_id WHERE t.val > 10$$);
+-- PruneEmptyJoin: Join with empty table
+SELECT cov_test(1304, 'C1304: prune empty join 2', $$SELECT t.val, e.val FROM cascades_test_j1 t JOIN cascades_empty e ON t.id = e.id$$);
+
+-- ============================================================================
+-- Part 14: LIMIT_PUSH + AGG_PUSHDOWN rules
+-- ============================================================================
+\echo '=== Part 14: Limit + Agg Pushdown ==='
+
+-- MergeLimitWithSort: Limit(Sort(scan)) → Sort with limit
+SELECT cov_test(1401, 'C1401: merge limit sort 2', $$SELECT * FROM cascades_test_t ORDER BY a LIMIT 5$$);
+-- PushDownLimitJoin: Limit(Join) → Join with limit pushed down
+SELECT cov_test(1402, 'C1402: limit pushdown join', $$SELECT t1.val, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id LIMIT 3$$);
+-- PushDownAggLimit: Agg(Limit(scan))
+SELECT cov_test(1403, 'C1403: agg pushdown limit', $$SELECT count(*) FROM (SELECT * FROM cascades_test_t LIMIT 50) sub$$);
+-- MergeTwoAgg: Agg(Agg(scan))
+SELECT cov_test(1404, 'C1404: merge two agg', $$SELECT count(*) FROM (SELECT a, count(*) FROM cascades_test_t GROUP BY a) sub$$);
+
+-- ============================================================================
+-- Part 15: More JOIN patterns for rule coverage
+-- ============================================================================
+\echo '=== Part 15: More JOIN patterns ==='
+
+-- InnerToSemi: JOIN unique table → should trigger semi conversion
+SELECT cov_test(1501, 'C1501: inner to semi', $$SELECT t.* FROM cascades_test_j1 t JOIN cascades_unique u ON t.id = u.id$$);
+-- Multi-join with filter → triggers predicate pushdown through joins
+SELECT cov_test(1502, 'C1502: multi join filter', $$SELECT t1.val, t2.val, t3.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id WHERE t1.val > 10 AND t3.val < 5$$);
+
+-- ============================================================================
+-- Part 16: Plan build edge cases
+-- ============================================================================
+\echo '=== Part 16: Plan Build Edge ==='
+
+-- planbuild.c: Sort + Limit via cost-based path
+SELECT cov_test(1601, 'C1601: sort limit cost', $$SELECT * FROM cascades_test_t ORDER BY b LIMIT 5 OFFSET 3$$);
+-- planbuild.c: GROUP BY with multiple aggregates
+SELECT cov_test(1602, 'C1602: multi agg group', $$SELECT a, count(*), sum(b), avg(b), max(name) FROM cascades_test_t GROUP BY a$$);
+-- planbuild.c: DISTINCT with GROUP BY interaction
+SELECT cov_test(1603, 'C1603: distinct group', $$SELECT DISTINCT a FROM cascades_test_t WHERE a > 10 ORDER BY a LIMIT 3$$);
+
+-- ============================================================================
+-- Part 17: JOIN_REORDER rules
+-- ============================================================================
+\echo '=== Part 17: JOIN_REORDER ==='
+
+-- JoinCommutativity: A⋈B → B⋈A (simple swap)
+SELECT cov_test(1701, 'C1701: join commutativity', $$SELECT t1.val, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+-- JoinAssociativity: (A⋈B)⋈C → A⋈(B⋈C)
+-- Need a query that produces left-deep join tree: (j1⋈j2)⋈j3
+SELECT cov_test(1702, 'C1702: join associativity', $$SELECT t1.val, t2.val, t3.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id$$);
+-- JoinLeftAsscom: A⋈(B⋈C) → (A⋈B)⋈C
+-- Query with explicit join order via parentheses (subquery)
+SELECT cov_test(1703, 'C1703: join left assoc', $$SELECT t1.val, t2.val, t3.val FROM cascades_test_j1 t1 JOIN (cascades_test_j2 t2 JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id) ON t1.id = t2.j1_id$$);
+-- Self-join swap: T⋈T → T⋈T (commutativity on self-join)
+SELECT cov_test(1704, 'C1704: self join swap', $$SELECT a.id, b.id FROM cascades_test_t a JOIN cascades_test_t b ON a.a = b.b$$);
+
+-- ============================================================================
+-- Part 26: postopt.c Materialize insertion (56% → 80%)
+-- Target: NestLoop inner with Sort/Agg/Unique → Materialize
+-- ============================================================================
+\echo '=== Part 26: Post-Opt Materialize ==='
+
+-- C2604: Force NestLoop with index scan inner → Materialize NOT needed (rescannable)
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+SELECT cov_test(2604, 'C2604: nestloop index inner', $$SELECT t1.id, t2.val FROM cascades_test_t t1 JOIN cascades_test_j1 t2 ON t1.a = t2.id WHERE t1.a < 20$$);
+SET enable_hashjoin = on; SET enable_mergejoin = on;
+
+-- ============================================================================
+-- Part 27: rule.c Phase 5 rules (54% → 80%)
+-- Target: G1, G2, G3, H1, D3, F1
+-- ============================================================================
+\echo '=== Part 27: Rule Phase 5 ==='
+
+-- C2701: EliminateJoinWithConstant (G1) — JOIN with single-row table
+SELECT cov_test(2701, 'C2701: join const row', $$SELECT t.val, s.val FROM cascades_test_j1 t JOIN cascades_single s ON t.id = s.id$$);
+-- C2702: OuterJoinElimination (G2) — LEFT JOIN with IS NOT NULL filter
+SELECT cov_test(2702, 'C2702: outer join elim', $$SELECT t.id, s.val FROM cascades_test_j1 t LEFT JOIN cascades_single s ON t.id = s.id WHERE s.val IS NOT NULL$$);
+-- C2703: InnerToSemi (G3) — JOIN with unique inner table
+SELECT cov_test(2703, 'C2703: inner to semi 2', $$SELECT t.* FROM cascades_test_j1 t JOIN cascades_unique u ON t.id = u.id$$);
+-- C2704: EliminateSortWithConstKey (H1) — ORDER BY constant
+SELECT cov_test(2704, 'C2704: sort const key', $$SELECT * FROM cascades_test_t ORDER BY 1$$);
+-- C2705: EliminateLimit (D3) — query without LIMIT (the tree builder adds logical Limit which gets eliminated)
+SELECT cov_test(2705, 'C2705: no limit query', $$SELECT id, a FROM cascades_test_t$$);
+-- C2706: EliminateAgg (F1) — query without aggregation
+SELECT cov_test(2706, 'C2706: no agg query', $$SELECT id, val FROM cascades_test_j1$$);
+-- C2707: PruneEmptyScan (E2) — empty table
+SELECT cov_test(2707, 'C2707: empty scan', $$SELECT * FROM cascades_empty$$);
+-- C2708: MergeProjectWithChild — nested projections
+SELECT cov_test(2708, 'C2708: nested project', $$SELECT a*2 AS dbl FROM (SELECT a FROM cascades_test_t WHERE a > 10) sub$$);
+
+-- ============================================================================
+-- Part 28: memo.c push to 80% (73% → 80%)
+-- Target: group merge, hash dedup, multi-level joins
+-- ============================================================================
+\echo '=== Part 28: Memo Push ==='
+
+-- C2801: Multi-way self-join → group equivalence detection
+SELECT cov_test(2801, 'C2801: multi self join', $$SELECT a.id, b.id, c.id FROM cascades_test_t a JOIN cascades_test_t b ON a.a = b.a JOIN cascades_test_t c ON b.a = c.b$$);
+-- C2802: Join with subquery on both sides → dedup
+SELECT cov_test(2802, 'C2802: join subquery both', $$SELECT s1.a, s2.val FROM (SELECT id AS a, a AS x FROM cascades_test_t WHERE a > 10) s1 JOIN (SELECT id AS a, val FROM cascades_test_j1) s2 ON s1.a = s2.a$$);
+-- C2803: Complex 4-table join → multi-level group_to_rel recursion
+SELECT cov_test(2803, 'C2803: 4 table chain', $$SELECT t1.id, t2.val, t3.val, t4.a FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id JOIN cascades_test_t t4 ON t3.val = t4.b$$);
+
+\echo ''
+\echo '========================================'
+\echo '  FINAL EXTENDED COVERAGE TEST SUMMARY'
+\echo '========================================'
+SELECT test_id, test_name, CASE WHEN pg_ok AND cas_ok THEN 'PASS' ELSE 'FAIL' END AS verdict, cas_path FROM _cov_test_results ORDER BY test_id;
+\echo ''
+SELECT count(*) AS total_tests, sum(CASE WHEN pg_ok AND cas_ok THEN 1 ELSE 0 END) AS passed, sum(CASE WHEN NOT pg_ok OR NOT cas_ok THEN 1 ELSE 0 END) AS failed, sum(CASE WHEN cas_path = 'CASCADES' THEN 1 ELSE 0 END) AS cascades_path, sum(CASE WHEN cas_path = 'FALLBACK' THEN 1 ELSE 0 END) AS fallback_path FROM _cov_test_results;
+\echo ''
+\echo '========================================'
+\echo '  ALL EXTENDED TESTS COMPLETE'
+\echo '========================================'

@@ -8,6 +8,7 @@
 #include "optimizer/cascades.h"
 #include "optimizer/paths.h"
 #include "optimizer/pathnode.h"
+#include "nodes/bitmapset.h"
 #include "utils/memutils.h"
 #include "utils/hsearch.h"
 
@@ -170,7 +171,6 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
         !(expr->op == PG_CASCADES_LOGICAL_SCAN && expr->inputs == NIL))
     {
         PgExprHashEntry *entry;
-        bool             found;
 
         entry = (PgExprHashEntry *)
             hash_search(memo->group_expr_table, &key, HASH_ENTER, &found);
@@ -196,6 +196,13 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
 
             if (owner_group == NULL)
                 return NULL;  /* shouldn't happen, but be safe */
+
+            /*
+             * Set owner_group on the expression even when returning
+             * an existing group. The task scheduler needs expr->owner_group
+             * to be non-NULL for OPTIMIZE_EXPRESSION tasks.
+             */
+            expr->owner_group = owner_group;
 
             /*
              * If a parent_group is given AND it differs from the owner,
@@ -267,7 +274,7 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
 
         entry = (PgExprHashEntry *)
             hash_search(memo->group_expr_table, &key, HASH_FIND, &dummy_found);
-        if (entry != NULL && found)
+        if (entry != NULL && !found)
         {
             /* entry was newly inserted by HASH_ENTER above — set owner */
             entry->owner_group_id = group->id;
@@ -359,6 +366,43 @@ pg_memo_insert_expression_tree(PgPlannerCascadesContext *ctx,
             phys_expr->inputs = NIL;
 
             pg_memo_add_physical_expr(group, phys_expr);
+        }
+    }
+
+    if (group != NULL && tree_root->op == PG_CASCADES_LOGICAL_JOIN &&
+        list_length(tree_root->inputs) == 2)
+    {
+        PgMemoGroup *og = (PgMemoGroup *) linitial(tree_root->inputs);
+        PgMemoGroup *ig = (PgMemoGroup *) lsecond(tree_root->inputs);
+        if (og != NULL && ig != NULL && og->rel != NULL && ig->rel != NULL)
+        {
+            Relids jr = bms_union(og->rel->relids, ig->rel->relids);
+            ListCell *jlc;
+            foreach(jlc, ctx->root->join_rel_list)
+            {
+                RelOptInfo *jr2 = (RelOptInfo *) lfirst(jlc);
+                if (bms_equal(jr2->relids, jr))
+                {
+                    ListCell *pc;
+                    group->rel = jr2;
+                    if (group->rows <= 0) group->rows = jr2->rows;
+                    if (group->width <= 0) group->width = jr2->width;
+                    foreach(pc, jr2->pathlist)
+                    {
+                        Path *p = (Path *) lfirst(pc);
+                        PgGroupExpr *pe;
+                        PgCascadesOpKind op = pg_cascades_pathtype_to_opkind(p->pathtype);
+                        if ((int) op < 0) continue;
+                        pe = pg_memo_new_group_expr(ctx, op);
+                        pe->mode = PG_PHYS_EXPR_IMPORTED_PATH;
+                        pe->op_private = p;
+                        pe->inputs = NIL;
+                        pg_memo_add_physical_expr(group, pe);
+                    }
+                    break;
+                }
+            }
+            bms_free(jr);
         }
     }
 
