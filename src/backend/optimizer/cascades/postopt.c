@@ -38,6 +38,8 @@ pg_cascades_validate_plan_recurse(Plan *plan, int depth)
         case T_IndexOnlyScan:
         case T_BitmapHeapScan:
         case T_BitmapIndexScan:
+        case T_BitmapAnd:
+        case T_BitmapOr:
         case T_TidScan:
         case T_SubqueryScan:
         case T_FunctionScan:
@@ -70,7 +72,10 @@ pg_cascades_validate_plan_recurse(Plan *plan, int depth)
 
     /* Check targetlist: should be non-NIL for most plan types */
     if (plan->targetlist == NIL &&
-        nodeTag(plan) != T_Material)
+        nodeTag(plan) != T_Material &&
+        nodeTag(plan) != T_BitmapHeapScan &&
+        nodeTag(plan) != T_BitmapAnd &&
+        nodeTag(plan) != T_BitmapOr)
     {
         elog(WARNING,
              "Cascades validator: empty targetlist for node type %d at depth %d",

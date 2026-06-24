@@ -297,9 +297,12 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
                  * wrap with a Limit node.  make_sort_from_pathkeys only
                  * uses limit_tuples for costing, not for actual row
                  * limiting.
+                 *
+                 * Note: When root group has no best entries (e.g. after
+                 * group merge), ctx->root may not have been set correctly.
+                 * Use ctx->upper->limit_tuples as the safety check.
                  */
-                if (ctx->upper->limit_tuples > 0 &&
-                    ctx->root->parse->limitCount != NULL)
+                if (ctx->upper->limit_tuples > 0)
                 {
                     result = (Plan *) make_limit(result,
                         ctx->root->parse->limitOffset,
