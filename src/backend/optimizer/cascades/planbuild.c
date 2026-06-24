@@ -208,6 +208,14 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
                     !ctx->upper->hasAggs &&
                     ctx->upper->activeWindows == NIL)
                 {
+                    /*
+                     * Replace the child plan's targetlist with the query's
+                     * target list.  create_plan uses reltargetlist which may
+                     * have extra columns or be pruned.  ctx->upper->tlist is
+                     * the actual SELECT target list.
+                     */
+                    if (ctx->upper->tlist != NIL)
+                        child_plan->targetlist = ctx->upper->tlist;
                     return child_plan;
                 }
 
@@ -283,6 +291,21 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
                     ctx->upper->sort_pathkeys,
                     ctx->upper->limit_tuples);
                 ctx->root->query_pathkeys = ctx->upper->sort_pathkeys;
+
+                /*
+                 * If MergeLimitWithSort merged the Limit into this Sort,
+                 * wrap with a Limit node.  make_sort_from_pathkeys only
+                 * uses limit_tuples for costing, not for actual row
+                 * limiting.
+                 */
+                if (ctx->upper->limit_tuples > 0 &&
+                    ctx->root->parse->limitCount != NULL)
+                {
+                    result = (Plan *) make_limit(result,
+                        ctx->root->parse->limitOffset,
+                        ctx->root->parse->limitCount,
+                        0, (int64) ctx->upper->limit_tuples);
+                }
                 return result;
             }
 
@@ -376,6 +399,32 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
             PgGroupBestEntry *entry = (PgGroupBestEntry *) lfirst(lc);
             if (pg_required_property_equal(entry->required, root_req))
             {
+                /*
+                 * If the best entry is a scan-type op (SeqScan, IndexScan, etc.)
+                 * but the root group contains upper-op logical expressions
+                 * (Sort, Limit, Agg, Project), skip this entry and use
+                 * build_logical_plan which handles the full tree correctly.
+                 * This prevents returning a bare SeqScan when the query needs
+                 * ORDER BY + LIMIT wrapping.
+                 */
+                if (entry->expr->op <= PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN)
+                {
+                    bool has_wrapper = false;
+                    ListCell *elc;
+                    foreach(elc, root_group->logical_exprs)
+                    {
+                        PgGroupExpr *e = (PgGroupExpr *) lfirst(elc);
+                        if (e->op >= PG_CASCADES_LOGICAL_PROJECT &&
+                            e->op <= PG_CASCADES_LOGICAL_LIMIT)
+                        {
+                            has_wrapper = true;
+                            break;
+                        }
+                    }
+                    if (has_wrapper)
+                        continue;  /* skip scan entry, let build_logical_plan handle */
+                }
+
                 result = pg_cascades_build_plan_recurse(ctx, root_group, root_req,
                                                          entry, &entry->output);
                 if (result != NULL)
@@ -432,9 +481,12 @@ pg_safe_linitial_child_req(PgGroupBestEntry *best)
  *   Walk a plan tree and fix any node with an empty targetlist.
  *
  *   For scan nodes (SeqScan, IndexScan, IndexOnlyScan, BitmapHeapScan),
- *   the targetlist is derived from the relation's reltargetlist.
- *   If column pruning cleared it, we reconstruct from the plan's
- *   targetlist by looking up the RelOptInfo from simple_rel_array.
+ *   the targetlist is derived from the query's target list filtered by
+ *   the scanned relation.  This is needed when create_plan produces scan
+ *   nodes with NIL targetlist due to column pruning clearing reltargetlist.
+ *
+ *   For join and other nodes, the targetlist is propagated from the
+ *   left child when available.
  */
 static void
 pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
@@ -450,7 +502,10 @@ pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
     if (plan->righttree != NULL)
         pg_cascades_fix_empty_targetlists(root, plan->righttree);
 
-    /* Fix this node if targetlist is empty */
+    /* Fix this node if targetlist is empty.
+     * For scan nodes, the targetlist comes from create_plan which uses
+     * reltargetlist.  If reltargetlist was cleared by column pruning or
+     * is missing columns, we rebuild from the query's targetList. */
     if (plan->targetlist == NIL)
     {
         /* Try lefttree targetlist first (for joins) */
@@ -465,30 +520,52 @@ pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
             return;
         }
 
-        /* For scan nodes, get relid from the scan node */
-        switch (nodeTag(plan))
+        /* For scan nodes, try query targetList first, then reltargetlist */
         {
-            case T_SeqScan:
-                relid = ((SeqScan *) plan)->scanrelid;
-                break;
-            case T_IndexScan:
-                relid = ((IndexScan *) plan)->scan.scanrelid;
-                break;
-            case T_IndexOnlyScan:
-                relid = ((IndexOnlyScan *) plan)->scan.scanrelid;
-                break;
-            case T_BitmapHeapScan:
-                relid = ((BitmapHeapScan *) plan)->scan.scanrelid;
-                break;
-            default:
-                break;
-        }
+            bool is_scan = false;
+            switch (nodeTag(plan))
+            {
+                case T_SeqScan:
+                    relid = ((SeqScan *) plan)->scanrelid; is_scan = true; break;
+                case T_IndexScan:
+                    relid = ((IndexScan *) plan)->scan.scanrelid; is_scan = true; break;
+                case T_IndexOnlyScan:
+                    relid = ((IndexOnlyScan *) plan)->scan.scanrelid; is_scan = true; break;
+                case T_BitmapHeapScan:
+                    relid = ((BitmapHeapScan *) plan)->scan.scanrelid; is_scan = true; break;
+                default:
+                    break;
+            }
 
-        if (relid > 0 && relid <= root->simple_rel_array_size)
-        {
-            RelOptInfo *rel = root->simple_rel_array[relid];
-            if (rel != NULL && rel->reltargetlist != NIL)
-                plan->targetlist = rel->reltargetlist;
+            if (is_scan && relid > 0 && relid <= root->simple_rel_array_size)
+            {
+                RelOptInfo *rel = root->simple_rel_array[relid];
+                if (rel != NULL)
+                {
+                    List       *new_tlist = NIL;
+                    ListCell   *lc;
+
+                    foreach(lc, root->parse->targetList)
+                    {
+                        TargetEntry *te = (TargetEntry *) lfirst(lc);
+                        if (IsA(te->expr, Var))
+                        {
+                            Var *var = (Var *) te->expr;
+                            if ((int)var->varno == relid)
+                                new_tlist = lappend(new_tlist,
+                                    makeTargetEntry((Expr *) copyObject(var),
+                                        list_length(new_tlist) + 1,
+                                        pstrdup(te->resname ? te->resname : ""),
+                                        false));
+                        }
+                    }
+
+                    if (new_tlist != NIL)
+                        plan->targetlist = new_tlist;
+                    else if (rel->reltargetlist != NIL)
+                        plan->targetlist = rel->reltargetlist;
+                }
+            }
         }
     }
 }
