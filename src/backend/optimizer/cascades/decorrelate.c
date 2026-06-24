@@ -177,9 +177,16 @@ pg_decorrelate_expr_sublink(PgDecorrelateContext *ctx,
             (Node *) subquery->jointree->quals,
             PVC_REJECT_AGGREGATES, PVC_REJECT_PLACEHOLDERS);
 
+        if (cascades_planner_debug)
+            elog(NOTICE, "Cascades decorrelation: pull_var_clause returned %d vars",
+                 list_length(qual_vars));
+
         foreach(lc, qual_vars)
         {
             Var *v = (Var *) lfirst(lc);
+            if (cascades_planner_debug)
+                elog(NOTICE, "  var: varno=%d varattno=%d varlevelsup=%d type=%u",
+                     v->varno, v->varattno, v->varlevelsup, v->vartype);
             if (v->varlevelsup > 0)
                 corr_outer = lappend(corr_outer, v);
             else if (v->varlevelsup == 0)
@@ -187,8 +194,36 @@ pg_decorrelate_expr_sublink(PgDecorrelateContext *ctx,
         }
     }
 
+    /*
+     * Also try to find correlation vars from subquery's targetList.
+     * Some PG versions store the correlation info differently.
+     */
+    if (list_length(corr_outer) == 0 && subquery->targetList != NIL)
+    {
+        ListCell *tlc;
+        foreach(tlc, subquery->targetList)
+        {
+            TargetEntry *te = (TargetEntry *) lfirst(tlc);
+            List *tvars = pull_var_clause((Node *) te->expr,
+                PVC_REJECT_AGGREGATES, PVC_REJECT_PLACEHOLDERS);
+            ListCell *vlc;
+            foreach(vlc, tvars)
+            {
+                Var *v = (Var *) lfirst(vlc);
+                if (v->varlevelsup > 0)
+                    corr_outer = lappend(corr_outer, v);
+            }
+        }
+    }
+
     if (list_length(corr_outer) != 1 || list_length(corr_inner) != 1)
+    {
+        if (cascades_planner_debug)
+            elog(NOTICE, "Cascades decorrelation: wrong var counts "
+                 "(outer=%d inner=%d), skipping",
+                 list_length(corr_outer), list_length(corr_inner));
         return false;
+    }
 
     /*
      * Copy the correlation Vars BEFORE clearing the subquery's quals.
