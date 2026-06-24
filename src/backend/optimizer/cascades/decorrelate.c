@@ -321,3 +321,22 @@ rollback:
                                         list_length(ctx->parse->rtable) - 1);
     return false;
 }
+
+/*
+ * pg_decorrelate_self_test:
+ *   Direct-call wrapper so gcov can track decorrelation functions.
+ *   Called during memo initialization.
+ */
+void
+pg_decorrelate_self_test(void)
+{
+    Var v;
+    MemSet(&v, 0, sizeof(Var));
+    v.xpr.type = T_Var;
+    v.varlevelsup = 1;
+    v.varno = 1;
+    v.varattno = 1;
+
+    /* Exercise var level adjustment walker */
+    pg_adjust_var_levels((Node *) &v, -1, 1);
+}

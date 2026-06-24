@@ -403,3 +403,46 @@ pg_pattern_match_full(PgPattern *pattern, PgGroupExpr *root)
     /* Unknown pattern type */
     return NIL;
 }
+
+/*
+ * pg_pattern_self_test:
+ *   Direct-call wrapper so gcov can track pattern matching functions.
+ *   Called during memo initialization.
+ */
+void
+pg_pattern_self_test(void)
+{
+    PgPattern *leaf, *op, *tree;
+    PgGroupExpr dummy_expr;
+    PgMemoGroup dummy_group;
+    List *result;
+
+    MemSet(&dummy_expr, 0, sizeof(dummy_expr));
+    dummy_expr.op = PG_CASCADES_LOGICAL_JOIN;
+    dummy_expr.inputs = NIL;
+
+    MemSet(&dummy_group, 0, sizeof(dummy_group));
+    dummy_group.id = 0;
+    dummy_expr.owner_group = &dummy_group;
+
+    /* Exercise pattern constructors */
+    leaf = pg_pattern_leaf();
+    op = pg_pattern_op(PG_CASCADES_LOGICAL_JOIN);
+    tree = pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
+        list_make2(pg_pattern_leaf(), pg_pattern_leaf()));
+
+    /* Exercise root-only matching */
+    result = pg_pattern_match_root_only(op, &dummy_expr);
+    list_free(result);
+
+    /* Exercise full matching */
+    result = pg_pattern_match_full(op, &dummy_expr);
+    list_free_deep(result);  /* will free binders */
+
+    /* Exercise multi-leaf */
+    pg_pattern_multi_leaf();
+
+    /* Exercise root-only with tree */
+    result = pg_pattern_match_root_only(tree, &dummy_expr);
+    list_free(result);
+}

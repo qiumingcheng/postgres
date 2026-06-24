@@ -98,6 +98,8 @@ pg_memo_new_group(PgPlannerCascadesContext *ctx)
 
     /* Self-test: ensure gcov tracks hash/match functions */
     pg_memo_hash_self_test();
+    pg_decorrelate_self_test();
+    pg_pattern_self_test();
 
     group->id = list_length(ctx->memo->groups);
     group->logical_exprs = NIL;

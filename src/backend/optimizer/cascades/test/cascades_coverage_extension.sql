@@ -700,7 +700,7 @@ SELECT cov_test(2927, 'C2927: offset only', $$SELECT * FROM cascades_test_t ORDE
 -- Subquery in SELECT (scalar subquery)
 SELECT cov_test(2928, 'C2928: scalar subquery', $$SELECT id, (SELECT max(val) FROM cascades_test_j2 WHERE j1_id = t1.id) FROM cascades_test_j1 t1$$);
 -- Coalesce/COALESCE expression
-SELECT cov_test(2929, 'C2929: coalesce', $${S}ELECT coalesce(t2.val, 0) FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+SELECT cov_test(2929, 'C2929: coalesce', $$SELECT coalesce(t2.val, 0) FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
 
 -- ============================================================================
 -- Part 30: Aggressive coverage push (round 2)
