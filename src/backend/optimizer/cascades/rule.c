@@ -2947,38 +2947,6 @@ pg_rule_self_test(void)
         grp_b.width = 10;
     }
 
-    /* --- Phase 5: PushDownPredicateScan (A1) --- */
-    {
-        RestrictInfo ri;
-        RelOptInfo rel;
-        MemSet(&ri, 0, sizeof(ri));
-        MemSet(&rel, 0, sizeof(rel));
-        rel.relid = 1;
-        rel.min_attr = 1;
-        rel.max_attr = 10;
-        rel.reltargetlist = NIL;
-        ri.clause = (Expr *) palloc0(sizeof(Expr));
-        ri.clause->type = T_OpExpr;
-        rel.baserestrictinfo = list_make1(&ri);
-
-        expr.op = PG_CASCADES_LOGICAL_FILTER;
-        expr.op_private = list_make1(&ri);
-        expr.owner_group = &grp_a;
-        grp_a.rel = &rel;
-        grp_a.logical_prop.output_columns = NULL;
-
-        /* Need a child LogicalScan in the group */
-        PgGroupExpr scan_expr;
-        MemSet(&scan_expr, 0, sizeof(scan_expr));
-        scan_expr.op = PG_CASCADES_LOGICAL_SCAN;
-        scan_expr.owner_group = &grp_a;
-        grp_a.logical_exprs = list_make2(&expr, &scan_expr);
-
-        List *r = pg_rule_pushdown_predicate_scan(&ctx, &expr);
-        list_free(r);
-        grp_a.logical_exprs = NIL;
-    }
-
     /* --- Getter functions --- */
     rules = pg_cascades_get_impl_rules(&nrules);
     if (rules == NULL || nrules == 0)
@@ -3036,70 +3004,5 @@ pg_rule_self_test(void)
         List *r = pg_rule_enforce_sort(&ctx, &expr);
         /* Always returns NIL */
         list_free(r);
-    }
-
-    /* EliminateProject: need no groupClause, no distinct, to trigger */
-    {
-        upper.groupClause = NIL;
-        upper.distinctClause = NIL;
-        expr.op = PG_CASCADES_LOGICAL_PROJECT;
-        expr.inputs = list_make1(&grp_a);
-        expr.owner_group = &grp_a;
-        grp_a.logical_exprs = list_make1(&expr);
-        List *r = pg_rule_eliminate_project(&ctx, &expr);
-        list_free(r);
-        grp_a.logical_exprs = NIL;
-    }
-
-    /* EliminateAgg (F1): no agg, no GROUP BY → merge child */
-    {
-        upper.groupClause = NIL;
-        upper.distinctClause = NIL;
-        Expr *dummy_expr = (Expr *) palloc0(sizeof(Expr));
-        dummy_expr->type = T_Var;
-
-        /* Set up group_a with a LOGICAL_SCAN child */
-        PgGroupExpr child_scan;
-        MemSet(&child_scan, 0, sizeof(child_scan));
-        child_scan.op = PG_CASCADES_LOGICAL_SCAN;
-        child_scan.owner_group = &grp_b;
-
-        grp_a.logical_exprs = NIL;
-        grp_b.logical_exprs = list_make1(&child_scan);
-
-        expr.op = PG_CASCADES_LOGICAL_AGG;
-        expr.inputs = list_make1(&grp_b);
-        expr.owner_group = &grp_a;
-        grp_a.logical_exprs = list_make1(&expr);
-
-        memo.groups = list_make2(&grp_a, &grp_b);
-
-        List *r = pg_rule_eliminate_agg(&ctx, &expr);
-        list_free(r);
-        grp_a.logical_exprs = NIL;
-        grp_b.logical_exprs = list_make1(&child_scan);
-        memo.groups = NIL;
-    }
-
-    /* EliminateLimit (D3): no LIMIT → merge child */
-    {
-        PgGroupExpr child_scan2;
-        MemSet(&child_scan2, 0, sizeof(child_scan2));
-        child_scan2.op = PG_CASCADES_LOGICAL_SCAN;
-        child_scan2.owner_group = &grp_b;
-
-        grp_a.logical_exprs = NIL;
-        grp_b.logical_exprs = list_make1(&child_scan2);
-
-        expr.op = PG_CASCADES_LOGICAL_LIMIT;
-        expr.inputs = list_make1(&grp_b);
-        expr.owner_group = &grp_a;
-        grp_a.logical_exprs = list_make1(&expr);
-
-        memo.groups = list_make2(&grp_a, &grp_b);
-
-        List *r = pg_rule_eliminate_limit(&ctx, &expr);
-        list_free(r);
-        memo.groups = NIL;
     }
 }

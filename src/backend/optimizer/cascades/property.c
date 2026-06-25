@@ -43,17 +43,17 @@ pg_required_property_equal(const PgRequiredProperty *a,
     if (!bms_equal(a->required_outer, b->required_outer))
         return false;
 
-    /* tuple_fraction / limit_tuples: 第一版宽松比较 */
+    /* tuple_fraction / limit_tuples: treat 0.0 as "not set" */
     if (a->tuple_fraction != b->tuple_fraction)
     {
-        /* consider equivalent if both are >= 1.0 or both are fractional */
-        if (!((a->tuple_fraction >= 1.0 && b->tuple_fraction >= 1.0) ||
-              (a->tuple_fraction < 1.0 && b->tuple_fraction < 1.0)))
+        /* 0.0 means "not set by ENFORCE_AND_COST" — match any value */
+        if (a->tuple_fraction > 0.0 && b->tuple_fraction > 0.0)
             return false;
     }
     if (a->limit_tuples != b->limit_tuples)
     {
-        if (!(a->limit_tuples <= 0 && b->limit_tuples <= 0))
+        /* 0.0 means "not set" — match any value */
+        if (a->limit_tuples > 0.0 && b->limit_tuples > 0.0)
             return false;
     }
 

@@ -102,6 +102,9 @@ pg_memo_new_group(PgPlannerCascadesContext *ctx)
     pg_pattern_self_test();
     pg_planbuild_self_test();
     pg_task_self_test();
+    pg_postopt_self_test();
+    pg_rewrite_self_test();
+    pg_rule_self_test();
 
     group->id = list_length(ctx->memo->groups);
     group->logical_exprs = NIL;

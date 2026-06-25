@@ -639,6 +639,13 @@ extern void pg_task_self_test(void);
 extern void pg_cascades_validate_plan(Plan *plan);
 extern Plan *pg_cascades_physical_rewrite(PgPlannerCascadesContext *ctx,
                                            Plan *plan);
+extern void pg_postopt_self_test(void);
+
+/* rewrite.c */
+extern void pg_rewrite_self_test(void);
+
+/* rule.c */
+extern void pg_rule_self_test(void);
 
 /* planmain.c — split query_planner for Cascades */
 extern QueryPlannerPrepResult *prepare_query_planner_inputs(
