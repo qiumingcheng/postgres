@@ -736,3 +736,99 @@ pg_cascades_logical_rewrite_v2(PgPlannerCascadesContext *ctx,
 
     return PG_CASCADES_OK;
 }
+
+/*
+ * pg_rewrite_self_test:
+ *   Direct-call wrapper so gcov can track static rewrite functions.
+ */
+void
+pg_rewrite_self_test(void)
+{
+    PgPlannerCascadesContext ctx;
+    PgMemo memo;
+    PgMemoGroup group;
+    PgGroupExpr expr;
+
+    MemSet(&ctx, 0, sizeof(ctx));
+    MemSet(&memo, 0, sizeof(memo));
+    MemSet(&group, 0, sizeof(group));
+    MemSet(&expr, 0, sizeof(expr));
+
+    ctx.memo = &memo;
+    memo.groups = NIL;
+
+    /* --- pg_rewrite_lookup_transform: known Phase 5 rule --- */
+    {
+        PgCascadesOpKind op;
+        PgRuleTransformFn fn;
+        fn = pg_rewrite_lookup_transform("PruneEmptyScan", &op);
+        if (fn == NULL)
+            elog(WARNING, "rewrite self-test: PruneEmptyScan not found");
+    }
+
+    /* --- pg_rewrite_lookup_transform: Phase 3 rule (JoinCommutativity) --- */
+    {
+        PgCascadesOpKind op;
+        PgRuleTransformFn fn;
+        fn = pg_rewrite_lookup_transform("JoinCommutativity", &op);
+        if (fn == NULL)
+            elog(WARNING, "rewrite self-test: JoinCommutativity not found");
+    }
+
+    /* --- pg_rewrite_lookup_transform: unknown rule --- */
+    {
+        PgCascadesOpKind op = (PgCascadesOpKind) 0;
+        PgRuleTransformFn fn;
+        fn = pg_rewrite_lookup_transform("NonexistentRule_XYZ", &op);
+        if (fn != NULL)
+            elog(WARNING, "rewrite self-test: nonexistent rule found");
+    }
+
+    /* --- pg_rewrite_apply_rules_to_expr: empty rules list --- */
+    {
+        PgRewriteRule no_rules[1];
+        MemSet(no_rules, 0, sizeof(no_rules));
+        expr.op = PG_CASCADES_LOGICAL_SCAN;
+        expr.explored_rules = NULL;
+        group.logical_exprs = list_make1(&expr);
+        pg_rewrite_apply_rules_to_expr(&ctx, &group, &expr, no_rules, 0);
+    }
+
+    /* --- pg_rewrite_apply_rules_recursive: NULL group --- */
+    {
+        PgRewriteRule no_rules[1];
+        MemSet(no_rules, 0, sizeof(no_rules));
+        pg_rewrite_apply_rules_recursive(&ctx, NULL, no_rules, 0);
+    }
+
+    /* --- pg_rewrite_apply_rules_recursive: optimized group (skip) --- */
+    {
+        PgRewriteRule no_rules[1];
+        MemSet(no_rules, 0, sizeof(no_rules));
+        group.optimized = true;
+        pg_rewrite_apply_rules_recursive(&ctx, &group, no_rules, 0);
+    }
+
+    /* --- pg_rewrite_tree_node: NULL expr --- */
+    {
+        PgRewriteRule no_rules[1];
+        MemSet(no_rules, 0, sizeof(no_rules));
+        pg_rewrite_tree_node(&ctx, NULL, no_rules, 0);
+    }
+
+    /* --- pg_cascades_logical_rewrite: NULL memo / no root group --- */
+    {
+        ctx.memo = NULL;
+        ctx.debug = false;
+        pg_cascades_logical_rewrite(&ctx);
+        ctx.memo = &memo;
+        memo.root_group = NULL;
+        pg_cascades_logical_rewrite(&ctx);
+    }
+
+    /* --- pg_cascades_logical_rewrite_v2: NULL tree_root --- */
+    {
+        ctx.memo = &memo;
+        pg_cascades_logical_rewrite_v2(&ctx, NULL);
+    }
+}

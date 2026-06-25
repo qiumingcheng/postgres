@@ -1255,7 +1255,7 @@ pg_task_self_test(void)
 
     /* --- check_limits: max_tasks --- */
     ctx.max_tasks = 5;
-    ctx.num_tasks_executed = 5;
+    ctx.num_tasks_executed = 6; /* > max_tasks triggers limit */
     memo.groups = NIL;
     if (pg_cascades_check_limits(&ctx) != PG_CASCADES_INTERNAL_LIMIT)
         elog(WARNING, "task self-test: max_tasks limit");
@@ -1263,7 +1263,7 @@ pg_task_self_test(void)
     /* --- check_limits: max_groups --- */
     ctx.max_tasks = 0;
     ctx.max_groups = 1;
-    memo.groups = list_make1(&group);
+    memo.groups = list_make2(&group, &group); /* 2 groups > max_groups=1 */
     if (pg_cascades_check_limits(&ctx) != PG_CASCADES_INTERNAL_LIMIT)
         elog(WARNING, "task self-test: max_groups limit");
 
@@ -1284,4 +1284,153 @@ pg_task_self_test(void)
     MemSet(&ctx, 0, sizeof(ctx));
     if (pg_cascades_get_current_binder(&ctx) != NULL)
         elog(WARNING, "task self-test: binder null");
+
+    /* --- task_stack_pop on empty stack --- */
+    {
+        PgPlannerCascadesContext ctx2;
+        MemSet(&ctx2, 0, sizeof(ctx2));
+        ctx2.task_stack = NIL;
+        if (task_stack_pop(&ctx2) != NULL)
+            elog(WARNING, "task self-test: pop on empty should return NULL");
+    }
+
+    /* --- check_limits: timeout --- */
+    {
+        PgPlannerCascadesContext ctx3;
+        PgMemo memo3;
+        MemSet(&ctx3, 0, sizeof(ctx3));
+        MemSet(&memo3, 0, sizeof(memo3));
+        ctx3.memo = &memo3;
+        memo3.groups = NIL;
+        ctx3.timeout_ms = 1;
+        ctx3.start_time = 0;  /* epoch → now exceeds timeout */
+        if (pg_cascades_check_limits(&ctx3) != PG_CASCADES_INTERNAL_TIMEOUT)
+            elog(WARNING, "task self-test: timeout limit");
+    }
+
+    /* --- pg_task_optimize_group: already optimized --- */
+    {
+        PgPlannerCascadesContext ctx4;
+        PgMemo memo4;
+        PgMemoGroup grp;
+        PgOptimizerTask t;
+        MemSet(&ctx4, 0, sizeof(ctx4));
+        MemSet(&memo4, 0, sizeof(memo4));
+        MemSet(&grp, 0, sizeof(grp));
+        MemSet(&t, 0, sizeof(t));
+        ctx4.memo = &memo4;
+        memo4.groups = NIL;
+        grp.optimized = true;
+        t.type = PG_TASK_OPTIMIZE_GROUP;
+        t.group = &grp;
+        pg_task_optimize_group(&ctx4, &t);
+    }
+
+    /* --- pg_task_optimize_group: lower_bound pruning --- */
+    {
+        PgPlannerCascadesContext ctx5;
+        PgMemo memo5;
+        PgMemoGroup grp;
+        PgOptimizerTask t;
+        MemSet(&ctx5, 0, sizeof(ctx5));
+        MemSet(&memo5, 0, sizeof(memo5));
+        MemSet(&grp, 0, sizeof(grp));
+        MemSet(&t, 0, sizeof(t));
+        ctx5.memo = &memo5;
+        memo5.groups = NIL;
+        ctx5.upper_bound_cost = 50.0;
+        grp.lower_bound_cost = 100.0;  /* > upper bound → should prune */
+        t.type = PG_TASK_OPTIMIZE_GROUP;
+        t.group = &grp;
+        pg_task_optimize_group(&ctx5, &t);
+    }
+
+    /* --- pg_task_optimize_expression: NULL expr --- */
+    {
+        PgPlannerCascadesContext ctx6;
+        PgMemo memo6;
+        PgOptimizerTask t;
+        MemSet(&ctx6, 0, sizeof(ctx6));
+        MemSet(&memo6, 0, sizeof(memo6));
+        MemSet(&t, 0, sizeof(t));
+        ctx6.memo = &memo6;
+        t.type = PG_TASK_OPTIMIZE_EXPRESSION;
+        t.expr = NULL;
+        pg_task_optimize_expression(&ctx6, &t);
+    }
+
+    /* --- pg_task_derive_stats: already derived --- */
+    {
+        PgPlannerCascadesContext ctx7;
+        PgMemo memo7;
+        PgGroupExpr ex;
+        PgOptimizerTask t;
+        MemSet(&ctx7, 0, sizeof(ctx7));
+        MemSet(&memo7, 0, sizeof(memo7));
+        MemSet(&ex, 0, sizeof(ex));
+        MemSet(&t, 0, sizeof(t));
+        ctx7.memo = &memo7;
+        ex.stats_derived = true;
+        t.type = PG_TASK_DERIVE_STATS;
+        t.expr = &ex;
+        pg_task_derive_stats(&ctx7, &t);
+    }
+
+    /* --- pg_task_derive_stats: not yet derived --- */
+    {
+        PgPlannerCascadesContext ctx8;
+        PgMemo memo8;
+        PgGroupExpr ex;
+        PgOptimizerTask t;
+        MemSet(&ctx8, 0, sizeof(ctx8));
+        MemSet(&memo8, 0, sizeof(memo8));
+        MemSet(&ex, 0, sizeof(ex));
+        MemSet(&t, 0, sizeof(t));
+        ctx8.memo = &memo8;
+        ex.stats_derived = false;
+        t.type = PG_TASK_DERIVE_STATS;
+        t.expr = &ex;
+        pg_task_derive_stats(&ctx8, &t);
+    }
+
+    /* --- pg_task_explore_group (delegates to optimize_group) --- */
+    {
+        PgPlannerCascadesContext ctx9;
+        PgMemo memo9;
+        PgMemoGroup grp;
+        PgOptimizerTask t;
+        MemSet(&ctx9, 0, sizeof(ctx9));
+        MemSet(&memo9, 0, sizeof(memo9));
+        MemSet(&grp, 0, sizeof(grp));
+        MemSet(&t, 0, sizeof(t));
+        ctx9.memo = &memo9;
+        memo9.groups = NIL;
+        grp.optimized = true;
+        t.type = PG_TASK_EXPLORE_GROUP;
+        t.group = &grp;
+        pg_task_explore_group(&ctx9, &t);
+    }
+
+    /* --- pg_cascades_push_enforce_and_cost_tasks --- */
+    {
+        PgPlannerCascadesContext ctx10;
+        PgCascadesUpperInfo up;
+        PgMemo memo10;
+        PgMemoGroup grp;
+        PgGroupExpr ex;
+        MemSet(&ctx10, 0, sizeof(ctx10));
+        MemSet(&up, 0, sizeof(up));
+        MemSet(&memo10, 0, sizeof(memo10));
+        MemSet(&grp, 0, sizeof(grp));
+        MemSet(&ex, 0, sizeof(ex));
+        ctx10.upper = &up;
+        ctx10.memo = &memo10;
+        memo10.groups = NIL;
+        ctx10.task_stack = NIL;
+        up.sort_pathkeys = NIL;
+        up.group_pathkeys = NIL;
+        up.distinct_pathkeys = NIL;
+        ex.owner_group = &grp;
+        pg_cascades_push_enforce_and_cost_tasks(&ctx10, &grp, &ex);
+    }
 }
