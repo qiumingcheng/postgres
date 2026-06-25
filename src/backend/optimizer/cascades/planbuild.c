@@ -150,8 +150,12 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
                  */
                 Path *join_path = NULL;
                 ListCell *blc;
+                int         best_nrels = 0;
 
-                /* Try each join type in order, prefer HashJoin */
+                /* Try each join type in order, prefer HashJoin.
+                 * For groups with multiple join paths (e.g. {1,2} AND {1,2,3}
+                 * after group merge), pick the one covering the MOST base
+                 * relations to avoid dropping tables from the plan. */
                 {
                     int join_ops[] = {
                         PG_CASCADES_PHYSICAL_HASHJOIN,
@@ -160,7 +164,7 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
                     };
                     int j;
 
-                    for (j = 0; j < 3 && join_path == NULL; j++)
+                    for (j = 0; j < 3; j++)
                     {
                         foreach(blc, group->physical_exprs)
                         {
@@ -168,10 +172,17 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
                             if (pe->mode == PG_PHYS_EXPR_IMPORTED_PATH &&
                                 pe->op == join_ops[j])
                             {
-                                join_path = (Path *) pe->op_private;
-                                break;
+                                Path *p = (Path *) pe->op_private;
+                                int   nrels = bms_num_members(p->parent->relids);
+                                if (nrels > best_nrels)
+                                {
+                                    join_path = p;
+                                    best_nrels = nrels;
+                                }
                             }
                         }
+                        if (join_path != NULL)
+                            break;  /* found best at this join type level */
                     }
                 }
 
