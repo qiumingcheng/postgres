@@ -46,7 +46,7 @@
 
 typedef struct PgVarLevelAdjustCtx { int delta; int min_level; } PgVarLevelAdjustCtx;
 
-static bool
+bool
 pg_adjust_var_levels_walker(Node *node, void *context)
 {
     PgVarLevelAdjustCtx *ctx = (PgVarLevelAdjustCtx *) context;
@@ -65,7 +65,7 @@ pg_adjust_var_levels_walker(Node *node, void *context)
     return expression_tree_walker(node, pg_adjust_var_levels_walker, context);
 }
 
-static void
+void
 pg_adjust_var_levels(Node *node, int delta, int min_level)
 {
     PgVarLevelAdjustCtx ctx;
@@ -262,23 +262,4 @@ pg_decorrelate_expr_sublink(PgDecorrelateContext *ctx,
              "correlation vars; full pipeline not yet implemented",
              list_length(corr_outer), list_length(corr_inner));
     return false;
-}
-
-/*
- * pg_decorrelate_self_test:
- *   Direct-call wrapper so gcov can track decorrelation functions.
- *   Called during memo initialization.
- */
-void
-pg_decorrelate_self_test(void)
-{
-    Var v;
-    MemSet(&v, 0, sizeof(Var));
-    v.xpr.type = T_Var;
-    v.varlevelsup = 1;
-    v.varno = 1;
-    v.varattno = 1;
-
-    /* Exercise var level adjustment walker */
-    pg_adjust_var_levels((Node *) &v, -1, 1);
 }

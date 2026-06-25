@@ -22,7 +22,7 @@ bool pg_cascades_validate_quiet = false;
  *   Checks: valid type tag, valid targetlist, valid child pointers.
  *   Emits WARNING on issues — best-effort debug aid, never ERRORs.
  */
-static void
+void
 pg_cascades_validate_plan_recurse(Plan *plan, int depth)
 {
     int elevel = pg_cascades_validate_quiet ? DEBUG1 : WARNING;
@@ -143,7 +143,7 @@ pg_cascades_validate_plan(Plan *plan)
  *     - Pre-aggregate pushdown (partial agg)
  *     - Skew join detection and adjustment
  */
-static Plan *
+Plan *
 pg_cascades_physical_rewrite_recurse(PgPlannerCascadesContext *ctx, Plan *plan)
 {
     if (plan == NULL)
@@ -252,184 +252,4 @@ pg_cascades_physical_rewrite(PgPlannerCascadesContext *ctx, Plan *plan)
     if (plan == NULL)
         return NULL;
     return pg_cascades_physical_rewrite_recurse(ctx, plan);
-}
-
-/*
- * pg_postopt_self_test:
- *   Direct-call wrapper so gcov can track static validator + rewrite paths.
- */
-void
-pg_postopt_self_test(void)
-{
-    PgPlannerCascadesContext ctx;
-    Plan *plan;
-    bool saved_quiet;
-
-    MemSet(&ctx, 0, sizeof(ctx));
-
-    /* Silence expected validation warnings during self-test */
-    saved_quiet = pg_cascades_validate_quiet;
-    pg_cascades_validate_quiet = true;
-
-    /* --- pg_cascades_validate_plan(NULL) --- */
-    pg_cascades_validate_plan(NULL);
-
-    /* --- validator: unexpected plan node type --- */
-    plan = (Plan *) palloc0(sizeof(Plan));
-    plan->type = 99999;  /* invalid node tag → default case */
-    pg_cascades_validate_plan(plan);
-    pfree(plan);
-
-    /* --- validator: empty targetlist warning --- */
-    plan = (Plan *) palloc0(sizeof(Plan));
-    plan->type = T_SeqScan;
-    plan->targetlist = NIL;
-    plan->lefttree = NULL;
-    plan->righttree = NULL;
-    pg_cascades_validate_plan(plan);
-    pfree(plan);
-
-    /* --- validator: lefttree recursion --- */
-    {
-        Plan *left = (Plan *) palloc0(sizeof(Plan));
-        left->type = T_SeqScan;
-        left->targetlist = NIL;
-        plan = (Plan *) palloc0(sizeof(Plan));
-        plan->type = T_NestLoop;
-        plan->targetlist = list_make1(left);  /* non-NIL */
-        plan->lefttree = left;
-        plan->righttree = NULL;
-        pg_cascades_validate_plan(plan);
-        pfree(plan);
-        pfree(left);
-    }
-
-    /* --- validator: righttree recursion --- */
-    {
-        Plan *right = (Plan *) palloc0(sizeof(Plan));
-        right->type = T_IndexScan;
-        right->targetlist = NIL;
-        plan = (Plan *) palloc0(sizeof(Plan));
-        plan->type = T_MergeJoin;
-        plan->targetlist = list_make1(right);
-        plan->lefttree = NULL;
-        plan->righttree = right;
-        pg_cascades_validate_plan(plan);
-        pfree(plan);
-        pfree(right);
-    }
-
-    /* --- physical rewrite: NestLoop inner = Sort (needs Materialize) --- */
-    {
-        Plan *outer = (Plan *) palloc0(sizeof(Plan));
-        Plan *inner = (Plan *) palloc0(sizeof(Plan));
-
-        outer->type = T_SeqScan;
-        outer->targetlist = NIL;
-        inner->type = T_Sort;
-        inner->targetlist = NIL;
-
-        plan = (Plan *) palloc0(sizeof(Plan));
-        plan->type = T_NestLoop;
-        plan->targetlist = NIL;
-        plan->lefttree = outer;
-        plan->righttree = inner;
-
-        ctx.debug = false;
-        plan = pg_cascades_physical_rewrite(&ctx, plan);
-        /* Material should have been inserted: righttree is now Material */
-        if (plan != NULL)
-        {
-            pfree(plan->lefttree);  /* outer unchanged */
-            if (plan->righttree != NULL && IsA(plan->righttree, Material))
-                pfree(((Material *)plan->righttree)->plan.lefttree);
-            pfree(plan->righttree);
-            pfree(plan);
-        }
-    }
-
-    /* --- physical rewrite: NestLoop inner = Agg (needs Materialize) --- */
-    {
-        Plan *outer = (Plan *) palloc0(sizeof(Plan));
-        Plan *inner = (Plan *) palloc0(sizeof(Plan));
-
-        outer->type = T_IndexScan;
-        outer->targetlist = NIL;
-        inner->type = T_Agg;
-        inner->targetlist = NIL;
-
-        plan = (Plan *) palloc0(sizeof(Plan));
-        plan->type = T_NestLoop;
-        plan->targetlist = NIL;
-        plan->lefttree = outer;
-        plan->righttree = inner;
-
-        plan = pg_cascades_physical_rewrite(&ctx, plan);
-        if (plan != NULL)
-        {
-            pfree(plan->lefttree);
-            if (plan->righttree != NULL && IsA(plan->righttree, Material))
-                pfree(((Material *)plan->righttree)->plan.lefttree);
-            pfree(plan->righttree);
-            pfree(plan);
-        }
-    }
-
-    /* --- physical rewrite: NestLoop inner = Hash (needs Materialize) --- */
-    {
-        Plan *outer = (Plan *) palloc0(sizeof(Plan));
-        Plan *inner = (Plan *) palloc0(sizeof(Plan));
-
-        outer->type = T_SeqScan;
-        outer->targetlist = NIL;
-        inner->type = T_Hash;
-        inner->targetlist = NIL;
-
-        plan = (Plan *) palloc0(sizeof(Plan));
-        plan->type = T_NestLoop;
-        plan->targetlist = NIL;
-        plan->lefttree = outer;
-        plan->righttree = inner;
-
-        plan = pg_cascades_physical_rewrite(&ctx, plan);
-        if (plan != NULL)
-        {
-            pfree(plan->lefttree);
-            if (plan->righttree != NULL && IsA(plan->righttree, Material))
-                pfree(((Material *)plan->righttree)->plan.lefttree);
-            pfree(plan->righttree);
-            pfree(plan);
-        }
-    }
-
-    /* --- physical rewrite: NestLoop inner already Material (no change) --- */
-    {
-        Plan *outer = (Plan *) palloc0(sizeof(Plan));
-        Material *mat = (Material *) palloc0(sizeof(Material));
-
-        outer->type = T_SeqScan;
-        outer->targetlist = NIL;
-        mat->plan.type = T_Material;
-        mat->plan.targetlist = NIL;
-
-        plan = (Plan *) palloc0(sizeof(Plan));
-        plan->type = T_NestLoop;
-        plan->targetlist = NIL;
-        plan->lefttree = outer;
-        plan->righttree = (Plan *) mat;
-
-        plan = pg_cascades_physical_rewrite(&ctx, plan);
-        if (plan != NULL)
-        {
-            pfree(plan->lefttree);
-            pfree(plan->righttree);
-            pfree(plan);
-        }
-    }
-
-    /* --- physical rewrite: NULL plan --- */
-    if (pg_cascades_physical_rewrite(&ctx, NULL) != NULL)
-        elog(WARNING, "postopt self-test: NULL plan should return NULL");
-
-    pg_cascades_validate_quiet = saved_quiet;
 }

@@ -13,16 +13,16 @@
 #include "utils/memutils.h"
 
 /* forward */
-static Plan *pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
+Plan *pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
     PgMemoGroup *group, PgRequiredProperty *required,
     PgGroupBestEntry *best, PgOutputProperty *output);
-static Path *pg_cascades_find_imported_path(PgMemoGroup *group);
-static void pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan);
+Path *pg_cascades_find_imported_path(PgMemoGroup *group);
+void pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan);
 
 /* ========================================================================
  * Helper: find imported Path by walking through LogicalProject chain
  * ======================================================================== */
-static Path *
+Path *
 pg_cascades_find_imported_path(PgMemoGroup *group)
 {
     ListCell *lc;
@@ -60,7 +60,7 @@ pg_cascades_find_imported_path(PgMemoGroup *group)
  * Helper: build plan from a group's logical expression tree (bottom-up)
  * Returns NULL if no plan can be built for this group.
  * ======================================================================== */
-static Plan *
+Plan *
 pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group)
 {
     ListCell *lc;
@@ -485,7 +485,7 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
  *
  *   Returns NULL when child_required_props is NIL (graceful fallback).
  */
-static __attribute__((noinline)) PgRequiredProperty *
+__attribute__((noinline)) PgRequiredProperty *
 pg_safe_linitial_child_req(PgGroupBestEntry *best)
 {
     if (best->child_required_props == NIL)
@@ -505,7 +505,7 @@ pg_safe_linitial_child_req(PgGroupBestEntry *best)
  *   For join and other nodes, the targetlist is propagated from the
  *   left child when available.
  */
-static void
+void
 pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
 {
     Index       relid = 0;
@@ -608,7 +608,7 @@ pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
  * Recursive Plan Builder
  * ======================================================================== */
 
-static Plan *
+Plan *
 pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                                PgMemoGroup *group,
                                PgRequiredProperty *required,
@@ -1028,206 +1028,4 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
     }
 
     return result;
-}
-
-/*
- * pg_planbuild_self_test:
- *   Direct-call wrapper so gcov can track static helper functions.
- *   Called during memo initialization.
- */
-void
-pg_planbuild_self_test(void)
-{
-    /* --- pg_safe_linitial_child_req --- */
-
-    /* Test 1: NULL best or NIL child_required_props → returns NULL */
-    {
-        PgGroupBestEntry best;
-        MemSet(&best, 0, sizeof(PgGroupBestEntry));
-        best.child_required_props = NIL;
-        if (pg_safe_linitial_child_req(&best) != NULL)
-            elog(WARNING, "planbuild self-test: NIL child_required_props should return NULL");
-    }
-
-    /* Test 2: non-NIL child_required_props → returns first element */
-    {
-        PgGroupBestEntry best;
-        PgRequiredProperty req;
-        MemSet(&best, 0, sizeof(PgGroupBestEntry));
-        MemSet(&req, 0, sizeof(PgRequiredProperty));
-        req.limit_tuples = 10;
-        best.child_required_props = list_make1(&req);
-        if (pg_safe_linitial_child_req(&best) != &req)
-            elog(WARNING, "planbuild self-test: should return first child_required_props");
-    }
-
-    /* --- pg_cascades_find_imported_path --- */
-
-    /* Test 3: NULL group → returns NULL */
-    if (pg_cascades_find_imported_path(NULL) != NULL)
-        elog(WARNING, "planbuild self-test: NULL group should return NULL");
-
-    /* Test 4: group with no best_entries → returns NULL (no recursion match) */
-    {
-        PgMemoGroup group;
-        MemSet(&group, 0, sizeof(PgMemoGroup));
-        group.best_entries = NIL;
-        group.logical_exprs = NIL;
-        if (pg_cascades_find_imported_path(&group) != NULL)
-            elog(WARNING, "planbuild self-test: empty group should return NULL");
-    }
-
-    /* --- pg_cascades_fix_empty_targetlists --- */
-
-    /* Test 6: SeqScan with NIL targetlist, no children — propagates from lefttree */
-    {
-        Plan left;
-        Plan plan;
-
-        MemSet(&left, 0, sizeof(left));
-        MemSet(&plan, 0, sizeof(plan));
-        left.type = T_SeqScan;
-        left.targetlist = list_make1(&left); /* non-NIL dummy */
-        plan.type = T_Sort;
-        plan.targetlist = NIL;
-        plan.lefttree = &left;
-        plan.righttree = NULL;
-
-        pg_cascades_fix_empty_targetlists(NULL, &plan);
-        if (plan.targetlist != left.targetlist)
-            elog(WARNING, "planbuild self-test: fix_empty_targetlists propagate lefttree");
-    }
-
-    /* Test 7: fix_empty_targetlists propagate righttree */
-    {
-        Plan right;
-        Plan plan;
-
-        MemSet(&right, 0, sizeof(right));
-        MemSet(&plan, 0, sizeof(plan));
-        right.type = T_IndexScan;
-        right.targetlist = list_make1(&right);
-        plan.type = T_NestLoop;
-        plan.targetlist = NIL;
-        plan.lefttree = NULL;
-        plan.righttree = &right;
-
-        pg_cascades_fix_empty_targetlists(NULL, &plan);
-        if (plan.targetlist != right.targetlist)
-            elog(WARNING, "planbuild self-test: fix_empty_targetlists propagate righttree");
-    }
-
-    /* Test 8: fix_empty_targetlists NULL plan */
-    pg_cascades_fix_empty_targetlists(NULL, NULL);
-
-    /* Test 9: find_imported_path with LogicalProject recursion */
-    {
-        PgMemoGroup group;
-        PgGroupExpr best_proj;
-        PgMemoGroup child_grp;
-        PgGroupBestEntry entry;
-        PgGroupExpr imported_expr;
-        Path fake_path;
-        Path *result;
-
-        MemSet(&group, 0, sizeof(group));
-        MemSet(&best_proj, 0, sizeof(best_proj));
-        MemSet(&child_grp, 0, sizeof(child_grp));
-        MemSet(&entry, 0, sizeof(entry));
-        MemSet(&imported_expr, 0, sizeof(imported_expr));
-        MemSet(&fake_path, 0, sizeof(fake_path));
-
-        imported_expr.mode = PG_PHYS_EXPR_IMPORTED_PATH;
-        imported_expr.op_private = &fake_path;
-        entry.expr = &imported_expr;
-        child_grp.best_entries = list_make1(&entry);
-
-        best_proj.op = PG_CASCADES_LOGICAL_PROJECT;
-        best_proj.inputs = list_make1(&child_grp);
-        group.logical_exprs = list_make1(&best_proj);
-
-        result = pg_cascades_find_imported_path(&group);
-        if (result != &fake_path)
-            elog(WARNING, "planbuild self-test: find_imported_path via LogicalProject");
-    }
-
-    /* Test 10: find_imported_path with LogicalFilter recursion */
-    {
-        PgMemoGroup group;
-        PgGroupExpr best_filter;
-        PgMemoGroup child_grp;
-        PgGroupBestEntry entry;
-        PgGroupExpr imported_expr;
-        Path fake_path;
-        Path *result;
-
-        MemSet(&group, 0, sizeof(group));
-        MemSet(&best_filter, 0, sizeof(best_filter));
-        MemSet(&child_grp, 0, sizeof(child_grp));
-        MemSet(&entry, 0, sizeof(entry));
-        MemSet(&imported_expr, 0, sizeof(imported_expr));
-        MemSet(&fake_path, 0, sizeof(fake_path));
-
-        imported_expr.mode = PG_PHYS_EXPR_IMPORTED_PATH;
-        imported_expr.op_private = &fake_path;
-        entry.expr = &imported_expr;
-        child_grp.best_entries = list_make1(&entry);
-
-        best_filter.op = PG_CASCADES_LOGICAL_FILTER;
-        best_filter.inputs = list_make1(&child_grp);
-        group.logical_exprs = list_make1(&best_filter);
-
-        result = pg_cascades_find_imported_path(&group);
-        if (result != &fake_path)
-            elog(WARNING, "planbuild self-test: find_imported_path via LogicalFilter");
-    }
-
-    /* Test 11: build_logical_plan: group with both JOIN and SCAN */
-    {
-        PgPlannerCascadesContext ctx;
-        PgMemo memo;
-        PgMemoGroup group;
-        PgGroupExpr join_expr, scan_expr;
-        PgMemoGroup child_a, child_b;
-        PgGroupBestEntry child_entry;
-        PgGroupExpr child_phys;
-        Path child_path;
-        RelOptInfo child_rel;
-
-        MemSet(&ctx, 0, sizeof(ctx));
-        MemSet(&memo, 0, sizeof(memo));
-        MemSet(&group, 0, sizeof(group));
-        MemSet(&join_expr, 0, sizeof(join_expr));
-        MemSet(&scan_expr, 0, sizeof(scan_expr));
-        MemSet(&child_a, 0, sizeof(child_a));
-        MemSet(&child_b, 0, sizeof(child_b));
-        MemSet(&child_entry, 0, sizeof(child_entry));
-        MemSet(&child_phys, 0, sizeof(child_phys));
-        MemSet(&child_path, 0, sizeof(child_path));
-        MemSet(&child_rel, 0, sizeof(child_rel));
-
-        ctx.memo = &memo;
-        ctx.root = (PlannerInfo *) palloc0(sizeof(PlannerInfo));
-        memo.groups = NIL;
-
-        child_path.pathtype = T_SeqScan;
-        child_path.pathkeys = NIL;
-        child_rel.relid = 1;
-        child_path.parent = &child_rel;
-        child_phys.mode = PG_PHYS_EXPR_IMPORTED_PATH;
-        child_phys.op = PG_CASCADES_PHYSICAL_SEQSCAN;
-        child_phys.op_private = &child_path;
-        child_entry.expr = &child_phys;
-        child_a.best_entries = list_make1(&child_entry);
-        child_a.physical_exprs = list_make1(&child_phys);
-        child_a.id = 1;
-
-        join_expr.op = PG_CASCADES_LOGICAL_JOIN;
-        join_expr.inputs = list_make2(&child_a, &child_b);
-        scan_expr.op = PG_CASCADES_LOGICAL_SCAN;
-        group.id = 99;
-        group.logical_exprs = list_make2(&join_expr, &scan_expr);
-
-        pg_cascades_build_logical_plan(&ctx, &group);
-    }
 }

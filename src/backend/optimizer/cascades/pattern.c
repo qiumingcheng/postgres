@@ -60,7 +60,7 @@ pg_pattern_tree(PgCascadesOpKind op, List *children)
  * Core matching: pattern node → PgGroupExpr
  * ======================================================================== */
 
-static PgBinder *
+PgBinder *
 pg_pattern_match_to_expr(PgPattern *pattern, PgGroupExpr *expr)
 {
     PgBinder *binder;
@@ -402,97 +402,4 @@ pg_pattern_match_full(PgPattern *pattern, PgGroupExpr *root)
 
     /* Unknown pattern type */
     return NIL;
-}
-
-/*
- * pg_pattern_self_test:
- *   Direct-call wrapper so gcov can track pattern matching functions.
- *   Called during memo initialization.
- */
-void
-pg_pattern_self_test(void)
-{
-    PgPattern *leaf, *op, *tree, *multi;
-    PgGroupExpr dummy_expr, child_expr1, child_expr2;
-    PgMemoGroup dummy_group, child_group1, child_group2;
-    List *result;
-
-    MemSet(&dummy_expr, 0, sizeof(dummy_expr));
-    dummy_expr.op = PG_CASCADES_LOGICAL_JOIN;
-    dummy_expr.inputs = NIL;
-    MemSet(&dummy_group, 0, sizeof(dummy_group));
-    dummy_group.id = 0;
-    dummy_expr.owner_group = &dummy_group;
-
-    /* constructors */
-    leaf = pg_pattern_leaf();
-    op = pg_pattern_op(PG_CASCADES_LOGICAL_JOIN);
-    multi = pg_pattern_multi_leaf();
-    tree = pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
-        list_make2(pg_pattern_leaf(), pg_pattern_leaf()));
-
-    /* root-only: match */
-    result = pg_pattern_match_root_only(op, &dummy_expr);
-    list_free(result);
-
-    /* root-only: mismatch (wrong op) */
-    {
-        PgPattern *wrong = pg_pattern_op(PG_CASCADES_LOGICAL_AGG);
-        result = pg_pattern_match_root_only(wrong, &dummy_expr);
-        list_free(result);
-    }
-
-    /* root-only: leaf matches anything */
-    result = pg_pattern_match_root_only(leaf, &dummy_expr);
-    list_free(result);
-
-    /* full matching */
-    result = pg_pattern_match_full(op, &dummy_expr);
-    list_free_deep(result);
-    result = pg_pattern_match_full(tree, &dummy_expr);
-    list_free_deep(result);
-
-    /* TREE with actual children that match */
-    {
-        PgPattern *t2 = pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
-            list_make2(pg_pattern_op(PG_CASCADES_LOGICAL_SCAN),
-                       pg_pattern_op(PG_CASCADES_LOGICAL_SCAN)));
-
-        MemSet(&child_expr1, 0, sizeof(child_expr1));
-        child_expr1.op = PG_CASCADES_LOGICAL_SCAN;
-        child_expr1.inputs = NIL;
-        MemSet(&child_group1, 0, sizeof(child_group1));
-        child_group1.id = 1;
-        child_expr1.owner_group = &child_group1;
-
-        MemSet(&child_expr2, 0, sizeof(child_expr2));
-        child_expr2.op = PG_CASCADES_LOGICAL_SCAN;
-        child_expr2.inputs = NIL;
-        MemSet(&child_group2, 0, sizeof(child_group2));
-        child_group2.id = 2;
-        child_expr2.owner_group = &child_group2;
-
-        dummy_expr.inputs = list_make2(&child_group1, &child_group2);
-        result = pg_pattern_match_root_only(t2, &dummy_expr);
-        list_free(result);
-        result = pg_pattern_match_full(t2, &dummy_expr);
-        list_free_deep(result);
-    }
-
-    /* multi_leaf */
-    {
-        PgPattern *ml = pg_pattern_multi_leaf();
-        result = pg_pattern_match_root_only(ml, &dummy_expr);
-        list_free(result);
-        result = pg_pattern_match_full(ml, &dummy_expr);
-        list_free_deep(result);
-    }
-
-    /* TREE child count mismatch */
-    {
-        PgPattern *bad = pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
-            list_make1(pg_pattern_leaf()));
-        result = pg_pattern_match_root_only(bad, &dummy_expr);
-        if (result != NIL) list_free(result);
-    }
 }

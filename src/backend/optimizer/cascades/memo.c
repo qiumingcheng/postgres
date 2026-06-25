@@ -16,7 +16,7 @@
  * Hash Table for GroupExpression Dedup
  * ======================================================================== */
 
-static uint32
+uint32
 pg_memo_hash_key(const void *key_ptr, Size keysize)
 {
     const PgExprHashKey *key = (const PgExprHashKey *) key_ptr;
@@ -31,7 +31,7 @@ pg_memo_hash_key(const void *key_ptr, Size keysize)
     return h;
 }
 
-static int
+int
 pg_memo_match_key(const void *key1, const void *key2, Size keysize)
 {
     const PgExprHashKey *a = (const PgExprHashKey *) key1;
@@ -46,23 +46,6 @@ pg_memo_match_key(const void *key1, const void *key2, Size keysize)
             return 1;
     }
     return 0;
-}
-
-/*
- * pg_memo_hash_self_test:
- *   Direct-call wrapper so gcov can track pg_memo_hash_key and
- *   pg_memo_match_key (normally called via function pointers from
- *   hash_create, which gcov cannot instrument).
- */
-static void
-pg_memo_hash_self_test(void)
-{
-    PgExprHashKey key;
-    MemSet(&key, 0, sizeof(key));
-    key.op = 0;
-    key.num_inputs = 0;
-    pg_memo_hash_key(&key, sizeof(key));
-    pg_memo_match_key(&key, &key, sizeof(key));
 }
 
 static void
@@ -95,16 +78,6 @@ PgMemoGroup *
 pg_memo_new_group(PgPlannerCascadesContext *ctx)
 {
     PgMemoGroup *group = (PgMemoGroup *) palloc0(sizeof(PgMemoGroup));
-
-    /* Self-test: ensure gcov tracks hash/match functions */
-    pg_memo_hash_self_test();
-    pg_decorrelate_self_test();
-    pg_pattern_self_test();
-    pg_planbuild_self_test();
-    pg_task_self_test();
-    pg_postopt_self_test();
-    pg_rewrite_self_test();
-    pg_rule_self_test();
 
     group->id = list_length(ctx->memo->groups);
     group->logical_exprs = NIL;

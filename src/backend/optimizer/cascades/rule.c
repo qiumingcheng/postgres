@@ -18,7 +18,7 @@
  * Phase 1 Implementation Rule Transform Functions (Upper Ops)
  * ======================================================================== */
 
-static List *
+List *
 pg_rule_agg_to_hashagg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *result = pg_memo_new_group_expr(ctx,
@@ -29,7 +29,7 @@ pg_rule_agg_to_hashagg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     return list_make1(result);
 }
 
-static List *
+List *
 pg_rule_agg_to_groupagg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *result;
@@ -46,7 +46,7 @@ pg_rule_agg_to_groupagg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     return list_make1(result);
 }
 
-static List *
+List *
 pg_rule_sort_to_physical_sort(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *result = pg_memo_new_group_expr(ctx,
@@ -57,7 +57,7 @@ pg_rule_sort_to_physical_sort(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     return list_make1(result);
 }
 
-static List *
+List *
 pg_rule_distinct_to_unique(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *result = pg_memo_new_group_expr(ctx,
@@ -68,7 +68,7 @@ pg_rule_distinct_to_unique(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     return list_make1(result);
 }
 
-static List *
+List *
 pg_rule_limit_to_physical_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *result = pg_memo_new_group_expr(ctx,
@@ -79,7 +79,7 @@ pg_rule_limit_to_physical_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
     return list_make1(result);
 }
 
-static List *
+List *
 pg_rule_project_to_physical_project(PgPlannerCascadesContext *ctx,
                                      PgGroupExpr *expr)
 {
@@ -95,7 +95,7 @@ pg_rule_project_to_physical_project(PgPlannerCascadesContext *ctx,
  * Phase 2 Implementation Rule Transform Functions (Scan/Join)
  * ======================================================================== */
 
-static List *
+List *
 pg_rule_scan_to_seqscan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *result = pg_memo_new_group_expr(ctx,
@@ -106,7 +106,7 @@ pg_rule_scan_to_seqscan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     return list_make1(result);
 }
 
-static List *
+List *
 pg_rule_scan_to_indexscan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *result = pg_memo_new_group_expr(ctx,
@@ -117,7 +117,7 @@ pg_rule_scan_to_indexscan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     return list_make1(result);
 }
 
-static List *
+List *
 pg_rule_scan_to_bitmapheapscan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *result = pg_memo_new_group_expr(ctx,
@@ -128,7 +128,7 @@ pg_rule_scan_to_bitmapheapscan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     return list_make1(result);
 }
 
-static List *
+List *
 pg_rule_join_to_nestloop(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *outer_grp, *inner_grp;
@@ -155,7 +155,7 @@ pg_rule_join_to_nestloop(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     }
 }
 
-static List *
+List *
 pg_rule_join_to_hashjoin(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *outer_grp, *inner_grp;
@@ -181,7 +181,7 @@ pg_rule_join_to_hashjoin(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     }
 }
 
-static List *
+List *
 pg_rule_join_to_mergejoin(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *outer_grp, *inner_grp;
@@ -215,7 +215,7 @@ pg_rule_join_to_mergejoin(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  * pg_rule_join_commutativity:
  *   LogicalJoin(A, B) → LogicalJoin(B, A)
  */
-static List *
+List *
 pg_rule_join_commutativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *new_expr;
@@ -579,7 +579,7 @@ pg_rule_pushdown_predicate_scan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
  *   LogicalLimit(LogicalSort(A)) → LogicalSort(A) with limit_tuples set
  *   消除冗余的 Limit 节点，将 limit_tuples 记录到 Sort 的 PgSortPrivate 中。
  */
-static List *
+List *
 pg_rule_merge_limit_with_sort(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *sort_expr;
@@ -2824,276 +2824,4 @@ pg_rule_join_to_mergejoin_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *exp
         }
     }
     return result;
-}
-
-/*
- * pg_rule_self_test:
- *   Direct-call wrapper so gcov can track static rule transform functions.
- */
-void
-pg_rule_self_test(void)
-{
-    PgPlannerCascadesContext ctx;
-    PgCascadesUpperInfo upper;
-    PgGroupExpr expr;
-    PgMemo memo;
-    PgMemoGroup grp_a, grp_b, grp_c;
-    int nrules;
-    PgRule *rules;
-
-    MemSet(&ctx, 0, sizeof(ctx));
-    MemSet(&upper, 0, sizeof(upper));
-    MemSet(&expr, 0, sizeof(expr));
-    MemSet(&memo, 0, sizeof(memo));
-    MemSet(&grp_a, 0, sizeof(grp_a));
-    MemSet(&grp_b, 0, sizeof(grp_b));
-    MemSet(&grp_c, 0, sizeof(grp_c));
-
-    ctx.upper = &upper;
-    ctx.memo = &memo;
-    memo.groups = NIL;
-
-    grp_a.id = 1;
-    grp_a.rows = 100;
-    grp_a.width = 10;
-    grp_b.id = 2;
-    grp_b.rows = 100;
-    grp_b.width = 10;
-    grp_c.id = 3;
-    grp_c.rows = 100;
-    grp_c.width = 10;
-
-    /* --- Phase 1: Upper Op Implementation Rules --- */
-
-    /* pg_rule_agg_to_hashagg */
-    {
-        List *r = pg_rule_agg_to_hashagg(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: agg_to_hashagg");
-        list_free(r);
-    }
-
-    /* pg_rule_agg_to_groupagg (no GROUP BY → returns NIL) */
-    {
-        upper.groupClause = NIL;
-        List *r = pg_rule_agg_to_groupagg(&ctx, &expr);
-        /* Should return NIL because groupClause is NIL */
-        list_free(r);
-    }
-
-    /* pg_rule_sort_to_physical_sort */
-    {
-        List *r = pg_rule_sort_to_physical_sort(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: sort_to_physical_sort");
-        list_free(r);
-    }
-
-    /* pg_rule_distinct_to_unique */
-    {
-        List *r = pg_rule_distinct_to_unique(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: distinct_to_unique");
-        list_free(r);
-    }
-
-    /* pg_rule_limit_to_physical_limit */
-    {
-        List *r = pg_rule_limit_to_physical_limit(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: limit_to_physical_limit");
-        list_free(r);
-    }
-
-    /* pg_rule_project_to_physical_project */
-    {
-        List *r = pg_rule_project_to_physical_project(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: project_to_physical_project");
-        list_free(r);
-    }
-
-    /* --- Phase 2: Scan Implementation Rules --- */
-
-    /* pg_rule_scan_to_seqscan */
-    {
-        expr.op_private = (void *) 0x1; /* dummy */
-        List *r = pg_rule_scan_to_seqscan(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: scan_to_seqscan");
-        list_free(r);
-    }
-
-    /* pg_rule_scan_to_indexscan */
-    {
-        List *r = pg_rule_scan_to_indexscan(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: scan_to_indexscan");
-        list_free(r);
-    }
-
-    /* pg_rule_scan_to_bitmapheapscan */
-    {
-        List *r = pg_rule_scan_to_bitmapheapscan(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: scan_to_bitmapheapscan");
-        list_free(r);
-    }
-
-    /* --- Phase 2: Join Implementation Rules --- */
-
-    /* pg_rule_join_to_nestloop (needs 2 inputs) */
-    {
-        expr.inputs = list_make2(&grp_a, &grp_b);
-        List *r = pg_rule_join_to_nestloop(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: join_to_nestloop");
-        list_free(r);
-    }
-
-    /* pg_rule_join_to_hashjoin */
-    {
-        List *r = pg_rule_join_to_hashjoin(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: join_to_hashjoin");
-        list_free(r);
-    }
-
-    /* pg_rule_join_to_mergejoin */
-    {
-        List *r = pg_rule_join_to_mergejoin(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: join_to_mergejoin");
-        list_free(r);
-    }
-
-    /* pg_rule_join_to_nestloop: < 2 inputs → NIL */
-    {
-        expr.inputs = list_make1(&grp_a);
-        List *r = pg_rule_join_to_nestloop(&ctx, &expr);
-        list_free(r);
-    }
-
-    /* --- Phase 3: JoinCommutativity --- */
-
-    /* pg_rule_join_commutativity */
-    {
-        expr.inputs = list_make2(&grp_a, &grp_b);
-        List *r = pg_rule_join_commutativity(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: join_commutativity");
-        list_free(r);
-    }
-
-    /* pg_rule_join_commutativity: same child → NIL */
-    {
-        expr.inputs = list_make2(&grp_a, &grp_a);
-        List *r = pg_rule_join_commutativity(&ctx, &expr);
-        list_free(r);
-    }
-
-    /* pg_rule_join_commutativity: < 2 inputs → NIL */
-    {
-        expr.inputs = list_make1(&grp_a);
-        List *r = pg_rule_join_commutativity(&ctx, &expr);
-        list_free(r);
-    }
-
-    /* --- Phase 5: MergeLimitWithSort (D1) --- */
-    {
-        PgSortPrivate sp;
-        MemSet(&sp, 0, sizeof(sp));
-        sp.pathkeys = NIL;
-        sp.limit_tuples = 0;
-        upper.limit_tuples = 10;
-
-        expr.op = PG_CASCADES_LOGICAL_LIMIT;
-        PgGroupExpr sort_expr;
-        MemSet(&sort_expr, 0, sizeof(sort_expr));
-        sort_expr.op = PG_CASCADES_LOGICAL_SORT;
-        sort_expr.op_private = &sp;
-
-        PgMemoGroup child;
-        MemSet(&child, 0, sizeof(child));
-        child.logical_exprs = list_make1(&sort_expr);
-        expr.inputs = list_make1(&child);
-
-        List *r = pg_rule_merge_limit_with_sort(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: merge_limit_with_sort");
-        list_free(r);
-    }
-
-    /* --- Phase 5: EliminateSortWithConstantKey (H1) --- */
-    {
-        upper.sort_pathkeys = NIL;
-        upper.group_pathkeys = NIL;
-        expr.op = PG_CASCADES_LOGICAL_SORT;
-        expr.inputs = list_make1(&grp_a);
-        List *r = pg_rule_eliminate_sort_with_constant_key(&ctx, &expr);
-        if (r == NIL) elog(WARNING, "rule self-test: eliminate_sort_const_key");
-        list_free(r);
-    }
-
-    /* --- Phase 5: PruneEmptyJoin (E1) --- */
-    {
-        PgJoinPrivate jp;
-        MemSet(&jp, 0, sizeof(jp));
-        expr.op = PG_CASCADES_LOGICAL_JOIN;
-        expr.op_private = &jp;
-        expr.owner_group = &grp_a;
-        expr.inputs = list_make2(&grp_b, &grp_c);
-        grp_b.rows = 0;
-        grp_b.width = 0;
-        List *r = pg_rule_prune_empty_join(&ctx, &expr);
-        list_free(r);
-        grp_b.rows = 100;
-        grp_b.width = 10;
-    }
-
-    /* --- Getter functions --- */
-    rules = pg_cascades_get_impl_rules(&nrules);
-    if (rules == NULL || nrules == 0)
-        elog(WARNING, "rule self-test: get_impl_rules");
-
-    rules = pg_cascades_get_trans_rules(&nrules);
-    if (rules == NULL || nrules == 0)
-        elog(WARNING, "rule self-test: get_trans_rules");
-
-    rules = pg_cascades_get_impl_rules_phase2(&nrules);
-    if (rules == NULL || nrules == 0)
-        elog(WARNING, "rule self-test: get_impl_rules_phase2");
-
-    rules = pg_cascades_get_impl_rules_phase2_scan(&nrules);
-    if (rules == NULL || nrules == 0)
-        elog(WARNING, "rule self-test: get_impl_rules_phase2_scan");
-
-    rules = pg_cascades_get_impl_rules_phase2_join(&nrules);
-    if (rules == NULL || nrules == 0)
-        elog(WARNING, "rule self-test: get_impl_rules_phase2_join");
-
-    rules = pg_cascades_get_impl_rules_phase4_join(&nrules);
-    if (rules == NULL || nrules == 0)
-        elog(WARNING, "rule self-test: get_impl_rules_phase4_join");
-
-    rules = pg_cascades_get_trans_rules_phase5(&nrules);
-    if (rules == NULL || nrules == 0)
-        elog(WARNING, "rule self-test: get_trans_rules_phase5");
-
-    rules = pg_cascades_get_enforcer_rules(&nrules);
-    if (rules == NULL || nrules == 0)
-        elog(WARNING, "rule self-test: get_enforcer_rules");
-
-    {
-        int n;
-        pg_cascades_get_combination_rules(&n);
-        if (n == 0)
-            elog(WARNING, "rule self-test: get_combination_rules");
-    }
-
-    /* pg_cascades_init_combination_rules (no-op but counts as coverage) */
-    pg_cascades_init_combination_rules();
-
-    /* pg_rule_promise_compare (via pg_cascades_get_rules_sorted) */
-    {
-        int n;
-        PgRule *sorted = pg_cascades_get_rules_sorted(g_impl_rules_phase1, &n);
-        if (sorted == NULL || n == 0)
-            elog(WARNING, "rule self-test: get_rules_sorted");
-        pfree(sorted);
-    }
-
-    /* pg_rule_enforce_sort */
-    {
-        List *r = pg_rule_enforce_sort(&ctx, &expr);
-        /* Always returns NIL */
-        list_free(r);
-    }
 }
