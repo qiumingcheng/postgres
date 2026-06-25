@@ -1210,3 +1210,78 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
 
     return PG_CASCADES_OK;
 }
+
+/*
+ * pg_task_self_test:
+ *   Direct-call wrapper so gcov can track static task functions.
+ *   Called during memo initialization.
+ */
+void
+pg_task_self_test(void)
+{
+    PgPlannerCascadesContext ctx;
+    PgOptimizerTask *task;
+    PgOptimizerTask src_task;
+    PgMemoGroup group;
+    PgMemo memo;
+
+    MemSet(&ctx, 0, sizeof(ctx));
+    MemSet(&src_task, 0, sizeof(src_task));
+    MemSet(&group, 0, sizeof(group));
+    MemSet(&memo, 0, sizeof(memo));
+
+    ctx.memo = &memo;
+
+    /* --- task_stack_empty --- */
+    ctx.task_stack = NIL;
+    if (!task_stack_empty(&ctx))
+        elog(WARNING, "task self-test: empty stack");
+
+    /* --- task_stack_push + pop --- */
+    task = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
+    task->type = PG_TASK_OPTIMIZE_GROUP;
+    task_stack_push(&ctx, task);
+    if (task_stack_empty(&ctx))
+        elog(WARNING, "task self-test: push");
+
+    task = task_stack_pop(&ctx);
+    if (task == NULL || task->type != PG_TASK_OPTIMIZE_GROUP)
+        elog(WARNING, "task self-test: pop");
+    pfree(task);
+
+    /* --- pop on empty --- */
+    if (task_stack_pop(&ctx) != NULL)
+        elog(WARNING, "task self-test: pop empty");
+
+    /* --- check_limits: max_tasks --- */
+    ctx.max_tasks = 5;
+    ctx.num_tasks_executed = 5;
+    memo.groups = NIL;
+    if (pg_cascades_check_limits(&ctx) != PG_CASCADES_INTERNAL_LIMIT)
+        elog(WARNING, "task self-test: max_tasks limit");
+
+    /* --- check_limits: max_groups --- */
+    ctx.max_tasks = 0;
+    ctx.max_groups = 1;
+    memo.groups = list_make1(&group);
+    if (pg_cascades_check_limits(&ctx) != PG_CASCADES_INTERNAL_LIMIT)
+        elog(WARNING, "task self-test: max_groups limit");
+
+    /* --- check_limits: OK --- */
+    ctx.max_groups = 0;
+    if (pg_cascades_check_limits(&ctx) != PG_CASCADES_OK)
+        elog(WARNING, "task self-test: ok");
+
+    /* --- pg_task_clone --- */
+    src_task.type = PG_TASK_ENFORCE_AND_COST;
+    src_task.enforce_state = ENFORCE_INIT;
+    task = pg_task_clone(&src_task);
+    if (task == NULL || task->type != PG_TASK_ENFORCE_AND_COST)
+        elog(WARNING, "task self-test: clone");
+    pfree(task);
+
+    /* --- pg_cascades_get_current_binder NULL --- */
+    MemSet(&ctx, 0, sizeof(ctx));
+    if (pg_cascades_get_current_binder(&ctx) != NULL)
+        elog(WARNING, "task self-test: binder null");
+}

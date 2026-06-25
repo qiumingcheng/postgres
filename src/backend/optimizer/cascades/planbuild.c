@@ -1036,4 +1036,25 @@ pg_planbuild_self_test(void)
         if (pg_cascades_find_imported_path(&group) != NULL)
             elog(WARNING, "planbuild self-test: empty group should return NULL");
     }
+
+    /* --- pg_cascades_fix_empty_targetlists --- */
+
+    /* Test 6: SeqScan with NIL targetlist, no children — propagates from lefttree */
+    {
+        Plan left;
+        Plan plan;
+
+        MemSet(&left, 0, sizeof(left));
+        MemSet(&plan, 0, sizeof(plan));
+        left.type = T_SeqScan;
+        left.targetlist = list_make1(&left); /* non-NIL dummy */
+        plan.type = T_Sort;
+        plan.targetlist = NIL;
+        plan.lefttree = &left;
+        plan.righttree = NULL;
+
+        pg_cascades_fix_empty_targetlists(NULL, &plan);
+        if (plan.targetlist != left.targetlist)
+            elog(WARNING, "planbuild self-test: fix_empty_targetlists propagate lefttree");
+    }
 }

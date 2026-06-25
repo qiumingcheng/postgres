@@ -824,6 +824,45 @@ SELECT cov_test(3404, 'C3404: semi dedup', $$SELECT DISTINCT t1.val FROM cascade
 -- rewrite: Limit pushdown through join
 SELECT cov_test(3405, 'C3405: limit push join', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id ORDER BY t1.id LIMIT 3$$);
 
+-- ============================================================================
+-- Part N+5: planbuild + task deep coverage push (→ 80%)
+-- ============================================================================
+\echo '=== Part N+5: planbuild + task deep ==='
+
+-- planbuild: LOGICAL_AGG with GROUP BY + ORDER BY (sorted agg path)
+SELECT cov_test(3501, 'C3501: agg sort groupby', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a ORDER BY a$$);
+-- planbuild: LOGICAL_DISTINCT
+SELECT cov_test(3502, 'C3502: distinct', $$SELECT DISTINCT a FROM cascades_test_t$$);
+-- planbuild: LOGICAL_DISTINCT with ORDER BY
+SELECT cov_test(3503, 'C3503: distinct sort', $$SELECT DISTINCT a FROM cascades_test_t ORDER BY a$$);
+-- planbuild: LOGICAL_PROJECT over join (projection_capable path)
+SELECT cov_test(3504, 'C3504: proj over join', $$SELECT t1.val*2, t2.val+1 FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+-- planbuild: LOGICAL_SORT with no limit (pure sort)
+SELECT cov_test(3505, 'C3505: sort no limit 2', $$SELECT * FROM cascades_test_j1 ORDER BY id$$);
+-- planbuild: LOGICAL_LIMIT standalone
+SELECT cov_test(3506, 'C3506: limit only', $$SELECT * FROM cascades_test_t LIMIT 7$$);
+-- planbuild: LOGICAL_JOIN with MergeJoin preference (force mergejoin)
+SET enable_hashjoin = off; SET enable_nestloop = off;
+SELECT cov_test(3507, 'C3507: merge join force', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+SET enable_hashjoin = on; SET enable_nestloop = on;
+-- planbuild: LOGICAL_JOIN with NestLoop preference
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+SELECT cov_test(3508, 'C3508: nestloop force', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id$$);
+SET enable_hashjoin = on; SET enable_mergejoin = on;
+
+-- task: ENFORCE_AND_COST with Sort enforcer (ORDER BY requires sort pathkeys)
+SELECT cov_test(3509, 'C3509: sort enforce', $$SELECT * FROM cascades_test_t ORDER BY name, a$$);
+-- task: ENFORCE_AND_COST with multiple required properties
+SELECT cov_test(3510, 'C3510: groupby orderby', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a ORDER BY count(*) DESC$$);
+-- task: join with parameterized path
+SELECT cov_test(3511, 'C3511: subq join filter', $$SELECT t1.val FROM cascades_test_j1 t1 WHERE t1.id IN (SELECT j1_id FROM cascades_test_j2 WHERE val > 20)$$);
+-- task: self-join triggers group merging + optimize_group self-ref skip
+SELECT cov_test(3512, 'C3512: self join merge', $$SELECT t1.id, t2.id FROM cascades_test_t t1 JOIN cascades_test_t t2 ON t1.a = t2.b$$);
+-- planbuild: LOGICAL_AGG with HAVING (make_agg path)
+SELECT cov_test(3513, 'C3513: having agg', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a HAVING count(*) > 3$$);
+-- planbuild: full pipeline (scan→filter→join→sort→limit)
+SELECT cov_test(3514, 'C3514: full pipeline 2', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t1.val > 10 ORDER BY t2.val LIMIT 5$$);
+
 \echo ''
 \echo '========================================'
 \echo '  FINAL EXTENDED COVERAGE TEST SUMMARY'
