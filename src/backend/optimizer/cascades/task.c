@@ -761,10 +761,7 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
 
         pg_group_update_best(expr->owner_group, entry);
 
-        /* Update global upper bound */
-        if (ctx->upper_bound_cost == 0 ||
-            path->total_cost < ctx->upper_bound_cost)
-            ctx->upper_bound_cost = path->total_cost;
+        /* IMPORTED_PATH: never update global upper bound */
 
         return PG_CASCADES_OK;
     }
@@ -834,12 +831,13 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
 
                 if (child_best == NULL)
                 {
-                    /*
-                     * Phase 6: If child group is already optimized but has no
-                     * matching best entry, skip this child.  No amount of
-                     * re-optimization will produce a result for this property.
-                     */
-                    if (child_group->optimized)
+                    if (child_group->optimized &&
+                        list_length(child_group->best_entries) == 1)
+                    {
+                        child_best = (PgGroupBestEntry *)
+                            linitial(child_group->best_entries);
+                    }
+                    else if (child_group->optimized)
                     {
                         task->cur_child_index++;
                         continue;
@@ -1037,21 +1035,8 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             }
             (void) 0;
 
-            /* Phase 4 + Phase 6: upper-bound pruning with lower-bound recording */
-            if (ctx->upper_bound_cost > 0 &&
-                task->total_cost > ctx->upper_bound_cost)
-            {
-                /*
-                 * Phase 6: Record lower bound on this group.
-                 * If this expression's cost already exceeds the global
-                 * upper bound, future OptimizeGroupTasks for this group
-                 * can skip it entirely.
-                 */
-                if (expr->owner_group->lower_bound_cost == 0 ||
-                    ctx->upper_bound_cost < expr->owner_group->lower_bound_cost)
-                    expr->owner_group->lower_bound_cost = ctx->upper_bound_cost;
-                return PG_CASCADES_OK;
-            }
+            /* Per-expression pruning (above) via expr->best_cost
+             * already prevents redundant ENFORCE_AND_COST runs. */
 
             /* Check if output satisfies required property */
             if (!pg_output_satisfies_required(&task->output_property,

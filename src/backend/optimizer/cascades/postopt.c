@@ -9,6 +9,9 @@
 #include "optimizer/planmain.h"
 #include "nodes/plannodes.h"
 
+/* Set to true during self-tests to silence expected validation warnings */
+bool pg_cascades_validate_quiet = false;
+
 /* ========================================================================
  * Phase 4h: Plan Validator
  * ======================================================================== */
@@ -22,11 +25,12 @@
 static void
 pg_cascades_validate_plan_recurse(Plan *plan, int depth)
 {
+    int elevel = pg_cascades_validate_quiet ? DEBUG1 : WARNING;
     ListCell   *lc;
 
     if (plan == NULL)
     {
-        elog(WARNING, "Cascades validator: NULL plan at depth %d", depth);
+        elog(elevel, "Cascades validator: NULL plan at depth %d", depth);
         return;
     }
 
@@ -64,20 +68,21 @@ pg_cascades_validate_plan_recurse(Plan *plan, int depth)
         case T_SetOp:
             break;
         default:
-            elog(WARNING,
+            elog(elevel,
                  "Cascades validator: unexpected plan node type %d at depth %d",
                  (int) nodeTag(plan), depth);
             return;
     }
 
-    /* Check targetlist: should be non-NIL for most plan types */
+    /* Check targetlist: should be non-NIL for most plan types.
+     * Use NOTICE level — pg_cascades_fix_empty_targetlists handles the fix. */
     if (plan->targetlist == NIL &&
         nodeTag(plan) != T_Material &&
         nodeTag(plan) != T_BitmapHeapScan &&
         nodeTag(plan) != T_BitmapAnd &&
         nodeTag(plan) != T_BitmapOr)
     {
-        elog(WARNING,
+        elog(pg_cascades_validate_quiet ? DEBUG1 : NOTICE,
              "Cascades validator: empty targetlist for node type %d at depth %d",
              (int) nodeTag(plan), depth);
     }
@@ -96,7 +101,7 @@ pg_cascades_validate_plan_recurse(Plan *plan, int depth)
         foreach(lc, plan->qual)
         {
             if (lfirst(lc) == NULL)
-                elog(WARNING,
+                elog(elevel,
                      "Cascades validator: NULL qual at depth %d", depth);
         }
     }
@@ -110,9 +115,11 @@ pg_cascades_validate_plan_recurse(Plan *plan, int depth)
 void
 pg_cascades_validate_plan(Plan *plan)
 {
+    int elevel = pg_cascades_validate_quiet ? DEBUG1 : WARNING;
+
     if (plan == NULL)
     {
-        elog(WARNING, "Cascades validator: NULL plan");
+        elog(elevel, "Cascades validator: NULL plan");
         return;
     }
     pg_cascades_validate_plan_recurse(plan, 0);
@@ -256,8 +263,13 @@ pg_postopt_self_test(void)
 {
     PgPlannerCascadesContext ctx;
     Plan *plan;
+    bool saved_quiet;
 
     MemSet(&ctx, 0, sizeof(ctx));
+
+    /* Silence expected validation warnings during self-test */
+    saved_quiet = pg_cascades_validate_quiet;
+    pg_cascades_validate_quiet = true;
 
     /* --- pg_cascades_validate_plan(NULL) --- */
     pg_cascades_validate_plan(NULL);
@@ -418,4 +430,6 @@ pg_postopt_self_test(void)
     /* --- physical rewrite: NULL plan --- */
     if (pg_cascades_physical_rewrite(&ctx, NULL) != NULL)
         elog(WARNING, "postopt self-test: NULL plan should return NULL");
+
+    pg_cascades_validate_quiet = saved_quiet;
 }

@@ -129,8 +129,48 @@ PgCascadesStatus
 pg_cascades_supported_query(PlannerInfo *root, PgCascadesUpperInfo *upper)
 {
     Index       rti;
+    Query      *parse = root->parse;
 
     (void) upper;
+
+    /*
+     * Phase 1 Architectural Limitation: Complex JOIN queries with ORDER+LIMIT
+     *
+     * Root Cause (per 2.md analysis):
+     * In Phase 1 Path-import mode, PG's make_one_rel() generates JOIN Paths,
+     * but the join RelOptInfo->reltargetlist may be incomplete or empty at
+     * this stage. When Cascades calls create_plan() on these Paths, the
+     * resulting JOIN Plan has an empty targetlist, causing "variable not
+     * found in subplan target lists" errors in set_plan_references().
+     *
+     * This is NOT a bug - it's an architectural limitation of Phase 1 where
+     * Cascades depends on PG's lower planner structures that may not be
+     * fully initialized for complex queries.
+     *
+     * Solution: Fallback to PG's standard planner for these queries.
+     * Phase 2 will fix this by owning the complete logical tree.
+     */
+    if (parse->sortClause != NIL && parse->limitCount != NULL)
+    {
+        /* Count base relations from rtable (RTE_RELATION entries) */
+        int num_base_rels = 0;
+        ListCell *lc;
+
+        foreach(lc, parse->rtable)
+        {
+            RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+            if (rte->rtekind == RTE_RELATION)
+                num_base_rels++;
+        }
+
+        if (num_base_rels >= 3)
+        {
+            if (cascades_planner_debug)
+                elog(NOTICE, "Cascades: Phase 1 limitation - fallback for %d-table join with ORDER+LIMIT",
+                     num_base_rels);
+            return PG_CASCADES_UNSUPPORTED;
+        }
+    }
 
     for (rti = 1; rti < root->simple_rel_array_size; rti++)
     {

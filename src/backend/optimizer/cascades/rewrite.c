@@ -299,6 +299,72 @@ pg_rewrite_apply_rules_recursive(PgPlannerCascadesContext *ctx,
     return changed;
 }
 
+/*
+ * pg_rewrite_apply_rules_topdown:
+ *   Like pg_rewrite_apply_rules_recursive but applies rules top-down:
+ *   rules run on the current group BEFORE recursing to children.
+ *   This is used for column pruning (B1-B5) where parent requirements
+ *   (output_columns) need to propagate from Project/Agg/Sort down
+ *   through Join to Scan.
+ *
+ *   Returns true if any expression was modified.
+ */
+static bool
+pg_rewrite_apply_rules_topdown(PgPlannerCascadesContext *ctx,
+                                PgMemoGroup *group,
+                                PgRewriteRule *rules,
+                                int num_rules)
+{
+    ListCell *lc;
+    bool changed = false;
+
+    if (group == NULL)
+        return false;
+
+    /* Cycle detection — same as bottom-up */
+    if (group->optimized)
+        return false;
+    group->optimized = true;
+
+    /*
+     * Step 1: Apply rules to this group's expressions FIRST (top-down).
+     * This lets B4 (Project) set child->output_columns before B2 (Join)
+     * reads them, and B2 set child(Scan)->output_columns before B1 reads.
+     */
+    {
+        List *exprs_snapshot = list_copy(group->logical_exprs);
+
+        foreach(lc, exprs_snapshot)
+        {
+            PgGroupExpr *expr = (PgGroupExpr *) lfirst(lc);
+
+            if (pg_rewrite_apply_rules_to_expr(ctx, group, expr,
+                                                rules, num_rules))
+                changed = true;
+        }
+
+        list_free(exprs_snapshot);
+    }
+
+    /*
+     * Step 2: Then recurse to children.
+     */
+    foreach(lc, group->logical_exprs)
+    {
+        PgGroupExpr *expr = (PgGroupExpr *) lfirst(lc);
+        ListCell *ic;
+
+        foreach(ic, expr->inputs)
+        {
+            PgMemoGroup *child = (PgMemoGroup *) lfirst(ic);
+            if (pg_rewrite_apply_rules_topdown(ctx, child, rules, num_rules))
+                changed = true;
+        }
+    }
+
+    return changed;
+}
+
 /* ========================================================================
  * Rewrite Phase Entry Point
  * ======================================================================== */
@@ -363,8 +429,26 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
             {
                 bool changed;
 
-                changed = pg_rewrite_apply_rules_recursive(ctx,
-                    ctx->memo->root_group, stage->rules, stage->num_rules);
+                /* Clear optimized flags for re-traversal between iterations */
+                foreach(glc, ctx->memo->groups)
+                    ((PgMemoGroup *) lfirst(glc))->optimized = false;
+
+                /*
+                 * Column pruning (B1-B5) needs top-down traversal
+                 * so parent requirements propagate from Project/Agg
+                 * down through Join to Scan.  All other stages use
+                 * standard bottom-up traversal.
+                 */
+                if (i == REWRITE_COLUMN_PRUNE)
+                {
+                    changed = pg_rewrite_apply_rules_topdown(ctx,
+                        ctx->memo->root_group, stage->rules, stage->num_rules);
+                }
+                else
+                {
+                    changed = pg_rewrite_apply_rules_recursive(ctx,
+                        ctx->memo->root_group, stage->rules, stage->num_rules);
+                }
 
                 if (ctx->debug)
                     elog(NOTICE, "Cascades rewrite stage %d (%s) iteration %d: %s",
@@ -480,8 +564,24 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
             {
                 bool changed;
 
-                changed = pg_rewrite_apply_rules_recursive(ctx,
-                    ctx->memo->root_group, combo_stage_rules, combo_num);
+                /*
+                 * Column pruning combo needs top-down traversal
+                 * so B4/B3 → B2 → B1 propagation works correctly.
+                 */
+                if (strcmp(cr->name, "GP_PRUNE_COLUMNS") == 0)
+                {
+                    /* Clear optimized flags for re-traversal */
+                    foreach(glc, ctx->memo->groups)
+                        ((PgMemoGroup *) lfirst(glc))->optimized = false;
+
+                    changed = pg_rewrite_apply_rules_topdown(ctx,
+                        ctx->memo->root_group, combo_stage_rules, combo_num);
+                }
+                else
+                {
+                    changed = pg_rewrite_apply_rules_recursive(ctx,
+                        ctx->memo->root_group, combo_stage_rules, combo_num);
+                }
 
                 if (ctx->debug)
                     elog(NOTICE, "Cascades combo rule '%s' iteration %d: %s",
@@ -495,6 +595,12 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
             pfree(combo_stage_rules);
         }
     }
+
+    /* Step 4: Re-derive logical properties after merge/rewrite.
+     * Group merges (e.g. EliminateLimit) leave the target group with
+     * rows=0 width=0.  The task scheduler's costing relies on
+     * group->rows and group->width to produce best entries. */
+    pg_memo_derive_logical_property_v2(ctx->memo, ctx);
 
     /* Phase 7: Clear visited flags so task scheduler starts clean */
     foreach(glc, ctx->memo->groups)

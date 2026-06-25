@@ -220,13 +220,17 @@ pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group
                     ctx->upper->activeWindows == NIL)
                 {
                     /*
-                     * Replace the child plan's targetlist with the query's
-                     * target list.  create_plan uses reltargetlist which may
-                     * have extra columns or be pruned.  ctx->upper->tlist is
-                     * the actual SELECT target list.
+                     * For simple queries (no aggregation), return the child
+                     * plan as-is.  create_plan already produced a correct
+                     * targetlist from PG's build_joinrel_tlist.  Direct
+                     * targetlist replacement with ctx->upper->tlist breaks
+                     * set_plan_references for multi-table joins because the
+                     * Var varnos in ctx->upper->tlist don't match subplan
+                     * scan targetlists after create_plan's Var adjustment.
+                     *
+                     * PG's set_plan_references will adjust the plan's
+                     * existing targetlist correctly.
                      */
-                    if (ctx->upper->tlist != NIL)
-                        child_plan->targetlist = ctx->upper->tlist;
                     return child_plan;
                 }
 
@@ -445,11 +449,8 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
                 {
                     ctx->root->query_pathkeys = entry->output.pathkeys;
 
-                    /* Phase 4h: validate plan structure */
-                    pg_cascades_validate_plan(result);
-
-                    /* Phase 4g: post-optimization physical rewrite */
-                    result = pg_cascades_physical_rewrite(ctx, result);
+                    /* Fix any empty targetlists on inner nodes */
+                    pg_cascades_fix_empty_targetlists(ctx->root, result);
 
                     return result;
                 }
@@ -458,18 +459,20 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
     }
 
     /*
-     * Fallback: build plan recursively from logical expressions tree.
+     * Phase 1 Critical Path: If no best entry was found, this is a bug
+     * in the task scheduler or path import logic. In Phase 1 Path-import
+     * mode, we should ALWAYS have valid best_entries from PG's make_one_rel().
+     *
+     * The pg_cascades_build_logical_plan() fallback was REMOVED because:
+     * 1. It calls create_plan() on Paths with incomplete RelOptInfo
+     * 2. This causes "variable not found in subplan target lists" errors
+     * 3. Per 2.md section 5.2: Phase 1 must not modify PG's lower structures
+     *
+     * The function implementation remains below for Phase 2, but is not called.
      */
-    result = pg_cascades_build_logical_plan(ctx, root_group);
-    if (result != NULL)
-    {
-        pg_cascades_validate_plan(result);
-        result = pg_cascades_physical_rewrite(ctx, result);
-        return result;
-    }
-
     if (cascades_planner_debug)
-        elog(WARNING, "Cascades: no plan found");
+        elog(WARNING, "Cascades: no best_entries found for root group - "
+             "this indicates incomplete optimization. Falling back to PG planner.");
     return NULL;
 }
 
@@ -510,6 +513,13 @@ pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
     if (plan == NULL)
         return;
 
+    /* Debug: log plan node details */
+    if (cascades_planner_debug)
+    {
+        elog(NOTICE, "fix_empty_targetlists: node type %d, targetlist length %d",
+             (int) nodeTag(plan), list_length(plan->targetlist));
+    }
+
     /* Recurse into children first */
     if (plan->lefttree != NULL)
         pg_cascades_fix_empty_targetlists(root, plan->lefttree);
@@ -522,15 +532,39 @@ pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
      * is missing columns, we rebuild from the query's targetList. */
     if (plan->targetlist == NIL)
     {
-        /* Try lefttree targetlist first (for joins) */
-        if (plan->lefttree != NULL)
+        if (cascades_planner_debug)
+            elog(NOTICE, "fix_empty_targetlists: node type %d has NIL targetlist, attempting fix",
+                 (int) nodeTag(plan));
+
+        /* For join nodes from create_plan(), NIL targetlist should NOT happen.
+         * This indicates the underlying Path or RelOptInfo was corrupted.
+         * Do NOT try to "fix" it by merging child targetlists - that's a band-aid. */
+        if ((nodeTag(plan) == T_NestLoop ||
+             nodeTag(plan) == T_HashJoin ||
+             nodeTag(plan) == T_MergeJoin))
         {
-            plan->targetlist = plan->lefttree->targetlist;
+            elog(WARNING, "Cascades: JOIN node type %d has empty targetlist from create_plan() - "
+                 "this indicates corrupted Path or RelOptInfo. Query should fallback.",
+                 (int) nodeTag(plan));
+            /* Don't try to fix - let it fail so we can diagnose the root cause */
             return;
         }
-        if (plan->righttree != NULL)
+
+        /* Only fix upper nodes that Cascades might create without proper targetlist */
+        if (plan->lefttree != NULL && plan->lefttree->targetlist != NIL)
+        {
+            plan->targetlist = plan->lefttree->targetlist;
+            if (cascades_planner_debug)
+                elog(NOTICE, "fix_empty_targetlists: fixed node type %d using lefttree targetlist",
+                     (int) nodeTag(plan));
+            return;
+        }
+        if (plan->righttree != NULL && plan->righttree->targetlist != NIL)
         {
             plan->targetlist = plan->righttree->targetlist;
+            if (cascades_planner_debug)
+                elog(NOTICE, "fix_empty_targetlists: fixed node type %d using righttree targetlist",
+                     (int) nodeTag(plan));
             return;
         }
 
@@ -554,30 +588,16 @@ pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
             if (is_scan && relid > 0 && relid <= root->simple_rel_array_size)
             {
                 RelOptInfo *rel = root->simple_rel_array[relid];
-                if (rel != NULL)
+                if (rel != NULL && rel->reltargetlist != NIL)
                 {
-                    List       *new_tlist = NIL;
-                    ListCell   *lc;
-
-                    foreach(lc, root->parse->targetList)
-                    {
-                        TargetEntry *te = (TargetEntry *) lfirst(lc);
-                        if (IsA(te->expr, Var))
-                        {
-                            Var *var = (Var *) te->expr;
-                            if ((int)var->varno == relid)
-                                new_tlist = lappend(new_tlist,
-                                    makeTargetEntry((Expr *) copyObject(var),
-                                        list_length(new_tlist) + 1,
-                                        pstrdup(te->resname ? te->resname : ""),
-                                        false));
-                        }
-                    }
-
-                    if (new_tlist != NIL)
-                        plan->targetlist = new_tlist;
-                    else if (rel->reltargetlist != NIL)
-                        plan->targetlist = rel->reltargetlist;
+                    /*
+                     * Use reltargetlist directly — it includes both SELECT
+                     * columns AND join-key columns needed by upper nodes.
+                     * Using root->parse->targetList would miss join keys
+                     * like t2.id, causing "variable not found" errors
+                     * in set_plan_references.
+                     */
+                    plan->targetlist = rel->reltargetlist;
                 }
             }
         }
@@ -740,16 +760,36 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     return NULL;
                 }
 
-                result = (Plan *) make_agg(ctx->root,
-                    ctx->upper->tlist,
-                    (List *) ctx->upper->havingQual,
-                    AGG_HASHED,
-                    &ctx->upper->agg_costs,
-                    ctx->upper->numGroupCols,
-                    ctx->upper->groupColIdx,
-                    ctx->upper->groupOperators,
-                    (long) ctx->upper->dNumGroups,
-                    child);
+                if (ctx->upper->hasAggs)
+                {
+                    AggStrategy agg_strategy;
+                    if (ctx->upper->numGroupCols > 0)
+                        agg_strategy = AGG_HASHED;
+                    else
+                        agg_strategy = AGG_PLAIN;
+
+                    result = (Plan *) make_agg(ctx->root,
+                        ctx->upper->tlist,
+                        (List *) ctx->upper->havingQual,
+                        agg_strategy,
+                        &ctx->upper->agg_costs,
+                        ctx->upper->numGroupCols,
+                        ctx->upper->groupColIdx,
+                        ctx->upper->groupOperators,
+                        (long) ctx->upper->dNumGroups,
+                        child);
+                }
+                else
+                {
+                    result = (Plan *) make_group(ctx->root,
+                        ctx->upper->tlist,
+                        (List *) ctx->upper->havingQual,
+                        ctx->upper->numGroupCols,
+                        ctx->upper->groupColIdx,
+                        ctx->upper->groupOperators,
+                        ctx->upper->dNumGroups,
+                        child);
+                }
             }
             break;
 

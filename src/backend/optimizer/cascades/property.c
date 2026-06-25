@@ -280,6 +280,10 @@ pg_group_update_best(PgMemoGroup *group, PgGroupBestEntry *new_entry)
                 old->total_cost = new_entry->total_cost;
                 old->child_required_props = new_entry->child_required_props;
                 old->output = new_entry->output;
+
+                /* Update per-group best cost when a cheaper entry replaces old */
+                if (group->best_cost == 0 || new_entry->total_cost < group->best_cost)
+                    group->best_cost = new_entry->total_cost;
             }
             return;
         }
@@ -291,4 +295,8 @@ pg_group_update_best(PgMemoGroup *group, PgGroupBestEntry *new_entry)
 
     /* New required property */
     group->best_entries = lappend(group->best_entries, new_entry);
+
+    /* Update per-group best cost for pruning */
+    if (group->best_cost == 0 || new_entry->total_cost < group->best_cost)
+        group->best_cost = new_entry->total_cost;
 }

@@ -586,12 +586,21 @@ pg_memo_derive_logical_property_v2(PgMemo *memo, PgPlannerCascadesContext *ctx)
     {
         PgMemoGroup *group = (PgMemoGroup *) lfirst(lc);
         ListCell   *elc;
+        PgLogicalProperty best_prop;
 
         /* Already derived? */
         if (group->logical_prop.relids != NULL)
             continue;
 
-        /* Find the first logical expression to derive from */
+        MemSet(&best_prop, 0, sizeof(PgLogicalProperty));
+
+        /* Iterate ALL logical expressions, take the best stats.
+         * After group merges, a group may contain expressions of
+         * different types (e.g. LOGICAL_AGG + LOGICAL_PROJECT).
+         * The first expression might have rows=0 (dNumGroups not
+         * yet estimated), but another expression in the same group
+         * may derive proper stats from its child.
+         */
         foreach(elc, group->logical_exprs)
         {
             PgGroupExpr *expr = (PgGroupExpr *) lfirst(elc);
@@ -641,14 +650,16 @@ pg_memo_derive_logical_property_v2(PgMemo *memo, PgPlannerCascadesContext *ctx)
                     break;
 
                 case PG_CASCADES_LOGICAL_AGG:
-                    if (ctx->upper != NULL)
+                    if (list_length(expr->inputs) >= 1)
                     {
-                        if (list_length(expr->inputs) >= 1)
-                        {
-                            PgMemoGroup *child = (PgMemoGroup *) linitial(expr->inputs);
-                            prop.relids = bms_copy(child->logical_prop.relids);
-                        }
-                        prop.rows = ctx->upper->dNumGroups;
+                        PgMemoGroup *child = (PgMemoGroup *) linitial(expr->inputs);
+                        prop.relids = bms_copy(child->logical_prop.relids);
+                        /* dNumGroups may be 0 when estimation hasn't run yet;
+                         * fall back to child's rows as a heuristic. */
+                        if (ctx->upper != NULL && ctx->upper->dNumGroups > 0)
+                            prop.rows = ctx->upper->dNumGroups;
+                        else
+                            prop.rows = child->rows * 0.1;  /* ~10% of input */
                     }
                     break;
 
@@ -656,10 +667,32 @@ pg_memo_derive_logical_property_v2(PgMemo *memo, PgPlannerCascadesContext *ctx)
                     break;
             }
 
-            /* Store derived property */
-            group->logical_prop = prop;
-            break;
+            /* Keep the best (largest rows) property across all expressions */
+            if (prop.rows > best_prop.rows)
+            {
+                if (best_prop.relids != NULL)
+                    bms_free(best_prop.relids);
+                best_prop = prop;
+            }
+            else if (prop.relids != NULL)
+                bms_free(prop.relids);
         }
+
+        /* Store best derived property */
+        group->logical_prop = best_prop;
+
+        /*
+         * Also propagate rows/width to the group itself.
+         * After group merges, the target group may have rows=0
+         * width=0 even though its logical expressions imply real
+         * statistics.  The task scheduler's costing relies on
+         * group->rows and group->width, so keep them in sync
+         * with the derived logical property.
+         */
+        if (best_prop.rows > 0 && group->rows <= 0)
+            group->rows = best_prop.rows;
+        if (best_prop.width > 0 && group->width <= 0)
+            group->width = best_prop.width;
     }
 }
 
@@ -854,6 +887,13 @@ pg_memo_merge_group(PgPlannerCascadesContext *ctx,
         target->width = source->width;
     if (target->rel == NULL && source->rel != NULL)
         target->rel = source->rel;
+
+    /*
+     * Clear the target's logical property so derive_logical_property_v2
+     * will re-derive it.  After merge, the target has new expressions
+     * from the source, and the old cached property is stale.
+     */
+    MemSet(&target->logical_prop, 0, sizeof(PgLogicalProperty));
 
     /* Clear source (expressions are now owned by target) */
     source->logical_exprs = NIL;

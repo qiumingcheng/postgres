@@ -249,6 +249,7 @@ struct PgMemoGroup
     RelOptInfo *rel;               /* 仅当此 group 映射到一个 PG 关系时 */
     PgLogicalProperty logical_prop; /* Phase 4: derived logical property */
     double      lower_bound_cost;   /* Phase 6: cost lower bound for pruning */
+    double      best_cost;          /* Phase 6: cheapest best entry total_cost */
     bool        optimized;          /* Phase 6: has this group been optimized? */
 };
 
@@ -637,6 +638,7 @@ extern void pg_task_self_test(void);
 
 /* postopt.c */
 extern void pg_cascades_validate_plan(Plan *plan);
+extern bool pg_cascades_validate_quiet;
 extern Plan *pg_cascades_physical_rewrite(PgPlannerCascadesContext *ctx,
                                            Plan *plan);
 extern void pg_postopt_self_test(void);

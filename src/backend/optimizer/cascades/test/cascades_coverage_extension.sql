@@ -922,6 +922,199 @@ SELECT cov_test(3707, 'C3707: project only', $$SELECT id*3, val+5 FROM cascades_
 -- planbuild.c LOGICAL_FILTER + LOGICAL_JOIN combo
 SELECT cov_test(3708, 'C3708: filter join combo', $$SELECT t1.val, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t1.val BETWEEN 5 AND 15$$);
 
+-- ============================================================
+-- Phase 5 + Phase 6 rule coverage push
+-- ============================================================
+
+-- rule.c EliminateSortWithConstantKey: simple scan, no ORDER BY, no GROUP BY
+SELECT cov_test(3801, 'C3801: elim sort const key', $$SELECT * FROM cascades_test_j1$$);
+-- rule.c EliminateSortWithConstantKey: LIMIT without ORDER BY
+SELECT cov_test(3802, 'C3802: elim sort limit', $$SELECT * FROM cascades_test_j1 LIMIT 10$$);
+-- rule.c EliminateSortWithConstantKey: simple agg no group
+SELECT cov_test(3803, 'C3803: elim sort plain agg', $$SELECT count(*) FROM cascades_test_j1$$);
+
+-- rule.c PushDownPredicateScan (A1): filter on single table
+SELECT cov_test(3804, 'C3804: pushdown scan', $$SELECT * FROM cascades_test_j1 WHERE val > 10 AND id < 50$$);
+-- rule.c PushDownPredicateJoin (A2) + PushDownPredicateScan combo
+SELECT cov_test(3805, 'C3805: pushdown join multi', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t1.val < 20 AND t2.val > 10 AND t1.id > 5$$);
+
+-- rule.c PruneSortColumns
+SELECT cov_test(3806, 'C3806: prune sort cols', $$SELECT id, val FROM cascades_test_j1 ORDER BY id, val$$);
+
+-- rule.c MergeLimitWithSort (D1)
+SELECT cov_test(3807, 'C3807: merge limit sort', $$SELECT * FROM cascades_test_j1 ORDER BY id LIMIT 5$$);
+
+-- rule.c PushDownPredicateProject (H6): Filter over Project
+SELECT cov_test(3808, 'C3808: pushdown proj filter', $$SELECT * FROM (SELECT id*2 AS dbl, val FROM cascades_test_j1) AS sub WHERE dbl > 10$$);
+
+-- phase 4 join rules: HashJoin + MergeJoin via multi-table
+SELECT cov_test(3809, 'C3809: 3way join', $$SELECT t1.id, t2.val, t3.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id$$);
+SELECT cov_test(3810, 'C3810: outer join combo', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t1.val IS NOT NULL$$);
+
+-- rule.c PruneEmptyJoin (E1) + PruneEmptyScan (E4): empty table
+SELECT cov_test(3811, 'C3811: empty table scan', $$SELECT * FROM cascades_empty$$);
+
+-- planbuild.c: subquery in FROM
+SELECT cov_test(3812, 'C3812: subquery from', $$SELECT * FROM (SELECT id, val FROM cascades_test_j1 WHERE val > 10) AS sub$$);
+
+-- property.c: distinct pathkeys
+SELECT cov_test(3813, 'C3813: distinct', $$SELECT DISTINCT val FROM cascades_test_j1$$);
+SELECT cov_test(3814, 'C3814: distinct multi', $$SELECT DISTINCT id, val FROM cascades_test_j1 ORDER BY id$$);
+
+-- ============================================================
+-- Batch 39xx: rule.c + planbuild.c + task.c coverage push
+-- ============================================================
+
+-- rule.c PushDownPredicateAgg (F2): aggregate with filter pushdown
+SELECT cov_test(3901, 'C3901: agg filter pushdown 2', $$SELECT a, count(*) FROM cascades_test_t WHERE b > 10 GROUP BY a HAVING count(*) > 1$$);
+SELECT cov_test(3902, 'C3902: multi agg filter', $$SELECT a, count(*), max(b) FROM cascades_test_t WHERE name IS NOT NULL GROUP BY a HAVING max(b) > 10$$);
+
+-- rule.c subquery pushdown + decorrelation paths
+SELECT cov_test(3903, 'C3903: exists subquery', $$SELECT * FROM cascades_test_j1 t WHERE EXISTS (SELECT 1 FROM cascades_test_j2 s WHERE s.j1_id = t.id)$$);
+SELECT cov_test(3904, 'C3904: not exists', $$SELECT * FROM cascades_test_j1 t WHERE NOT EXISTS (SELECT 1 FROM cascades_test_j2 s WHERE s.j1_id = t.id AND s.val > 50)$$);
+SELECT cov_test(3905, 'C3905: in subquery', $$SELECT * FROM cascades_test_j1 WHERE id IN (SELECT j1_id FROM cascades_test_j2 WHERE val > 10)$$);
+SELECT cov_test(3906, 'C3906: not in subquery', $$SELECT * FROM cascades_test_j1 WHERE id NOT IN (SELECT j1_id FROM cascades_test_j2 WHERE val < 5)$$);
+
+-- rule.c JoinCommutativity + join order variants
+SELECT cov_test(3907, 'C3907: join commute 1', $$SELECT t1.val, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t2.j1_id = t1.id$$);
+SELECT cov_test(3908, 'C3908: join commute 2', $$SELECT t2.val, t1.val FROM cascades_test_j2 t2 JOIN cascades_test_j1 t1 ON t1.id = t2.j1_id$$);
+
+-- planbuild.c PHYSICAL_SORT + PHYSICAL_LIMIT via ORDER BY + LIMIT on scan
+SELECT cov_test(3909, 'C3909: sort limit scan', $$SELECT * FROM cascades_test_j1 ORDER BY val LIMIT 10 OFFSET 5$$);
+SELECT cov_test(3910, 'C3910: multi sort limit', $$SELECT id, val FROM cascades_test_j1 ORDER BY val DESC, id ASC LIMIT 20$$);
+
+-- planbuild.c PHYSICAL_HASHAGG + GROUP BY on base table
+SELECT cov_test(3911, 'C3911: hashagg base', $$SELECT a, count(*), sum(b) FROM cascades_test_t GROUP BY a$$);
+SELECT cov_test(3912, 'C3912: hashagg multi col', $$SELECT a, b, count(*) FROM cascades_test_t GROUP BY a, b$$);
+
+-- task.c ENFORCE_ENFORCE_PROPERTY: GROUP BY needs sorted input → Sort enforcer
+SELECT cov_test(3913, 'C3913: groupagg enforce', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a ORDER BY a$$);
+SELECT cov_test(3914, 'C3914: sort agg enforce', $$SELECT a, max(b) FROM cascades_test_t GROUP BY a ORDER BY max(b) DESC$$);
+
+-- rule.c + planbuild.c: nested aggregation (subquery with agg in FROM)
+SELECT cov_test(3915, 'C3915: nested agg', $$SELECT count(*) FROM (SELECT a, count(*) AS cnt FROM cascades_test_t GROUP BY a) AS sub$$);
+SELECT cov_test(3916, 'C3916: nested agg filter', $$SELECT max(cnt) FROM (SELECT a, count(*) AS cnt FROM cascades_test_t WHERE b > 5 GROUP BY a) AS sub$$);
+
+-- rule.c EliminateProject variants
+SELECT cov_test(3917, 'C3917: proj on proj', $$SELECT id, val FROM (SELECT * FROM cascades_test_j1 WHERE val > 10) AS sub$$);
+
+-- task.c ENFORCE_COMPUTE_COST: all upper-op types
+SELECT cov_test(3918, 'C3918: all upper ops', $$SELECT DISTINCT a, count(*) FROM cascades_test_t GROUP BY a ORDER BY a LIMIT 10$$);
+
+-- planbuild.c PHYSICAL_UNIQUE via DISTINCT
+SELECT cov_test(3919, 'C3919: unique enforce', $$SELECT DISTINCT val FROM cascades_test_j1 ORDER BY val$$);
+
+-- rule.c final cleanup rules
+SELECT cov_test(3920, 'C3920: cleanup rules', $$SELECT * FROM cascades_test_j1 WHERE id > (SELECT min(id) FROM cascades_test_j2)$$);
+
+-- Batch stress: multi-join + agg + sort
+SELECT cov_test(3921, 'C3921: stress combo', $$SELECT t1.a, count(*), sum(t2.val) FROM cascades_test_t t1 JOIN cascades_test_j1 t2 ON t1.a = t2.id GROUP BY t1.a HAVING count(*) > 1 ORDER BY t1.a$$);
+
+-- ============================================================
+-- Batch 40xx: Push to 80% — task ENFORCE_ENFORCE_PROPERTY,
+-- planbuild PHYSICAL_SORT/GROUPAGG, rule PushDown, rewrite combo
+-- ============================================================
+
+-- task.c ENFORCE_ENFORCE_PROPERTY: output NIL pathkeys + required non-NIL → enforcer
+-- HashAgg output has NIL pathkeys, ORDER BY requires sort_pathkeys
+SELECT cov_test(4001, 'C4001: enforcer agg sort', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a ORDER BY count(*) DESC$$);
+SELECT cov_test(4002, 'C4002: enforcer scan sort', $$SELECT * FROM cascades_test_t ORDER BY b$$);
+SELECT cov_test(4003, 'C4003: enforcer proj sort', $$SELECT a+b AS s FROM cascades_test_t ORDER BY s$$);
+
+-- planbuild.c PHYSICAL_GROUPAGG: force sorted input → GroupAgg path
+SET enable_hashagg = off;
+SELECT cov_test(4004, 'C4004: groupagg force', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a ORDER BY a$$);
+SET enable_hashagg = on;
+
+-- planbuild.c PHYSICAL_SORT multiple columns
+SELECT cov_test(4005, 'C4005: multi sort enforce', $$SELECT * FROM cascades_test_j1 ORDER BY val, id LIMIT 15$$);
+
+-- rule.c PushDownPredicateJoin deep: multi-level filter pushdown
+SELECT cov_test(4006, 'C4006: pushdown join deep', $$SELECT t1.val, t2.val, t3.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id WHERE t1.val > 10 AND t3.val < 20$$);
+
+-- rule.c PruneScanColumns + PruneSortColumns interaction
+SELECT cov_test(4007, 'C4007: prune scan sort', $$SELECT id FROM cascades_test_j1 ORDER BY id$$);
+
+-- rewrite.c combination rules: GP_PRUNE_COLUMNS + GP_PUSH_DOWN_PREDICATE
+SELECT cov_test(4008, 'C4008: combo prune push', $$SELECT id, val FROM cascades_test_j1 WHERE val > 10 ORDER BY id$$);
+
+-- task.c ENFORCE_COMPUTE_COST per-expression pruning (best_cost check)
+SELECT cov_test(4009, 'C4009: multi req prop', $$SELECT a, count(*), sum(b) FROM cascades_test_t GROUP BY a ORDER BY sum(b)$$);
+
+-- planbuild.c PHYSICAL_UNIQUE path
+SELECT cov_test(4010, 'C4010: unique sorted', $$SELECT DISTINCT val FROM cascades_test_j1 ORDER BY val LIMIT 5$$);
+
+-- planbuild.c PHYSICAL_LIMIT path
+SELECT cov_test(4011, 'C4011: physical limit', $$SELECT * FROM cascades_test_t ORDER BY id LIMIT 3 OFFSET 2$$);
+
+-- rule.c subquery decorrelation paths
+SELECT cov_test(4012, 'C4012: decorr exists', $$SELECT * FROM cascades_test_j1 t1 WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2 JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id WHERE t2.j1_id = t1.id)$$);
+SELECT cov_test(4013, 'C4013: decorr scalar', $$SELECT id, (SELECT max(val) FROM cascades_test_j2 WHERE j1_id = t1.id) + 1 FROM cascades_test_j1 t1$$);
+
+-- memo.c: complex group merge with self-join + aggregate
+SELECT cov_test(4014, 'C4014: merge self agg', $$SELECT t1.a, count(*), max(t2.b) FROM cascades_test_t t1 JOIN cascades_test_t t2 ON t1.a = t2.a GROUP BY t1.a$$);
+
+-- property.c: required_outer on LEFT JOIN
+SELECT cov_test(4015, 'C4015: left outer filter', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id AND t1.val > 20$$);
+
+-- rewrite.c: all rewrite stages together
+SELECT cov_test(4016, 'C4016: full pipeline combo', $$SELECT a, count(*) AS c, sum(b) AS s FROM cascades_test_t WHERE b IS NOT NULL GROUP BY a HAVING count(*) > 2 ORDER BY s DESC LIMIT 5$$);
+
+-- task.c: multi-property ENFORCE_AND_COST
+SELECT cov_test(4017, 'C4017: multi prop cost', $$SELECT DISTINCT a, count(*) FROM cascades_test_t GROUP BY a ORDER BY count(*) DESC LIMIT 3$$);
+
+-- planbuild.c: all upper ops in one query
+SELECT cov_test(4018, 'C4018: all upper ops 2', $$SELECT a, count(*) FROM cascades_test_t WHERE b > 10 GROUP BY a HAVING count(*) > 1 ORDER BY a LIMIT 10$$);
+
+-- rule.c: nested EXISTS (correlated x2)
+SELECT cov_test(4019, 'C4019: nested exists', $$SELECT * FROM cascades_test_j1 t1 WHERE EXISTS (SELECT 1 FROM cascades_test_j2 t2 WHERE t2.j1_id = t1.id AND EXISTS (SELECT 1 FROM cascades_test_j3 t3 WHERE t3.j2_id = t2.id))$$);
+
+-- postopt.c: NestLoop Materialize edge cases
+SET enable_hashjoin = off; SET enable_mergejoin = off;
+SELECT cov_test(4020, 'C4020: nl materialize', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id < t2.j1_id$$);
+SET enable_hashjoin = on; SET enable_mergejoin = on;
+
+-- Batch 41xx: Final push
+SELECT cov_test(4101, 'C4101: bitmap or push', $$SELECT * FROM cascades_test_t WHERE a < 10 OR a > 90$$);
+SELECT cov_test(4102, 'C4102: index only', $$SELECT id FROM cascades_test_t ORDER BY id$$);
+SELECT cov_test(4103, 'C4103: cte subquery', $$WITH sub AS (SELECT a, count(*) FROM cascades_test_t GROUP BY a) SELECT * FROM sub WHERE count > 1$$);
+SELECT cov_test(4104, 'C4104: union distinct', $$SELECT val FROM cascades_test_j1 UNION SELECT val FROM cascades_test_j2$$);
+
+-- Batch 42xx: Column pruning + empty scan (B1-B5 coverage push)
+-- Wide table with unreferenced columns for B1 prune path
+DROP TABLE IF EXISTS cascades_test_wide;
+CREATE TABLE cascades_test_wide (
+    id INTEGER PRIMARY KEY,
+    c1 INTEGER, c2 INTEGER, c3 INTEGER, c4 INTEGER,
+    c5 INTEGER, c6 INTEGER, c7 INTEGER, c8 INTEGER
+);
+INSERT INTO cascades_test_wide SELECT i, i, i*2, i*3, i*4, i*5, i*6, i*7, i*8 FROM generate_series(1,100) i;
+ANALYZE cascades_test_wide;
+
+-- PruneEmptyScan: empty table
+SELECT cov_test(4201, 'C4201: prune empty scan', $$SELECT count(*) FROM cascades_test_empty$$);
+
+-- B1: select subset from wide table (c3-c8 unreferenced → prunable)
+SELECT cov_test(4202, 'C4202: prune scan cols subset', $$SELECT id, c1 FROM cascades_test_wide WHERE c2 > 10$$);
+
+-- B1 + join: select subset in join query (extra columns prunable)
+SELECT cov_test(4203, 'C4203: prune scan cols join', $$SELECT w.id, w.c1, j.val FROM cascades_test_wide w JOIN cascades_test_j1 j ON w.c2 = j.id WHERE w.c1 > 50$$);
+
+-- B1 + agg: select subset with aggregation
+SELECT cov_test(4204, 'C4204: prune scan agg', $$SELECT c1, count(*) FROM cascades_test_wide WHERE c2 > 0 GROUP BY c1 ORDER BY c1 LIMIT 5$$);
+
+-- B1: select only 2 of 9 columns (max pruning opportunity)
+SELECT cov_test(4205, 'C4205: prune scan max', $$SELECT id FROM cascades_test_wide WHERE c1 > 50$$);
+
+-- B2/B4 propagation: multi-table subset join
+SELECT cov_test(4206, 'C4206: prune join cols', $$SELECT w.c1, w.c2, j.val FROM cascades_test_wide w JOIN cascades_test_j2 j ON w.c3 = j.j1_id WHERE w.c4 > 0$$);
+
+-- PruneEmptyScan: empty subquery
+SELECT cov_test(4207, 'C4207: prune empty subq', $$SELECT * FROM cascades_test_wide WHERE id IN (SELECT id FROM cascades_test_empty)$$);
+
+-- B5: sort only on key column
+SELECT cov_test(4208, 'C4208: prune sort cols', $$SELECT id, c1 FROM cascades_test_wide ORDER BY c1$$);
+
 \echo ''
 \echo '========================================'
 \echo '  FINAL EXTENDED COVERAGE TEST SUMMARY'

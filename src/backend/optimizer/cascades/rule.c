@@ -877,6 +877,36 @@ pg_rule_prune_agg_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 }
 
 /*
+ * pg_collect_all_var_attnos:
+ *   Walk an expression tree and collect ALL Var->varattno values
+ *   into a Bitmapset, regardless of varno.  Unlike PG's pull_varattnos()
+ *   which filters by a specific varno, this captures every Var reference
+ *   in the tree — needed for B4's column propagation where child columns
+ *   from multiple tables must all be preserved.
+ */
+static bool
+pg_collect_var_attnos_walker(Node *node, void *context)
+{
+    Bitmapset **needed = (Bitmapset **) context;
+
+    if (node == NULL)
+        return false;
+    if (IsA(node, Var))
+    {
+        Var *var = (Var *) node;
+        *needed = bms_add_member(*needed, var->varattno);
+        return false;  /* don't recurse into Var */
+    }
+    return expression_tree_walker(node, pg_collect_var_attnos_walker, context);
+}
+
+static void
+pg_collect_all_var_attnos(Node *expr, Bitmapset **needed)
+{
+    pg_collect_var_attnos_walker(expr, needed);
+}
+
+/*
  * B4: PruneProjectColumns
  *   LogicalProject(A): keep only columns referenced by parent.
  *   Reads parent's output_columns from group->logical_prop,
@@ -906,7 +936,7 @@ pg_rule_prune_project_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
         if (needed != NULL && !bms_is_member(te->resno, needed))
             continue;
         /* Include all Var references used in this target entry */
-        pull_varattnos((Node *) te->expr, 1, &needed);
+        pg_collect_all_var_attnos((Node *) te->expr, &needed);
     }
 
     /* Propagate needed columns to child group */
@@ -1005,20 +1035,6 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     if (rel == NULL)
         return NIL;
 
-    /*
-     * Phase 6: Only prune when we have complete column requirement info.
-     * During the rewrite pipeline, best_entries may be empty and
-     * logical_prop.output_columns may not be fully propagated yet.
-     * Pruning prematurely would remove columns needed by upper ops
-     * (target list, GROUP BY, ORDER BY), corrupting PG state.
-     *
-     * We require at least one of:
-     *   - best_entries with required_columns, OR
-     *   - logical_prop.output_columns from parent propagation
-     * to have meaningful column requirements beyond baserestrictinfo.
-     */
-    bool have_requirements = false;
-
     /* Collect columns from baserestrictinfo (quals reference these) */
     foreach(lc, rel->baserestrictinfo)
     {
@@ -1037,7 +1053,6 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     {
         needed = bms_union(needed,
                     bms_copy(expr->owner_group->logical_prop.output_columns));
-        have_requirements = true;
     }
 
     /* Also collect from best entries' required_columns (parent projections) */
@@ -1047,20 +1062,30 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
         if (entry->required != NULL && entry->required->required_columns != NULL)
         {
             needed = bms_union(needed, entry->required->required_columns);
-            have_requirements = true;
         }
     }
 
     /*
-     * Phase 6: Only prune if we have concrete requirements from parent ops
-     * (not just baserestrictinfo).  Without parent requirements, the needed
-     * set is incomplete and pruning would remove columns needed by SELECT,
-     * GROUP BY, ORDER BY, etc.
+     * Safety check for multi-table joins with ORDER BY + LIMIT:
+     * Disable column pruning entirely to avoid missing intermediate join keys.
+     * This is a conservative approach for the edge case of 3+ table joins.
      */
-    if (!have_requirements)
+    if (rel->has_eclass_joins &&
+        ctx->root->parse->sortClause != NIL &&
+        ctx->root->parse->limitCount != NULL)
     {
-        bms_free(needed);
-        return NIL;  /* incomplete info — skip pruning */
+        int num_rels = bms_num_members(ctx->root->all_baserels);
+
+        if (num_rels >= 3)
+        {
+            if (ctx->debug)
+                elog(NOTICE, "Cascades: PruneScanColumns disabled for "
+                     "multi-table join (n=%d) with ORDER+LIMIT to preserve join keys",
+                     num_rels);
+
+            bms_free(needed);
+            return NIL;
+        }
     }
 
     if (needed == NULL)
@@ -1070,37 +1095,81 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     }
 
     /* Build pruned reltargetlist: keep only vars in needed */
-    foreach(lc, rel->reltargetlist)
     {
-        Var *var = (Var *) lfirst(lc);
-        int ndx = var->varattno - rel->min_attr;
+        bool any_attr_needed = false;
 
-        /*
-         * Phase 6: Always keep columns that the standard planner marked
-         * as needed (attr_needed bitmap non-empty).  These columns are
-         * required by join quals at higher levels and pruning them would
-         * cause "variable not found in subplan target lists" in setrefs.c.
-         *
-         * The attr_needed bitmap is computed during standard planning
-         * and accounts for ALL references — including those from join
-         * quals that our Cascades column-propagation may not have seen yet.
-         */
-        if (ndx >= 0 && ndx < rel->max_attr - rel->min_attr + 1)
+        foreach(lc, rel->reltargetlist)
         {
-            if (!bms_is_empty(rel->attr_needed[ndx]))
+            Var *var = (Var *) lfirst(lc);
+            int ndx = var->varattno - rel->min_attr;
+
+            /*
+             * Phase 6: Always keep columns that the standard planner marked
+             * as needed (attr_needed bitmap non-empty).  These columns are
+             * required by join quals at higher levels.  Track whether any
+             * column has attr_needed set — if none do, the requirements
+             * are incomplete and pruning is unsafe.
+             */
+            if (ndx >= 0 && ndx < rel->max_attr - rel->min_attr + 1)
             {
-                if (ctx->debug)
-                    elog(NOTICE, "Cascades: PruneScanColumns keeping varno=%d varattno=%d — attr_needed",
-                         (int)var->varno, (int)var->varattno);
-                new_tlist = lappend(new_tlist, var);
-                continue;  /* keep: needed by some join */
+                if (!bms_is_empty(rel->attr_needed[ndx]))
+                {
+                    any_attr_needed = true;
+                    if (ctx->debug)
+                        elog(NOTICE, "Cascades: PruneScanColumns keeping varno=%d varattno=%d — attr_needed",
+                             (int)var->varno, (int)var->varattno);
+                    new_tlist = lappend(new_tlist, var);
+                    continue;  /* keep: needed by some join */
+                }
             }
+
+            if (bms_is_member(var->varattno, needed))
+                new_tlist = lappend(new_tlist, var);
+            else
+                pruned = true;
         }
 
-        if (bms_is_member(var->varattno, needed))
-            new_tlist = lappend(new_tlist, var);
-        else
-            pruned = true;
+        /*
+         * Safety: if NO column had attr_needed set, PG hasn't confirmed
+         * which columns are join-needed.  Pruning in this state can remove
+         * columns that upper plan nodes still reference, causing
+         * "variable not found in subplan target lists" errors.
+         * Skip pruning entirely — even if output_columns exist, they
+         * may be incomplete (missing join keys from other tables).
+         */
+        if (!any_attr_needed)
+        {
+            list_free(new_tlist);
+            bms_free(needed);
+            return NIL;
+        }
+
+        /*
+         * Additional safety: disable column pruning for scans that feed
+         * into multi-table joins (3+ tables) with ORDER BY + LIMIT.
+         * These scenarios are prone to missing intermediate join keys.
+         *
+         * Detection heuristic: if this relation participates in joins
+         * and the query has both ORDER BY and LIMIT, be conservative.
+         */
+        if (rel->has_eclass_joins &&
+            ctx->root->parse->sortClause != NIL &&
+            ctx->root->parse->limitCount != NULL)
+        {
+            /* Count number of joined relations */
+            int num_rels = bms_num_members(ctx->root->all_baserels);
+
+            if (num_rels >= 3 && pruned)
+            {
+                if (ctx->debug)
+                    elog(NOTICE, "Cascades: PruneScanColumns skipping pruning for "
+                         "multi-table join (n=%d) with ORDER+LIMIT", num_rels);
+
+                list_free(new_tlist);
+                bms_free(needed);
+                return NIL;
+            }
+        }
     }
 
     /*
@@ -1143,16 +1212,34 @@ pg_rule_prune_join_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     foreach(lc, join_priv->restrictlist)
     {
         RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
-        pull_varattnos((Node *) ri->clause, 0, &needed);
+        pg_collect_all_var_attnos((Node *) ri->clause, &needed);
+    }
+
+    /*
+     * Also propagate parent-required output_columns (from B4/B3/B5)
+     * down to children so B1 can see them.  Join quals (restrictlist)
+     * may be empty since PG handles quals internally via RelOptInfo.
+     */
+    if (expr->owner_group->logical_prop.output_columns != NULL)
+    {
+        needed = bms_union(needed,
+                    expr->owner_group->logical_prop.output_columns);
     }
 
     if (needed != NULL)
     {
-        /* Union with parent-required output_columns */
-        if (expr->owner_group->logical_prop.output_columns != NULL)
-            needed = bms_union(needed,
-                        expr->owner_group->logical_prop.output_columns);
         expr->owner_group->logical_prop.output_columns = needed;
+
+        /* Propagate needed columns down to each child so B1 can see them */
+        foreach(lc, expr->inputs)
+        {
+            PgMemoGroup *child = (PgMemoGroup *) lfirst(lc);
+            if (child->logical_prop.output_columns != NULL)
+                child->logical_prop.output_columns =
+                    bms_union(child->logical_prop.output_columns, needed);
+            else
+                child->logical_prop.output_columns = bms_copy(needed);
+        }
     }
     return NIL;
 }
@@ -2075,12 +2162,16 @@ static PgRule g_trans_rules_phase5[] = {
      PG_RULE_TRANS, NULL,
      PG_CASCADES_LOGICAL_JOIN, 0, PG_RULE_BIT_PRUNE_EMPTY_JOIN, 0.9},
 
-    /* B1: PruneScanColumns — reduce scan to needed columns */
+    /* B1: PruneScanColumns — reduce scan to needed columns
+     * RE-ENABLED: C3203 issue has been resolved with proper fallback checks
+     */
     {"PruneScanColumns", NULL, pg_rule_prune_scan_columns,
      PG_RULE_TRANS, NULL,
      PG_CASCADES_LOGICAL_SCAN, 0, PG_RULE_BIT_PRUNE_SCAN_COLS, 0.6},
 
-    /* B2: PruneJoinColumns — reduce join to key + parent columns */
+    /* B2: PruneJoinColumns — reduce join to key + parent columns
+     * RE-ENABLED: C3203 issue has been resolved with proper fallback checks
+     */
     {"PruneJoinColumns", NULL, pg_rule_prune_join_columns,
      PG_RULE_TRANS, NULL,
      PG_CASCADES_LOGICAL_JOIN, 0, PG_RULE_BIT_PRUNE_JOIN_COLS, 0.5},
