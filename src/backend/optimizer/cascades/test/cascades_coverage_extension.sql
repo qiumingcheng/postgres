@@ -899,6 +899,29 @@ SELECT cov_test(3612, 'C3612: group agg sorted', $$SELECT a, count(*) FROM casca
 -- planbuild.c: LOGICAL_PROJECT over filter
 SELECT cov_test(3613, 'C3613: proj filter', $$SELECT a+1, b*2 FROM cascades_test_t WHERE a > 20$$);
 
+-- ============================================================================
+-- Part N+7: ENFORCE_ENFORCE_PROPERTY + pushdown rules trigger
+-- ============================================================================
+\echo '=== Part N+7: enforcer + pushdown trigger ==='
+
+-- task.c ENFORCE_ENFORCE_PROPERTY: PROJECT output NIL pathkeys + ORDER BY → sort enforcer
+SELECT cov_test(3701, 'C3701: project order enforcer', $$SELECT a*2 AS x FROM cascades_test_t ORDER BY a$$);
+-- task.c ENFORCE_ENFORCE_PROPERTY: HASHAGG output NIL pathkeys + ORDER BY → enforcer
+SELECT cov_test(3702, 'C3702: agg order enforcer', $$SELECT a, count(*) AS cnt FROM cascades_test_t GROUP BY a ORDER BY cnt$$);
+-- rule.c PushDownPredicateProject: Filter(Project(A)) → Project(Filter(A))
+SELECT cov_test(3703, 'C3703: pushdown proj agg', $$SELECT a*2, count(*) FROM cascades_test_t WHERE b > 5 GROUP BY a$$);
+-- rule.c PushDownPredicateAgg: Filter(Agg(A)) → Agg(Filter(A)) via having pushdown
+SELECT cov_test(3704, 'C3704: pushdown agg filter', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a HAVING a > 10 AND count(*) > 1$$);
+-- rule.c PushDownPredicateJoin: Filter(Join(A,B)) → Join(Filter(A), Filter(B))
+SELECT cov_test(3705, 'C3705: pushdown join filter', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t1.val > 10 AND t2.val > 10$$);
+
+-- planbuild.c PHYSICAL_SORT via enforcer: Sort enforcer creates Sort best entry in root
+SELECT cov_test(3706, 'C3706: sort enforce root', $$SELECT * FROM cascades_test_j1 ORDER BY id, val$$);
+-- planbuild.c PHYSICAL_PROJECT path
+SELECT cov_test(3707, 'C3707: project only', $$SELECT id*3, val+5 FROM cascades_test_j1$$);
+-- planbuild.c LOGICAL_FILTER + LOGICAL_JOIN combo
+SELECT cov_test(3708, 'C3708: filter join combo', $$SELECT t1.val, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t1.val BETWEEN 5 AND 15$$);
+
 \echo ''
 \echo '========================================'
 \echo '  FINAL EXTENDED COVERAGE TEST SUMMARY'
