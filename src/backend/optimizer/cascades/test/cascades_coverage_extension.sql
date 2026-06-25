@@ -863,6 +863,42 @@ SELECT cov_test(3513, 'C3513: having agg', $$SELECT a, count(*) FROM cascades_te
 -- planbuild: full pipeline (scan→filter→join→sort→limit)
 SELECT cov_test(3514, 'C3514: full pipeline 2', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t1.val > 10 ORDER BY t2.val LIMIT 5$$);
 
+-- ============================================================================
+-- Part N+6: rule.c predicate pushdown + property + memo coverage
+-- ============================================================================
+\echo '=== Part N+6: rule pushdown / property / memo ==='
+
+-- rule.c: predicate pushdown through project (PushDownPredicateProject)
+SELECT cov_test(3601, 'C3601: pushdown proj', $$SELECT a*2 AS x, b FROM cascades_test_t WHERE b > 20$$);
+-- rule.c: predicate pushdown through agg
+SELECT cov_test(3602, 'C3602: pushdown agg having', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a HAVING count(*) > 1 AND a > 10$$);
+-- rule.c: predicate pushdown through join
+SELECT cov_test(3603, 'C3603: pushdown join on', $$SELECT t1.id, t2.val FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id AND t1.val > 5$$);
+-- rule.c: predicate pushdown through scan (filter on base table)
+SELECT cov_test(3604, 'C3604: pushdown scan filter', $$SELECT * FROM cascades_test_t WHERE a > 10 AND b < 50$$);
+
+-- property.c: derive child properties for different op types
+SELECT cov_test(3605, 'C3605: agg distinct combo', $$SELECT count(DISTINCT a), sum(b) FROM cascades_test_t$$);
+-- property.c: required_outer with parameterized path
+SELECT cov_test(3606, 'C3606: outer join filter', $$SELECT t1.val, t2.val FROM cascades_test_j1 t1 LEFT JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t2.val IS NULL$$);
+-- property.c: group_pathkeys non-NIL
+SELECT cov_test(3607, 'C3607: group order', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a ORDER BY a DESC$$);
+
+-- memo.c: group relids derivation, hash dedup
+SELECT cov_test(3608, 'C3608: multi self join', $$SELECT t1.id, t2.id, t3.id FROM cascades_test_t t1 JOIN cascades_test_t t2 ON t1.a = t2.a JOIN cascades_test_t t3 ON t2.b = t3.b$$);
+-- memo.c: empty result set
+SELECT cov_test(3609, 'C3609: empty join result', $$SELECT t1.val FROM cascades_test_j1 t1 JOIN cascades_empty e ON t1.id = e.id$$);
+
+-- rewrite.c: multi-stage pipeline
+SELECT cov_test(3610, 'C3610: multi rewrite', $$SELECT a, count(*) FROM cascades_test_t WHERE b > 10 GROUP BY a HAVING count(*) > 2 ORDER BY a LIMIT 3$$);
+-- rewrite.c: aggregate pushdown
+SELECT cov_test(3611, 'C3611: agg push subq', $$SELECT * FROM (SELECT a, max(b) AS mb FROM cascades_test_t GROUP BY a) sub WHERE mb > 50$$);
+
+-- planbuild.c: PHYSICAL_GROUPAGG path
+SELECT cov_test(3612, 'C3612: group agg sorted', $$SELECT a, count(*) FROM cascades_test_t GROUP BY a$$);
+-- planbuild.c: LOGICAL_PROJECT over filter
+SELECT cov_test(3613, 'C3613: proj filter', $$SELECT a+1, b*2 FROM cascades_test_t WHERE a > 20$$);
+
 \echo ''
 \echo '========================================'
 \echo '  FINAL EXTENDED COVERAGE TEST SUMMARY'
