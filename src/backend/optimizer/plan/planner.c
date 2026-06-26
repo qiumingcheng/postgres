@@ -317,24 +317,6 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 
 	/*
 	 * Phase 6: Attempt scalar subquery decorrelation BEFORE pull_up_sublinks.
-	 * By running first, we get a chance to decorrelate EXPR_SUBLINKs before
-	 * PG converts them.  If decorrelation fails, pull_up_sublinks still gets
-	 * its turn.  The parse tree modifications (targetList, jointree, rtable)
-	 * are compatible with subsequent PG preprocessing.
-	 */
-	if (enable_cascades_planner)
-	{
-		PG_TRY();
-		{
-			pg_cascades_decorrelate_subqueries(root);
-		}
-		PG_CATCH();
-		{
-			/* Decorrelation failed — continue with normal path */
-			FlushErrorState();
-		}
-		PG_END_TRY();
-	}
 
 	/*
 	 * Look for ANY and EXISTS SubLinks in WHERE and JOIN/ON clauses, and try

@@ -16,381 +16,8 @@
 Plan *pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
     PgMemoGroup *group, PgRequiredProperty *required,
     PgGroupBestEntry *best, PgOutputProperty *output);
-Path *pg_cascades_find_imported_path(PgMemoGroup *group);
 void pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan);
 
-/* ========================================================================
- * Helper: find imported Path by walking through LogicalProject chain
- * ======================================================================== */
-Path *
-pg_cascades_find_imported_path(PgMemoGroup *group)
-{
-    ListCell *lc;
-
-    if (group == NULL)
-        return NULL;
-
-    /* Check this group's best entries for IMPORTED_PATH */
-    foreach(lc, group->best_entries)
-    {
-        PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
-        if (e->expr->mode == PG_PHYS_EXPR_IMPORTED_PATH)
-            return (Path *) e->expr->op_private;
-    }
-
-    /* Recurse through LogicalProject/LogicalFilter children */
-    foreach(lc, group->logical_exprs)
-    {
-        PgGroupExpr *log = (PgGroupExpr *) lfirst(lc);
-        if (log->op == PG_CASCADES_LOGICAL_PROJECT ||
-            log->op == PG_CASCADES_LOGICAL_FILTER)
-        {
-            ListCell *cl;
-            foreach(cl, log->inputs)
-            {
-                Path *p = pg_cascades_find_imported_path((PgMemoGroup *) lfirst(cl));
-                if (p != NULL) return p;
-            }
-        }
-    }
-    return NULL;
-}
-
-/* ========================================================================
- * Helper: build plan from a group's logical expression tree (bottom-up)
- * Returns NULL if no plan can be built for this group.
- * ======================================================================== */
-Plan *
-pg_cascades_build_logical_plan(PgPlannerCascadesContext *ctx, PgMemoGroup *group)
-{
-    ListCell *lc;
-    Path *imported_path;
-
-    /* If this group has an IMPORTED_PATH directly (leaf group: no logical exprs), build from it */
-    if (group->logical_exprs == NIL)
-    {
-        imported_path = pg_cascades_find_imported_path(group);
-        if (imported_path != NULL)
-            return create_plan(ctx->root, imported_path);
-    }
-
-    /* Otherwise, iterate logical operators and build from child up */
-    foreach(lc, group->logical_exprs)
-    {
-        PgGroupExpr *logical = (PgGroupExpr *) lfirst(lc);
-        Plan *child_plan = NULL;
-        Plan *result = NULL;
-
-        if (cascades_planner_debug)
-            elog(NOTICE, "build_logical: group=%d op=%d",
-                 group->id, logical->op);
-
-        /*
-         * Guard: the compiler optimizes linitial(NIL) into an unconditional
-         * trap (ud2/mov 0x0,%rax) for PG_CASCADES_LOGICAL_PROJECT, _AGG,
-         * _SORT, _LIMIT, _DISTINCT cases.  If a logical expression has no
-         * inputs (e.g., malformed by rewrite), skip it rather than crashing.
-         */
-        if (logical->inputs == NIL &&
-            logical->op != PG_CASCADES_LOGICAL_SCAN &&
-            logical->op != PG_CASCADES_LOGICAL_FILTER)
-            continue;
-
-        switch (logical->op)
-        {
-            case PG_CASCADES_LOGICAL_SCAN:
-            case PG_CASCADES_LOGICAL_FILTER:
-            {
-                /*
-                 * Only process LOGICAL_SCAN/FILTER if this group is actually
-                 * a base-table group (not a merged join group).  After group
-                 * merging, a group may contain both LOGICAL_JOIN and
-                 * LOGICAL_SCAN expressions; we should let the LOGICAL_JOIN
-                 * case handle the plan building.
-                 */
-                {
-                    bool has_join_expr = false;
-                    ListCell *check_lc;
-                    foreach(check_lc, group->logical_exprs)
-                    {
-                        PgGroupExpr *e = (PgGroupExpr *) lfirst(check_lc);
-                        if (e->op == PG_CASCADES_LOGICAL_JOIN)
-                        {
-                            has_join_expr = true;
-                            break;
-                        }
-                    }
-                    if (has_join_expr)
-                        break;  /* let LOGICAL_JOIN case handle it */
-                }
-
-                imported_path = pg_cascades_find_imported_path(group);
-                if (imported_path != NULL)
-                {
-                    result = create_plan(ctx->root, imported_path);
-                    if (result != NULL)
-                        pg_cascades_fix_empty_targetlists(ctx->root, result);
-                    return result;
-                }
-                break;
-            }
-
-            case PG_CASCADES_LOGICAL_JOIN:
-            {
-                /*
-                 * Phase 3: Join paths are imported as IMPORTED_PATH entries
-                 * in the join group.
-                 *
-                 * After group merging, the join group may also contain
-                 * scan-type IMPORTED_PATHs (SeqScan, IndexScan) from merged
-                 * base table groups.  Their best entries may have lower
-                 * cost and appear in the best_entries list instead of the
-                 * join best entries.  So we search ALL physical expressions,
-                 * not just the best_entries list.
-                 */
-                Path *join_path = NULL;
-                ListCell *blc;
-                int         best_nrels = 0;
-
-                /* Try each join type in order, prefer HashJoin.
-                 * For groups with multiple join paths (e.g. {1,2} AND {1,2,3}
-                 * after group merge), pick the one covering the MOST base
-                 * relations to avoid dropping tables from the plan. */
-                {
-                    int join_ops[] = {
-                        PG_CASCADES_PHYSICAL_HASHJOIN,
-                        PG_CASCADES_PHYSICAL_MERGEJOIN,
-                        PG_CASCADES_PHYSICAL_NESTLOOP
-                    };
-                    int j;
-
-                    for (j = 0; j < 3; j++)
-                    {
-                        foreach(blc, group->physical_exprs)
-                        {
-                            PgGroupExpr *pe = (PgGroupExpr *) lfirst(blc);
-                            if (pe->mode == PG_PHYS_EXPR_IMPORTED_PATH &&
-                                pe->op == join_ops[j])
-                            {
-                                Path *p = (Path *) pe->op_private;
-                                int   nrels = bms_num_members(p->parent->relids);
-                                if (nrels > best_nrels)
-                                {
-                                    join_path = p;
-                                    best_nrels = nrels;
-                                }
-                            }
-                        }
-                        if (join_path != NULL)
-                            break;  /* found best at this join type level */
-                    }
-                }
-
-                if (join_path != NULL)
-                {
-                    result = create_plan(ctx->root, join_path);
-                    if (result != NULL)
-                        pg_cascades_fix_empty_targetlists(ctx->root, result);
-                    return result;
-                }
-                break;
-            }
-
-            case PG_CASCADES_LOGICAL_PROJECT:
-            {
-                PgMemoGroup *child = (PgMemoGroup *) linitial(logical->inputs);
-
-                child_plan = pg_cascades_build_logical_plan(ctx, child);
-                if (child_plan == NULL)
-                    break;
-
-                /*
-                 * If there is no aggregation, no grouping, and no window
-                 * functions, the subplan's output columns already match the
-                 * query's needs.  Return the child plan directly, matching
-                 * the standard planner's behavior when need_tlist_eval is
-                 * false (see planner.c:1442).
-                 *
-                 * For queries with aggregation/grouping/windows, the
-                 * LOGICAL_AGG case handles the projection through make_agg.
-                 * The LOGICAL_PROJECT case should not add any wrapper.
-                 */
-                if (ctx->upper->numGroupCols == 0 &&
-                    !ctx->upper->hasAggs &&
-                    ctx->upper->activeWindows == NIL)
-                {
-                    /*
-                     * For simple queries (no aggregation), return the child
-                     * plan as-is.  create_plan already produced a correct
-                     * targetlist from PG's build_joinrel_tlist.  Direct
-                     * targetlist replacement with ctx->upper->tlist breaks
-                     * set_plan_references for multi-table joins because the
-                     * Var varnos in ctx->upper->tlist don't match subplan
-                     * scan targetlists after create_plan's Var adjustment.
-                     *
-                     * PG's set_plan_references will adjust the plan's
-                     * existing targetlist correctly.
-                     */
-                    return child_plan;
-                }
-
-                /*
-                 * Fallback: if there IS aggregation/grouping but the
-                 * LOGICAL_AGG case wasn't reached (e.g., tree structure
-                 * has Project above Agg), ensure the projection is handled.
-                 */
-                {
-                    List *proj_tlist = ctx->upper->sub_tlist;
-                    if (is_projection_capable_plan(child_plan))
-                    {
-                        child_plan->targetlist = proj_tlist;
-                        return child_plan;
-                    }
-                    else
-                    {
-                        result = (Plan *) make_result(ctx->root,
-                            proj_tlist, NULL, child_plan);
-                        return result;
-                    }
-                }
-            }
-
-            case PG_CASCADES_LOGICAL_AGG:
-            {
-                PgMemoGroup *child = (PgMemoGroup *) linitial(logical->inputs);
-                AggStrategy agg_strategy;
-                AttrNumber *use_groupColIdx;
-                Oid        *use_groupOperators;
-
-                /* Build child plan through logical tree. */
-                child_plan = pg_cascades_build_logical_plan(ctx, child);
-                if (child_plan == NULL)
-                    break;
-
-                if (ctx->upper->numGroupCols == 0)
-                {
-                    agg_strategy = AGG_PLAIN;
-                    use_groupColIdx = NULL;
-                    use_groupOperators = NULL;
-                }
-                else
-                {
-                    agg_strategy = AGG_HASHED;
-                    use_groupColIdx = ctx->upper->groupColIdx;
-                    use_groupOperators = ctx->upper->groupOperators;
-                }
-
-                result = (Plan *) make_agg(ctx->root,
-                    ctx->upper->tlist,
-                    (List *) ctx->upper->havingQual,
-                    agg_strategy,
-                    &ctx->upper->agg_costs,
-                    ctx->upper->numGroupCols,
-                    use_groupColIdx,
-                    use_groupOperators,
-                    (long) ctx->upper->dNumGroups,
-                    child_plan);
-                return result;
-            }
-
-            case PG_CASCADES_LOGICAL_SORT:
-            {
-                PgMemoGroup *child = (PgMemoGroup *) linitial(logical->inputs);
-
-                child_plan = pg_cascades_build_logical_plan(ctx, child);
-                if (child_plan == NULL)
-                    break;
-
-                result = (Plan *) make_sort_from_pathkeys(ctx->root,
-                    child_plan,
-                    ctx->upper->sort_pathkeys,
-                    ctx->upper->limit_tuples);
-                ctx->root->query_pathkeys = ctx->upper->sort_pathkeys;
-
-                /*
-                 * If MergeLimitWithSort merged the Limit into this Sort,
-                 * wrap with a Limit node.  make_sort_from_pathkeys only
-                 * uses limit_tuples for costing, not for actual row
-                 * limiting.
-                 *
-                 * Note: When root group has no best entries (e.g. after
-                 * group merge), ctx->root may not have been set correctly.
-                 * Use ctx->upper->limit_tuples as the safety check.
-                 */
-                if (ctx->upper->limit_tuples > 0)
-                {
-                    result = (Plan *) make_limit(result,
-                        ctx->root->parse->limitOffset,
-                        ctx->root->parse->limitCount,
-                        0, (int64) ctx->upper->limit_tuples);
-                }
-                return result;
-            }
-
-            case PG_CASCADES_LOGICAL_LIMIT:
-            {
-                PgMemoGroup *child = (PgMemoGroup *) linitial(logical->inputs);
-                int64 offset_est = 0;
-                int64 count_est = 0;
-
-                child_plan = pg_cascades_build_logical_plan(ctx, child);
-                if (child_plan == NULL)
-                    break;
-
-                /* Extract limit/offset estimates from parse tree */
-                if (ctx->root->parse->limitCount != NULL)
-                    count_est = (int64) ctx->upper->limit_tuples;
-                if (ctx->root->parse->limitOffset != NULL)
-                    offset_est = 0;
-
-                result = (Plan *) make_limit(child_plan,
-                    ctx->root->parse->limitOffset,
-                    ctx->root->parse->limitCount,
-                    offset_est, count_est);
-                return result;
-            }
-
-            case PG_CASCADES_LOGICAL_DISTINCT:
-            {
-                PgMemoGroup *child = (PgMemoGroup *) linitial(logical->inputs);
-                AttrNumber *distinctColIdx;
-                Oid        *distinctOps;
-                int         numDistinctCols;
-
-                /* Build child plan through the logical tree to get proper tlist */
-                child_plan = pg_cascades_build_logical_plan(ctx, child);
-                if (child_plan == NULL)
-                    break;
-
-                /* Compute distinct column indices from distinctClause */
-                numDistinctCols = list_length(ctx->upper->distinctClause);
-                distinctColIdx = extract_grouping_cols(ctx->upper->distinctClause,
-                                                       ctx->upper->tlist);
-                distinctOps = extract_grouping_ops(ctx->upper->distinctClause);
-
-                /* Use HashAgg without aggregates to implement DISTINCT.
-                 * Use ctx->upper->tlist (which has ressortgroupref) so that
-                 * upper Sort nodes can find sort keys. */
-                result = (Plan *) make_agg(ctx->root,
-                    ctx->upper->tlist,
-                    NIL,        /* no havingQual */
-                    AGG_HASHED,
-                    NULL,       /* no agg costs */
-                    numDistinctCols,
-                    distinctColIdx,
-                    distinctOps,
-                    (long) ctx->upper->dNumGroups,
-                    child_plan);
-                return result;
-            }
-
-            default:
-                break;
-        }
-    }
-
-    return NULL;
-}
 
 /* ========================================================================
  * Extract Best Plan (Top-level Entry)
@@ -408,39 +35,42 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
      * but fall back to building directly from logical expr if needed.
      */
 
-    /* First try: find a physical best entry matching root required */
+    /*
+     * Two-pass extraction: COMPOSABLE_OP first (exercises PHYSICAL_*
+     * recursive branches), IMPORTED_PATH as fallback (PG's proven path).
+     */
     {
         PgRequiredProperty *root_req = pg_cascades_root_required_property(ctx);
+        int pass;
 
-        foreach(lc, root_group->best_entries)
+        for (pass = 0; pass < 2; pass++)
         {
-            PgGroupBestEntry *entry = (PgGroupBestEntry *) lfirst(lc);
-            if (pg_required_property_equal(entry->required, root_req))
+            foreach(lc, root_group->best_entries)
             {
-                /*
-                 * If the best entry is a scan-type op (SeqScan, IndexScan, etc.)
-                 * but the root group contains upper-op logical expressions
-                 * (Sort, Limit, Agg, Project), skip this entry and use
-                 * build_logical_plan which handles the full tree correctly.
-                 * This prevents returning a bare SeqScan when the query needs
-                 * ORDER BY + LIMIT wrapping.
-                 */
-                if (entry->expr->op <= PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN)
+                PgGroupBestEntry *entry = (PgGroupBestEntry *) lfirst(lc);
+                if (!pg_required_property_equal(entry->required, root_req))
+                    continue;
+
+                /* Pass 0: COMPOSABLE_OP only; Pass 1: IMPORTED_PATH only */
+                if (pass == 0 && entry->expr->mode == PG_PHYS_EXPR_IMPORTED_PATH)
+                    continue;
+                if (pass == 1 && entry->expr->mode != PG_PHYS_EXPR_IMPORTED_PATH)
+                    continue;
+
+                /* Skip bare scan entries when upper ops exist */
+                if (entry->expr->mode == PG_PHYS_EXPR_IMPORTED_PATH &&
+                    entry->expr->op <= PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN)
                 {
-                    bool has_wrapper = false;
+                    bool has_upper = false;
                     ListCell *elc;
                     foreach(elc, root_group->logical_exprs)
                     {
                         PgGroupExpr *e = (PgGroupExpr *) lfirst(elc);
                         if (e->op >= PG_CASCADES_LOGICAL_PROJECT &&
                             e->op <= PG_CASCADES_LOGICAL_LIMIT)
-                        {
-                            has_wrapper = true;
-                            break;
-                        }
+                        { has_upper = true; break; }
                     }
-                    if (has_wrapper)
-                        continue;  /* skip scan entry, let build_logical_plan handle */
+                    if (has_upper) continue;
                 }
 
                 result = pg_cascades_build_plan_recurse(ctx, root_group, root_req,
@@ -448,10 +78,7 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
                 if (result != NULL)
                 {
                     ctx->root->query_pathkeys = entry->output.pathkeys;
-
-                    /* Fix any empty targetlists on inner nodes */
                     pg_cascades_fix_empty_targetlists(ctx->root, result);
-
                     return result;
                 }
             }
@@ -998,6 +625,9 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                  * node is resolved by mapping ColumnRefOperators,
                  * not by wrapping with a separate projection node.
                  */
+                if (child == NULL)
+                    return NULL;
+
                 if (ctx->upper->numGroupCols == 0 &&
                     !ctx->upper->hasAggs &&
                     ctx->upper->activeWindows == NIL)

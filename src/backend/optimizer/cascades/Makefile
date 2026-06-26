@@ -6,6 +6,5 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = cascades.o memo.o task.o rule.o property.o pattern.o \
        pg_adapter.o planbuild.o debug.o postopt.o rewrite.o \
-       decorrelate.o
 
 include $(top_srcdir)/src/backend/common.mk

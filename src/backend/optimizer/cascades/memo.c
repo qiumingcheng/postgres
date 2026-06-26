@@ -8,6 +8,7 @@
 #include "optimizer/cascades.h"
 #include "optimizer/paths.h"
 #include "optimizer/pathnode.h"
+#include "optimizer/cost.h"
 #include "nodes/bitmapset.h"
 #include "utils/memutils.h"
 #include "utils/hsearch.h"
@@ -413,48 +414,48 @@ pg_memo_insert_expression_tree(PgPlannerCascadesContext *ctx,
     return group;
 }
 
-/*
- * pg_memo_init:
- *   从 logical root expression 初始化 Memo。
- *   递归创建所有 Group 和 GroupExpression。
- */
-PgMemo *
-pg_memo_init(PgPlannerCascadesContext *ctx, PgGroupExpr *logical_root)
+/* ========================================================================
+ * Memo Initialization from Query Tree
+ *
+ *   StarRocks equivalent: Memo.init(logicOperatorTree)
+ *
+ *   1. Allocate Memo + hash table for GroupExpression dedup
+ *   2. Build standalone OptExpression tree from Query + PG paths
+ *   3. Recursively insert tree into Memo as Groups + GroupExpressions
+ *
+ *   Sets ctx->memo and ctx->memo->root_group on success.
+ * ======================================================================== */
+void
+pg_memo_init_from_tree(PgPlannerCascadesContext *ctx)
 {
     PgMemo     *memo;
-    MemoryContext old_cxt;
     HASHCTL     hash_ctl;
+    PgGroupExpr *opt_tree;
+    MemoryContext old_cxt;
 
+    /* Step 1: Create Memo shell with hash table */
     old_cxt = MemoryContextSwitchTo(ctx->memo_cxt);
 
     memo = (PgMemo *) palloc0(sizeof(PgMemo));
     memo->context = ctx->memo_cxt;
     memo->groups = NIL;
-    memo->root_group = NULL;
 
-    /* Phase 4: Create hash table for GroupExpression dedup.
-     * keysize = sizeof(PgExprHashKey) — only the key part is hashed/compared.
-     * entrysize = sizeof(PgExprHashEntry) — stores key + owner_group_id
-     *   for automatic group merging on duplicate detection. */
     MemSet(&hash_ctl, 0, sizeof(hash_ctl));
     hash_ctl.keysize = sizeof(PgExprHashKey);
     hash_ctl.entrysize = sizeof(PgExprHashEntry);
-    hash_ctl.hash = pg_memo_hash_key;
-    hash_ctl.match = pg_memo_match_key;
     hash_ctl.hcxt = ctx->memo_cxt;
     memo->group_expr_table = hash_create("Memo GroupExpr Table", 256,
                                           &hash_ctl,
-                                          HASH_ELEM | HASH_FUNCTION |
-                                          HASH_COMPARE | HASH_CONTEXT);
+                                          HASH_ELEM | HASH_CONTEXT);
 
     ctx->memo = memo;
-
-    /* 递归构建 Memo */
-    if (logical_root != NULL)
-        memo->root_group = pg_memo_insert_expression(ctx, memo, logical_root, NULL);
-
     MemoryContextSwitchTo(old_cxt);
-    return memo;
+
+    /* Step 2: Build standalone OptExpression tree from PG Query + paths */
+    opt_tree = pg_cascades_build_initial_tree(ctx);
+
+    /* Step 3: Recursively insert tree into Memo */
+    pg_memo_insert_expression_tree(ctx, opt_tree);
 }
 
 /* ========================================================================
@@ -542,6 +543,129 @@ pg_memo_derive_logical_property(PgMemo *memo, PgMemoGroup *group,
         /* 只取第一个 logical expression 的结果 */
         break;
     }
+}
+
+/*
+ * pg_derive_expr_stats:
+ *    Derive per-expression row count and width estimates.
+ *
+ *    Uses PG's existing statistics (RelOptInfo.rows/width,
+ *    clauselist_selectivity, dNumGroups) for cost-accurate estimates.
+ *    Called both by pg_memo_derive_logical_property_v2 (group-level)
+ *    and pg_task_derive_stats (per-expression-level).
+ */
+void
+pg_derive_expr_stats(PgPlannerCascadesContext *ctx, PgGroupExpr *expr,
+                     double *out_rows, int *out_width)
+{
+    double rows = 0;
+    int    width = 0;
+
+    switch (expr->op)
+    {
+        case PG_CASCADES_LOGICAL_SCAN:
+            if (expr->owner_group && expr->owner_group->rel)
+            {
+                RelOptInfo *rel = expr->owner_group->rel;
+                rows = rel->rows;
+                width = rel->width;
+            }
+            else if (expr->op_private != NULL)
+            {
+                RelOptInfo *rel = (RelOptInfo *) expr->op_private;
+                rows = rel->rows;
+                width = rel->width;
+            }
+            break;
+
+        case PG_CASCADES_LOGICAL_JOIN:
+            {
+                double outer_rows = 1000, inner_rows = 1000;
+                int    outer_width = 10, inner_width = 10;
+                double sel = 0.1;
+
+                if (list_length(expr->inputs) >= 2)
+                {
+                    PgMemoGroup *outer = (PgMemoGroup *) linitial(expr->inputs);
+                    PgMemoGroup *inner = (PgMemoGroup *) lsecond(expr->inputs);
+
+                    if (outer->rows > 0) outer_rows = outer->rows;
+                    if (inner->rows > 0) inner_rows = inner->rows;
+                    if (outer->width > 0) outer_width = outer->width;
+                    if (inner->width > 0) inner_width = inner->width;
+                }
+
+                /* Try PG's clauselist_selectivity for better estimate */
+                {
+                    PgJoinPrivate *jp = (PgJoinPrivate *) expr->op_private;
+                    if (jp && jp->restrictlist != NIL)
+                    {
+                        Selectivity pg_sel;
+                        pg_sel = clauselist_selectivity(ctx->root,
+                                                         jp->restrictlist, 0,
+                                                         jp->jointype, NULL);
+                        if (pg_sel > 0 && pg_sel <= 1.0)
+                            sel = pg_sel;
+                    }
+                }
+
+                rows = outer_rows * inner_rows * sel;
+                if (rows < 1) rows = 1;
+                width = outer_width + inner_width;
+            }
+            break;
+
+        case PG_CASCADES_LOGICAL_FILTER:
+            if (list_length(expr->inputs) >= 1)
+            {
+                PgMemoGroup *child = (PgMemoGroup *) linitial(expr->inputs);
+                double child_rows = (child->rows > 0) ? child->rows : 1000;
+                double sel = 0.5;
+                List *quals = (List *) expr->op_private;
+
+                if (quals != NIL)
+                {
+                    Selectivity pg_sel;
+                    pg_sel = clauselist_selectivity(ctx->root, quals, 0,
+                                                     JOIN_INNER, NULL);
+                    if (pg_sel > 0 && pg_sel <= 1.0)
+                        sel = pg_sel;
+                }
+
+                rows = child_rows * sel;
+                if (rows < 1) rows = 1;
+                width = child->width;
+            }
+            break;
+
+        case PG_CASCADES_LOGICAL_AGG:
+            if (ctx->upper && ctx->upper->dNumGroups > 0)
+                rows = ctx->upper->dNumGroups;
+            else if (list_length(expr->inputs) >= 1)
+            {
+                PgMemoGroup *child = (PgMemoGroup *) linitial(expr->inputs);
+                rows = (child->rows > 0) ? child->rows * 0.1 : 100;
+            }
+            break;
+
+        case PG_CASCADES_LOGICAL_PROJECT:
+        case PG_CASCADES_LOGICAL_DISTINCT:
+        case PG_CASCADES_LOGICAL_SORT:
+        case PG_CASCADES_LOGICAL_LIMIT:
+            if (list_length(expr->inputs) >= 1)
+            {
+                PgMemoGroup *child = (PgMemoGroup *) linitial(expr->inputs);
+                rows = child->rows;
+                width = child->width;
+            }
+            break;
+
+        default:
+            break;
+    }
+
+    if (out_rows) *out_rows = rows;
+    if (out_width) *out_width = width;
 }
 
 /*
@@ -638,6 +762,21 @@ pg_memo_derive_logical_property_v2(PgMemo *memo, PgPlannerCascadesContext *ctx)
 
                 default:
                     break;
+            }
+
+            /*
+             * Supplement with pg_derive_expr_stats for more accurate
+             * row/width estimates (uses PG's clauselist_selectivity etc.)
+             */
+            {
+                double derived_rows = 0;
+                int    derived_width = 0;
+
+                pg_derive_expr_stats(ctx, expr, &derived_rows, &derived_width);
+                if (derived_rows > 0 && prop.rows <= 0)
+                    prop.rows = derived_rows;
+                if (derived_width > 0 && prop.width <= 0)
+                    prop.width = derived_width;
             }
 
             /* Keep the best (largest rows) property across all expressions */

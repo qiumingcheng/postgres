@@ -72,12 +72,3 @@ debug_print_cascades_rules(PgPlannerCascadesContext *ctx)
     elog(NOTICE, "Upper bound cost: %.4f", ctx->upper_bound_cost);
 }
 
-void
-debug_print_cascades_fallback_reason(PgPlannerCascadesContext *ctx,
-                                      const char *reason)
-{
-    if (ctx != NULL && ctx->debug)
-        elog(NOTICE, "Cascades fallback: %s", reason);
-    else if (ctx == NULL && cascades_planner_debug)
-        elog(NOTICE, "Cascades fallback: %s", reason);
-}

@@ -564,8 +564,7 @@ extern void pg_cascades_handle_status_or_error(PgCascadesStatus status,
                                                 bool debug);
 
 /* memo.c */
-extern PgMemo *pg_memo_init(PgPlannerCascadesContext *ctx,
-                             PgGroupExpr *logical_root);
+extern void pg_memo_init_from_tree(PgPlannerCascadesContext *ctx);
 extern PgMemoGroup *pg_memo_new_group(PgPlannerCascadesContext *ctx);
 extern PgGroupExpr *pg_memo_new_group_expr(PgPlannerCascadesContext *ctx,
                                             PgCascadesOpKind op);
@@ -630,7 +629,6 @@ extern PgCascadesOpKind pg_cascades_pathtype_to_opkind(NodeTag pathtype);
 
 /* planbuild.c */
 extern Plan *pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx);
-extern void pg_planbuild_self_test(void);
 
 /* task.c */
 extern PgCascadesStatus pg_cascades_run_tasks(PgPlannerCascadesContext *ctx);
@@ -658,16 +656,12 @@ extern void finish_query_planner_after_prepare(
     List *tlist, double tuple_fraction, double limit_tuples,
     Path **cheapest_path, Path **sorted_path, double *num_groups);
 
-/* decorrelate.c (Phase 6) */
-extern bool pg_cascades_decorrelate_subqueries(PlannerInfo *root);
 
 /* rewrite.c */
 extern PgCascadesStatus pg_cascades_logical_rewrite(
     PgPlannerCascadesContext *ctx);
 
 /* Phase 4: Tree-based rewrite operating on OptExpression tree */
-extern PgCascadesStatus pg_cascades_logical_rewrite_v2(
-    PgPlannerCascadesContext *ctx, PgGroupExpr *tree_root);
 
 /* Phase 4: OptExpression tree for pre-Memo rewrite */
 extern PgGroupExpr *pg_cascades_build_initial_tree(
@@ -677,6 +671,10 @@ extern PgGroupExpr *pg_cascades_build_initial_tree(
 extern void pg_memo_derive_logical_property_v2(PgMemo *memo,
     PgPlannerCascadesContext *ctx);
 
+/* Shared stats derivation helper (used by memo.c + task.c) */
+extern void pg_derive_expr_stats(PgPlannerCascadesContext *ctx,
+    PgGroupExpr *expr, double *out_rows, int *out_width);
+
 /* Phase 4: combination rule registration */
 extern void pg_cascades_init_combination_rules(void);
 extern PgCombinationRule *pg_cascades_get_combination_rules(int *num_rules);
@@ -684,7 +682,5 @@ extern PgCombinationRule *pg_cascades_get_combination_rules(int *num_rules);
 /* debug.c */
 extern void debug_print_cascades_memo(PgPlannerCascadesContext *ctx);
 extern void debug_print_cascades_rules(PgPlannerCascadesContext *ctx);
-extern void debug_print_cascades_fallback_reason(
-    PgPlannerCascadesContext *ctx, const char *reason);
 
 #endif /* CASCADES_H */

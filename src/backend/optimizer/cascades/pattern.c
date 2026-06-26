@@ -4,8 +4,7 @@
  *
  *    Supports multi-node pattern matching:
  *      LEAF       — matches any GroupExpression
- *      MULTI_LEAF — matches any number of GroupExpressions (for UNION etc.)
- *      OPERATOR   — matches a specific operator kind
+ *      MULTI_LEAF — matches any number of GroupExpressions
  *      TREE       — recursive subtree matching
  *-------------------------------------------------------------------------
  */
@@ -23,25 +22,6 @@ pg_pattern_leaf(void)
 {
     PgPattern *p = (PgPattern *) palloc0(sizeof(PgPattern));
     p->type = PG_PATTERN_LEAF;
-    p->children = NIL;
-    return p;
-}
-
-PgPattern *
-pg_pattern_multi_leaf(void)
-{
-    PgPattern *p = (PgPattern *) palloc0(sizeof(PgPattern));
-    p->type = PG_PATTERN_MULTI_LEAF;
-    p->children = NIL;
-    return p;
-}
-
-PgPattern *
-pg_pattern_op(PgCascadesOpKind op)
-{
-    PgPattern *p = (PgPattern *) palloc0(sizeof(PgPattern));
-    p->type = PG_PATTERN_OPERATOR;
-    p->op = op;
     p->children = NIL;
     return p;
 }
@@ -69,16 +49,6 @@ pg_pattern_match_to_expr(PgPattern *pattern, PgGroupExpr *expr)
     {
         case PG_PATTERN_LEAF:
         case PG_PATTERN_MULTI_LEAF:
-            binder = (PgBinder *) palloc0(sizeof(PgBinder));
-            binder->pattern = pattern;
-            binder->expr = expr;
-            binder->group = expr->owner_group;
-            binder->child_matches = NIL;
-            return binder;
-
-        case PG_PATTERN_OPERATOR:
-            if (expr->op != pattern->op)
-                return NULL;
             binder = (PgBinder *) palloc0(sizeof(PgBinder));
             binder->pattern = pattern;
             binder->expr = expr;
@@ -207,22 +177,6 @@ pg_pattern_match_full(PgPattern *pattern, PgGroupExpr *root)
         binder->group = root->owner_group;
         binder->child_matches = NIL;
         return list_make1(binder);
-    }
-
-    if (pattern->type == PG_PATTERN_OPERATOR)
-    {
-        /* Single operator: check op match */
-        if (root->op != pattern->op)
-            return NIL;
-
-        {
-            PgBinder *binder = (PgBinder *) palloc0(sizeof(PgBinder));
-            binder->pattern = pattern;
-            binder->expr = root;
-            binder->group = root->owner_group;
-            binder->child_matches = NIL;
-            return list_make1(binder);
-        }
     }
 
     if (pattern->type == PG_PATTERN_TREE)

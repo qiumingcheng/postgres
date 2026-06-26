@@ -181,18 +181,15 @@ pg_task_optimize_group(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
     }
 
     /* Step 1: push EnforceAndCostTask for physical exprs FIRST.
-     * LIFO means they execute last (after children and rule application). */
+     * LIFO means they execute last (after children and rule application).
+     * Push multi-property tasks for all relevant pathkeys (NIL, sort,
+     * group, distinct) to exercise Clone+Resume and multi-property
+     * optimization paths. */
     CHECK_FOR_INTERRUPTS();
     foreach(lc, group->physical_exprs)
     {
         PgGroupExpr *expr = (PgGroupExpr *) lfirst(lc);
-        PgOptimizerTask *t;
-
-        t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
-        t->type = PG_TASK_ENFORCE_AND_COST;
-        t->expr = expr;
-        t->required = NULL;
-        task_stack_push(ctx, t);
+        pg_cascades_push_enforce_and_cost_tasks(ctx, group, expr);
     }
 
     /* Step 2: push OptimizeExpressionTask for each logical expr */
@@ -364,9 +361,23 @@ PgCascadesStatus
 pg_task_derive_stats(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
 {
     PgGroupExpr *expr = task->expr;
+    double rows = 0;
+    int    width = 0;
 
     if (expr->stats_derived)
         return PG_CASCADES_OK;
+
+    /* Compute per-expression row count and width estimates */
+    pg_derive_expr_stats(ctx, expr, &rows, &width);
+
+    /* Store results on the owning group */
+    if (expr->owner_group != NULL)
+    {
+        if (rows > 0 && expr->owner_group->rows <= 0)
+            expr->owner_group->rows = rows;
+        if (width > 0 && expr->owner_group->width <= 0)
+            expr->owner_group->width = width;
+    }
 
     expr->stats_derived = true;
     return PG_CASCADES_OK;
@@ -767,15 +778,98 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
     }
 
     /* ================================================================
-     * COMPOSABLE_OP: state-machine driven.
-     * Skip COMPOSABLE_OP scan/join — IMPORTED_PATH already handles them.
+     * COMPOSABLE_OP: scan — skip (IMPORTED_PATH already handles them).
+     * COMPOSABLE_OP: join — fast-path costing below (avoids state machine).
      * ================================================================ */
     if (expr->mode == PG_PHYS_EXPR_COMPOSABLE_OP &&
-        ((expr->op >= PG_CASCADES_PHYSICAL_SEQSCAN &&
-          expr->op <= PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN) ||
-         (expr->op >= PG_CASCADES_PHYSICAL_NESTLOOP &&
-          expr->op <= PG_CASCADES_PHYSICAL_MERGEJOIN)))
+        (expr->op >= PG_CASCADES_PHYSICAL_SEQSCAN &&
+         expr->op <= PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN))
         return PG_CASCADES_OK;
+
+    /* COMPOSABLE_OP join: fast-path costing from statistics.
+     * IMPORTED_PATH join entries already handle production plan extraction;
+     * these entries validate the cost model and serve as Phase 2 foundation. */
+    if (expr->mode == PG_PHYS_EXPR_COMPOSABLE_OP &&
+        (expr->op >= PG_CASCADES_PHYSICAL_NESTLOOP &&
+         expr->op <= PG_CASCADES_PHYSICAL_MERGEJOIN))
+    {
+        PgOutputProperty output;
+        PgGroupBestEntry *entry;
+        Cost child_total = 0;
+        double outer_rows = 100, inner_rows = 100;
+        int    outer_width = 10, inner_width = 10;
+        Cost   local_cost;
+
+        MemSet(&output, 0, sizeof(PgOutputProperty));
+
+        /* Gather child stats */
+        if (list_length(expr->inputs) >= 2)
+        {
+            PgMemoGroup *outer_grp = (PgMemoGroup *) linitial(expr->inputs);
+            PgMemoGroup *inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
+
+            if (outer_grp->rows > 0) outer_rows = outer_grp->rows;
+            if (inner_grp->rows > 0) inner_rows = inner_grp->rows;
+            if (outer_grp->width > 0) outer_width = outer_grp->width;
+            if (inner_grp->width > 0) inner_width = inner_grp->width;
+
+            /* Accumulate child costs from best entries (use cheapest) */
+            if (list_length(outer_grp->best_entries) > 0)
+            {
+                PgGroupBestEntry *be = (PgGroupBestEntry *)
+                    linitial(outer_grp->best_entries);
+                child_total += be->total_cost;
+            }
+            if (list_length(inner_grp->best_entries) > 0)
+            {
+                PgGroupBestEntry *be = (PgGroupBestEntry *)
+                    linitial(inner_grp->best_entries);
+                child_total += be->total_cost;
+            }
+        }
+
+        /* Compute local join cost */
+        switch (expr->op)
+        {
+            case PG_CASCADES_PHYSICAL_NESTLOOP:
+                local_cost = outer_rows * inner_rows * cpu_tuple_cost * 0.01;
+                break;
+            case PG_CASCADES_PHYSICAL_HASHJOIN:
+                local_cost = inner_rows * cpu_operator_cost
+                           + inner_rows * inner_width * cpu_tuple_cost * 0.01;
+                break;
+            case PG_CASCADES_PHYSICAL_MERGEJOIN:
+                local_cost = outer_rows * cpu_operator_cost * 0.5;
+                break;
+            default:
+                local_cost = 1.0;
+                break;
+        }
+        if (local_cost < 0.01) local_cost = 0.01;
+
+        /* Output properties: conservative — no guaranteed pathkeys */
+        output.pathkeys = NIL;
+        output.required_outer = NULL;
+        output.rows = outer_rows * inner_rows * 0.1;  /* join selectivity */
+        output.width = outer_width + inner_width;
+
+        /* Phase 4: upper-bound pruning */
+        if (ctx->upper_bound_cost > 0 &&
+            child_total + local_cost > ctx->upper_bound_cost * 2.0)
+            return PG_CASCADES_OK;
+
+        /* Create best entry with conservative cost (higher than IMPORTED_PATH) */
+        entry = (PgGroupBestEntry *) palloc0(sizeof(PgGroupBestEntry));
+        entry->required = pg_required_property_copy(ctx, required);
+        entry->expr = expr;
+        entry->startup_cost = local_cost;
+        entry->total_cost = child_total + local_cost + 10000.0; /* penalty */
+        entry->child_required_props = NIL;
+        entry->output = output;
+
+        pg_group_update_best(expr->owner_group, entry);
+        return PG_CASCADES_OK;
+    }
 
     switch (task->enforce_state)
     {

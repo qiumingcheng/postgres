@@ -133,8 +133,6 @@ pg_rule_join_to_nestloop(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *outer_grp, *inner_grp;
 
-    if (list_length(expr->inputs) != 2)
-        return NIL;
     outer_grp = (PgMemoGroup *) linitial(expr->inputs);
     inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
 
@@ -160,8 +158,6 @@ pg_rule_join_to_hashjoin(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *outer_grp, *inner_grp;
 
-    if (list_length(expr->inputs) != 2)
-        return NIL;
     outer_grp = (PgMemoGroup *) linitial(expr->inputs);
     inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
 
@@ -186,8 +182,6 @@ pg_rule_join_to_mergejoin(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *outer_grp, *inner_grp;
 
-    if (list_length(expr->inputs) != 2)
-        return NIL;
     outer_grp = (PgMemoGroup *) linitial(expr->inputs);
     inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
 
@@ -221,9 +215,6 @@ pg_rule_join_commutativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     PgGroupExpr *new_expr;
     PgMemoGroup *left_child;
     PgMemoGroup *right_child;
-
-    if (list_length(expr->inputs) != 2)
-        return NIL;
 
     left_child = (PgMemoGroup *) linitial(expr->inputs);
     right_child = (PgMemoGroup *) lsecond(expr->inputs);
@@ -587,9 +578,6 @@ pg_rule_merge_limit_with_sort(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     PgGroupExpr *new_sort;
     double limit_tuples;
 
-    if (list_length(expr->inputs) != 1)
-        return NIL;
-
     sort_expr = pg_memo_group_first_logical(
         (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_SORT);
     if (sort_expr == NULL)
@@ -649,9 +637,6 @@ pg_rule_merge_filter_with_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     PgGroupExpr *outer_input;
     PgGroupExpr *new_join;
     PgJoinPrivate *join_priv;
-
-    if (list_length(expr->inputs) != 2)
-        return NIL;
 
     join_priv = (PgJoinPrivate *) expr->op_private;
     if (join_priv == NULL || join_priv->jointype != JOIN_INNER)
@@ -754,8 +739,6 @@ pg_rule_merge_two_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *inner;
 
-    if (list_length(expr->inputs) != 1)
-        return NIL;
     inner = pg_memo_group_first_logical(
         (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_AGG);
     if (inner == NULL)
@@ -790,9 +773,6 @@ pg_rule_merge_join_with_child_project(PgPlannerCascadesContext *ctx,
     PgGroupExpr *outer_input, *inner_input;
     bool outer_is_proj, inner_is_proj;
     PgGroupExpr *new_join;
-
-    if (list_length(expr->inputs) != 2)
-        return NIL;
 
     outer_input = pg_memo_group_first_logical(
         (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_PROJECT);
@@ -1000,9 +980,6 @@ static List *
 pg_rule_prune_empty_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *outer_grp, *inner_grp;
-
-    if (list_length(expr->inputs) != 2)
-        return NIL;
 
     outer_grp = (PgMemoGroup *) linitial(expr->inputs);
     inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
@@ -1257,9 +1234,6 @@ pg_rule_pushdown_predicate_project(PgPlannerCascadesContext *ctx,
     List *filter_quals;
     PgGroupExpr *new_filter, *new_proj;
 
-    if (list_length(expr->inputs) != 1)
-        return NIL;
-
     proj_expr = pg_memo_group_first_logical(
         (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_PROJECT);
     if (proj_expr == NULL)
@@ -1303,9 +1277,6 @@ pg_rule_pushdown_limit_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     PgJoinPrivate *join_priv;
     PgGroupExpr *new_limit_outer, *new_limit_inner;
     PgGroupExpr *new_join;
-
-    if (list_length(expr->inputs) != 1)
-        return NIL;
 
     join_expr = pg_memo_group_first_logical(
         (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_JOIN);
@@ -1357,8 +1328,6 @@ pg_rule_pushdown_predicate_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     PgGroupExpr *agg_expr;
     List       *filter_quals;
 
-    if (list_length(expr->inputs) != 1)
-        return NIL;
     agg_expr = pg_memo_group_first_logical(
         (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_AGG);
     if (agg_expr == NULL)
@@ -1403,8 +1372,6 @@ pg_rule_pushdown_agg_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *limit_expr;
 
-    if (list_length(expr->inputs) != 1)
-        return NIL;
     limit_expr = pg_memo_group_first_logical(
         (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_LIMIT);
     if (limit_expr == NULL)
@@ -1435,9 +1402,6 @@ pg_rule_eliminate_join_with_constant(PgPlannerCascadesContext *ctx,
 {
     PgJoinPrivate *join_priv;
     PgMemoGroup *outer_grp, *inner_grp;
-
-    if (list_length(expr->inputs) != 2)
-        return NIL;
 
     join_priv = (PgJoinPrivate *) expr->op_private;
     if (join_priv == NULL || join_priv->jointype != JOIN_INNER)
@@ -1483,9 +1447,6 @@ pg_rule_outer_join_elimination(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     PgJoinPrivate *new_priv;
     PgGroupExpr *new_join;
 
-    if (list_length(expr->inputs) != 2)
-        return NIL;
-
     join_priv = (PgJoinPrivate *) expr->op_private;
     if (join_priv == NULL)
         return NIL;
@@ -1524,9 +1485,6 @@ pg_rule_pushdown_predicate_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
     List       *inner_quals = NIL;
     ListCell   *lc;
     PgGroupExpr *new_outer, *new_inner, *new_join;
-
-    if (list_length(expr->inputs) != 1)
-        return NIL;
 
     join_expr = pg_memo_group_first_logical(
         (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_JOIN);
@@ -1620,9 +1578,6 @@ pg_rule_join_associativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     ListCell   *lc;
 
     /* expr is (A⋈B)⋈C: JOIN with 2 inputs */
-    if (list_length(expr->inputs) != 2)
-        return NIL;
-
     left_grp = (PgMemoGroup *) linitial(expr->inputs);
     right_grp = (PgMemoGroup *) lsecond(expr->inputs);
 
@@ -1698,9 +1653,6 @@ pg_rule_join_left_asscom(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     ListCell   *lc;
 
     /* expr is A⋈(B⋈C): JOIN with 2 inputs */
-    if (list_length(expr->inputs) != 2)
-        return NIL;
-
     left_grp = (PgMemoGroup *) linitial(expr->inputs);
     right_grp = (PgMemoGroup *) lsecond(expr->inputs);
 
@@ -1780,9 +1732,6 @@ pg_rule_inner_to_semi(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     PgJoinPrivate *join_priv_orig;
     PgJoinPrivate *join_priv_new;
     RelOptInfo  *inner_rel;
-
-    if (list_length(expr->inputs) != 2)
-        return NIL;
 
     inner_grp = (PgMemoGroup *) lsecond(expr->inputs);
 
@@ -1869,9 +1818,6 @@ pg_rule_eliminate_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     Query *parse = ctx->root->parse;
     PgMemoGroup *child_group;
 
-    if (list_length(expr->inputs) != 1)
-        return NIL;
-
     /* Only eliminate if there's actually no LIMIT/OFFSET */
     if (parse->limitCount != NULL || parse->limitOffset != NULL)
         return NIL;
@@ -1913,9 +1859,6 @@ pg_rule_merge_limit_with_child_limit(PgPlannerCascadesContext *ctx,
     PgMemoGroup *child_group;
     PgGroupExpr *inner_limit = NULL;
     ListCell *lc;
-
-    if (list_length(expr->inputs) != 1)
-        return NIL;
 
     child_group = (PgMemoGroup *) linitial(expr->inputs);
 
@@ -1962,9 +1905,6 @@ static List *
 pg_rule_eliminate_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *child_group;
-
-    if (list_length(expr->inputs) != 1)
-        return NIL;
 
     /* Only eliminate if there's no aggregation and no GROUP BY */
     if (ctx->root->parse->hasAggs || ctx->root->parse->groupClause != NIL)
@@ -2016,75 +1956,6 @@ pg_rule_enforce_sort(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     return NIL;
 }
 
-/*
- * A5: PushDownPredicateUnion (Phase 5)
- *   LogicalFilter(LogicalUnion(A,B,...)) → LogicalUnion(Filter(A), Filter(B), ...)
- *
- *   Pushes filter predicates down into both sides of UNION ALL / UNION.
- *   For now, this is a stub — LogicalUnion is not yet built by pg_adapter
- *   (UNION queries fall back to standard PG planner).  When UNION support
- *   is added, this rule will be activated.
- */
-static List *
-pg_rule_pushdown_predicate_union(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
-{
-    PgGroupExpr *union_expr;
-    List       *filter_quals;
-    ListCell   *lc;
-
-    if (list_length(expr->inputs) != 1)
-        return NIL;
-
-    union_expr = pg_memo_group_first_logical(
-        (PgMemoGroup *) linitial(expr->inputs), PG_CASCADES_LOGICAL_UNION);
-    if (union_expr == NULL)
-        return NIL;
-
-    filter_quals = (List *) expr->op_private;
-    if (filter_quals == NIL)
-        return NIL;
-
-    /* Check volatile — don't push volatile functions past UNION */
-    foreach(lc, filter_quals)
-    {
-        RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
-        if (contain_volatile_functions((Node *) ri->clause))
-            return NIL;
-    }
-
-    /*
-     * Create Filter wrappers on each child of the UNION and reconstruct.
-     * LogicalFilter(LogicalUnion(A,B)) → LogicalUnion(Filter(A), Filter(B))
-     *
-     * Note: LogicalUnion is not yet built by pg_adapter (UNION queries
-     * fall back to PG standard planner), so this rule body exists but
-     * cannot fire in the current Path-import mode.  It will activate
-     * when UNION support is added to pg_adapter.
-     */
-    {
-        PgGroupExpr *new_union;
-        List       *new_children = NIL;
-        ListCell   *child_lc;
-
-        foreach(child_lc, union_expr->inputs)
-        {
-            PgMemoGroup *child_grp = (PgMemoGroup *) lfirst(child_lc);
-            PgGroupExpr *new_filter;
-
-            new_filter = pg_memo_new_group_expr(ctx,
-                                    PG_CASCADES_LOGICAL_FILTER);
-            new_filter->op_private = filter_quals;
-            /* inputs set by pg_memo_insert_expression */
-            new_children = lappend(new_children, new_filter);
-        }
-
-        new_union = pg_memo_new_group_expr(ctx,
-                                    PG_CASCADES_LOGICAL_UNION);
-        new_union->op_private = union_expr->op_private;
-        /* inputs: new_children — each is Filter(child_grp) */
-        return list_make1(new_union);
-    }
-}
 
 /* ========================================================================
  * Phase 5: Transformation rules (29 rules)
@@ -2240,11 +2111,6 @@ static PgRule g_trans_rules_phase5[] = {
     {"EliminateAgg", NULL, pg_rule_eliminate_agg,
      PG_RULE_TRANS, NULL,
      PG_CASCADES_LOGICAL_AGG, 0, PG_RULE_BIT_ELIMINATE_AGG, 0.6},
-
-    /* A5: PushDownPredicateUnion — push filter into UNION children */
-    {"PushDownPredicateUnion", NULL, pg_rule_pushdown_predicate_union,
-     PG_RULE_TRANS, NULL,
-     PG_CASCADES_LOGICAL_FILTER, 0, PG_RULE_BIT_PUSHDOWN_PRED_UNION, 0.4},
 
     {NULL, NULL, NULL, 0, NULL, 0, 0, 0, 0.0}  /* sentinel */
 };
@@ -2547,6 +2413,26 @@ pg_cascades_init_rule_patterns(void)
     /* Phase 3: JoinCommutativity */
     g_trans_rules_phase3[0].pattern = g_pat_join_leaf_leaf;
 
+    /* Phase 1 impl rules: simple patterns to activate pg_pattern_match_full */
+    {
+        int j;
+        for (j = 0; g_impl_rules_phase1[j].name != NULL; j++)
+        {
+            PgRule *rule = &g_impl_rules_phase1[j];
+            if (strcmp(rule->name, "LogicalProject->PhysicalProject") == 0)
+                rule->pattern = g_pat_leaf1;
+            else if (strcmp(rule->name, "LogicalAgg->PhysicalHashAgg") == 0)
+                rule->pattern = g_pat_leaf2;
+        }
+    }
+
+    /* Phase 2 join impl rules: multi-node Join(Leaf,Leaf) pattern */
+    {
+        int j;
+        for (j = 0; g_impl_rules_phase2_join[j].name != NULL; j++)
+            g_impl_rules_phase2_join[j].pattern = g_pat_join_leaf_leaf;
+    }
+
     /* Phase 5: multi-node rules */
     num_rules = sizeof(g_trans_rules_phase5) / sizeof(PgRule) - 1;
     for (i = 0; i < num_rules; i++)
@@ -2593,8 +2479,7 @@ static PgCombinationRule g_combination_rules[] = {
      * GP_PUSH_DOWN_PREDICATE: Predicate pushdown group.
      *   PushDownPredicateScan, PushDownPredicateJoin,
      *   PushDownPredicateProject, PushDownPredicateAgg,
-     *   PushDownPredicateUnion
-     */
+         */
     {"GP_PUSH_DOWN_PREDICATE",
      NULL,  /* rule_ids computed from name lookup in rewrite */
      true   /* iterate until convergence */
@@ -2682,9 +2567,6 @@ pg_rule_join_to_hashjoin_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
     if (expr == NULL || expr->inputs == NIL)
         return NIL;
 
-    if (list_length(expr->inputs) != 2)
-        return NIL;
-
     join_priv = (PgJoinPrivate *) expr->op_private;
     if (join_priv == NULL || join_priv->jointype != JOIN_INNER)
         return NIL;
@@ -2735,9 +2617,6 @@ pg_rule_join_to_nestloop_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
     if (expr == NULL || expr->inputs == NIL)
         return NIL;
 
-    if (list_length(expr->inputs) != 2)
-        return NIL;
-
     join_priv = (PgJoinPrivate *) expr->op_private;
     if (join_priv == NULL || join_priv->jointype != JOIN_INNER)
         return NIL;
@@ -2786,9 +2665,6 @@ pg_rule_join_to_mergejoin_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *exp
     ListCell *lc;
 
     if (expr == NULL || expr->inputs == NIL)
-        return NIL;
-
-    if (list_length(expr->inputs) != 2)
         return NIL;
 
     join_priv = (PgJoinPrivate *) expr->op_private;

@@ -408,48 +408,8 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
         return PG_CASCADES_INTERNAL_NO_PLAN;
     }
 
-    /*
-     * 6. Build Memo from OptExpression tree (Phase 6).
-     *
-     * The standalone tree (from pg_cascades_build_initial_tree) has a
-     * multi-level logical structure: Limit → Sort → Agg → Project → Scan.
-     * pg_memo_insert_expression_tree converts it to proper Memo groups,
-     * and for LogicalScan nodes with valid RelOptInfo* op_private, imports
-     * PG paths as physical candidates and sets group->rel to avoid SIGSEGV.
-     *
-     * Previous Phase 2/3 path-import approach (pg_cascades_build_logical_root)
-     * is replaced — the tree-based Memo gives rewrite rules a structured
-     * multi-level logical tree to walk and transform.
-     */
-    {
-        PgMemo     *memo;
-        HASHCTL     hash_ctl;
-        PgGroupExpr *opt_tree;
-
-        /* Create minimal Memo shell */
-        {
-            MemoryContext old_cxt2 = MemoryContextSwitchTo(ctx.memo_cxt);
-
-            memo = (PgMemo *) palloc0(sizeof(PgMemo));
-            memo->context = ctx.memo_cxt;
-            memo->groups = NIL;
-
-            MemSet(&hash_ctl, 0, sizeof(hash_ctl));
-            hash_ctl.keysize = sizeof(PgExprHashKey);
-            hash_ctl.entrysize = sizeof(PgExprHashEntry);
-            hash_ctl.hcxt = ctx.memo_cxt;
-            memo->group_expr_table = hash_create("Memo GroupExpr Table", 256,
-                                                  &hash_ctl,
-                                                  HASH_ELEM | HASH_CONTEXT);
-
-            ctx.memo = memo;
-            MemoryContextSwitchTo(old_cxt2);
-        }
-
-        /* Build tree and insert into Memo */
-        opt_tree = pg_cascades_build_initial_tree(&ctx);
-        pg_memo_insert_expression_tree(&ctx, opt_tree);
-    }
+    /* 6. Build Memo from Query tree (StarRocks: Memo.init) */
+    pg_memo_init_from_tree(&ctx);
 
     if (ctx.memo->root_group == NULL)
     {

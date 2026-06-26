@@ -35,6 +35,86 @@ pg_cascades_pathtype_to_opkind(NodeTag pathtype)
 }
 
 /* ========================================================================
+ * Helper: collect Relids from a standalone OptExpression subtree
+ *
+ * Walks a tree of PgGroupExpr * nodes (before Memo insertion, where
+ * inputs are PgGroupExpr *, not PgMemoGroup *) and collects the union
+ * of RelOptInfo->relids from all LogicalScan leaves.
+ * ======================================================================== */
+static Relids
+pg_get_tree_relids(PgGroupExpr *expr)
+{
+    Relids result = NULL;
+    ListCell *lc;
+
+    if (expr == NULL)
+        return NULL;
+
+    if (expr->op == PG_CASCADES_LOGICAL_SCAN && expr->op_private != NULL)
+    {
+        RelOptInfo *rel = (RelOptInfo *) expr->op_private;
+        if (rel->relids != NULL)
+            return bms_copy(rel->relids);
+        else
+            return NULL;
+    }
+
+    foreach(lc, expr->inputs)
+    {
+        PgGroupExpr *child = (PgGroupExpr *) lfirst(lc);
+        Relids child_relids;
+
+        if (child == NULL)
+            continue;
+
+        child_relids = pg_get_tree_relids(child);
+        if (child_relids != NULL)
+        {
+            result = bms_union(result, child_relids);
+            bms_free(child_relids);
+        }
+    }
+
+    return result;
+}
+
+/* ========================================================================
+ * Helper: determine actual join type from PG's SpecialJoinInfo list
+ *
+ * Matches the left and right child relids against the join_info_list
+ * entries populated by deconstruct_jointree().  Returns JOIN_INNER if
+ * no SpecialJoinInfo covers this exact pair (inner join is the default).
+ * ======================================================================== */
+static JoinType
+pg_determine_join_type(PlannerInfo *root, Relids left_relids, Relids right_relids)
+{
+    ListCell *lc;
+
+    if (left_relids == NULL || right_relids == NULL)
+        return JOIN_INNER;
+
+    foreach(lc, root->join_info_list)
+    {
+        SpecialJoinInfo *sj = (SpecialJoinInfo *) lfirst(lc);
+
+        if (sj->syn_lefthand == NULL || sj->syn_righthand == NULL)
+            continue;
+
+        /* Check if this SpecialJoinInfo exactly covers our children */
+        if (bms_equal(sj->syn_lefthand, left_relids) &&
+            bms_equal(sj->syn_righthand, right_relids))
+            return sj->jointype;
+
+        /* Also check swapped (RIGHT JOIN normalized to LEFT) */
+        if (bms_equal(sj->syn_lefthand, right_relids) &&
+            bms_equal(sj->syn_righthand, left_relids))
+            return sj->jointype;
+    }
+
+    return JOIN_INNER;
+}
+
+/* ========================================================================
  * Helper: build LogicalJoin tree from PG's joinlist (Phase 7)
  * ======================================================================== */
 
@@ -118,9 +198,16 @@ pg_cascades_build_join_tree(PgPlannerCascadesContext *ctx, List *joinlist)
             /* Create a LogicalJoin(previous_result, new_child) */
             PgGroupExpr *join;
             PgJoinPrivate *jp;
+            Relids left_relids;
+            Relids right_relids;
+
+            /* Determine actual join type from PG's SpecialJoinInfo */
+            left_relids = pg_get_tree_relids(result);
+            right_relids = pg_get_tree_relids(child);
 
             jp = (PgJoinPrivate *) palloc0(sizeof(PgJoinPrivate));
-            jp->jointype = JOIN_INNER;
+            jp->jointype = pg_determine_join_type(ctx->root,
+                                                   left_relids, right_relids);
             jp->restrictlist = NIL;  /* quals handled by PG Path internally */
             jp->joinlist = NIL;
 
@@ -128,6 +215,9 @@ pg_cascades_build_join_tree(PgPlannerCascadesContext *ctx, List *joinlist)
             join->inputs = list_make2(result, child);
             join->op_private = jp;
             result = join;
+
+            bms_free(left_relids);
+            bms_free(right_relids);
         }
     }
 
@@ -144,7 +234,10 @@ pg_cascades_build_join_tree(PgPlannerCascadesContext *ctx, List *joinlist)
  *                LogicalScan(s) [one per base relation]
  *
  *    Each LogicalScan has op_private = RelOptInfo * for its base relation.
- *    Each LogicalJoin has op_private = PgJoinPrivate * (JOIN_INNER).
+ *    Each LogicalJoin has op_private = PgJoinPrivate * with jointype
+ *    determined from PG's SpecialJoinInfo (JOIN_INNER/LEFT/RIGHT/SEMI/ANTI).
+ *    restrictlist remains NIL — quals are handled by PG Path internally
+ *    via IMPORTED_PATH scan/join physical expressions.
  */
 PgGroupExpr *
 pg_cascades_build_initial_tree(PgPlannerCascadesContext *ctx)
