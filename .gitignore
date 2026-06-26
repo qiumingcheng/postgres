@@ -1,16 +1,37 @@
-# Coverage files
-*.gcov
+# Build artifacts
+*.o
 *.gcda
 *.gcno
+*.gcov
+objfiles.txt
+postgres
+
+# Coverage
 *.info
-coverage_report_*/
+*.info.gz
+lcov_*.html
+coverage_*.html
+/tmp/cov*
 
-# Temporary files
-*.tmp
-*.log
-/tmp/
+# Generated files
+config.status
+config.log
+GNUmakefile
+src/Makefile.global
+src/Makefile.port
+src/include/pg_config.h
+src/include/pg_config_os.h
+src/include/dynloader.h
+src/include/stamp-h
+src/backend/parser/gram.h
+src/backend/parser/gram.c
+src/pl/plpgsql/src/pl_gram.h
+src/pl/plpgsql/src/pl_gram.c
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
+# Contrib
+contrib/**/*.so
+
+# Test artifacts
+src/test/regress/results/
+src/test/regress/log/
+src/test/regress/tmp_check/
