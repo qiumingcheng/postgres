@@ -31,3 +31,4 @@ contrib/**/*.so
 src/test/regress/results/
 src/test/regress/log/
 src/test/regress/tmp_check/
+*.so
