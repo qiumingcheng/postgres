@@ -22,9 +22,9 @@ CREATE TABLE coverage_t3 (id INTEGER, ref_id INTEGER, label TEXT);
 INSERT INTO coverage_t1 SELECT i, i%10, i*10, 'item_'||i FROM generate_series(1,100) i;
 INSERT INTO coverage_t2 SELECT i, i%50+1, random()*100 FROM generate_series(1,200) i;
 INSERT INTO coverage_t3 SELECT i, i%30+1, 'label_'||(i%5) FROM generate_series(1,150) i;
-CREATE INDEX IF NOT EXISTS idx_cov_t1_grp ON coverage_t1(grp);
-CREATE INDEX IF NOT EXISTS idx_cov_t2_t1id ON coverage_t2(t1_id);
-CREATE INDEX IF NOT EXISTS idx_cov_t3_ref ON coverage_t3(ref_id);
+CREATE INDEXidx_cov_t1_grp ON coverage_t1(grp);
+CREATE INDEXidx_cov_t2_t1id ON coverage_t2(t1_id);
+CREATE INDEXidx_cov_t3_ref ON coverage_t3(ref_id);
 ANALYZE coverage_t1;
 ANALYZE coverage_t2;
 ANALYZE coverage_t3;
@@ -506,7 +506,7 @@ SELECT cov80_test(3303, 'X2_merge_agg', $$SELECT a,b FROM (SELECT a,b,count(*) F
 SELECT cov80_test(3401, 'Y1_col_prune_chain', $$SELECT j1.a,sum(j2.d) FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a GROUP BY j1.a$$);
 
 \echo '=== Y2: Top-down column prune through Project→Join→Scan ==='
-SELECT cov80_test(3402, 'Y2_topdown_prune', $$SELECT a,d FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a$$);
+SELECT cov80_test(3402, 'Y2_topdown_prune', $$SELECT j1.a, j2.d FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a$$);
 
 -- ====================================================================
 -- Section Z: 覆盖 task.c 多属性优化路径
