@@ -235,6 +235,15 @@ struct PgGroupBestEntry
     PgOutputProperty output;        /* 该 expression 在该 required 下的输出 */
 };
 
+/* Statistics: group-level row/width estimates (Phase 6 MVP).
+ * Standalone struct, not embedded in PgMemoGroup to avoid layout changes. */
+typedef struct PgStatistics
+{
+    double      row_count;
+    int         width;
+    bool        derived;
+} PgStatistics;
+
 /* MemoGroup: 等价结果集合 */
 struct PgMemoGroup
 {
