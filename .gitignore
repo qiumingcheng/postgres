@@ -23,10 +23,6 @@ src/include/pg_config.h
 src/include/pg_config_os.h
 src/include/dynloader.h
 src/include/stamp-h
-src/backend/parser/gram.h
-src/backend/parser/gram.c
-src/pl/plpgsql/src/pl_gram.h
-src/pl/plpgsql/src/pl_gram.c
 
 # Contrib
 contrib/**/*.so
