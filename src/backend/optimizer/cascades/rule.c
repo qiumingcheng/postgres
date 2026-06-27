@@ -1584,7 +1584,10 @@ pg_rule_join_associativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     if (left_grp == NULL || right_grp == NULL)
         return NIL;
 
-    /* Find a JOIN expression inside left_grp */
+    /* Find a JOIN expression inside left_grp.
+     * After rewrite pipeline + Final Cleanup group merge, LOGICAL_JOIN
+     * may have been eliminated from logical_exprs.  Search physical_exprs
+     * too — COMPOSABLE_OP join expressions have valid child inputs. */
     inner_join = NULL;
     foreach(lc, left_grp->logical_exprs)
     {
@@ -1595,6 +1598,42 @@ pg_rule_join_associativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
             inner_join = e;
             break;
         }
+    }
+
+    if (inner_join == NULL)
+    {
+        /* Fallback: if group merge eliminated LOGICAL_JOIN from logical_exprs,
+         * construct inner join from left_grp's PG joinrel.  Iterate base
+         * groups in memo to find A and B by matching relids. */
+        Relids left_relids = pg_cascades_group_relids(ctx, left_grp);
+        if (left_relids != NULL)
+        {
+            PgMemoGroup *found[2];
+            int nfound = 0;
+            ListCell *gc;
+
+            MemSet(found, 0, sizeof(found));
+            foreach(gc, ctx->memo->groups)
+            {
+                PgMemoGroup *g = (PgMemoGroup *) lfirst(gc);
+                if (g != left_grp && g != right_grp &&
+                    g->rel != NULL && g->rel->relids != NULL &&
+                    bms_overlap(g->rel->relids, left_relids))
+                {
+                    if (nfound < 2)
+                        found[nfound++] = g;
+                }
+            }
+
+            if (nfound >= 2 && found[0] != NULL && found[1] != NULL)
+            {
+                inner_join = pg_memo_new_group_expr(ctx,
+                                    PG_CASCADES_LOGICAL_JOIN);
+                inner_join->inputs = list_make2(found[0], found[1]);
+            }
+        }
+        if (left_relids != NULL)
+            bms_free(left_relids);
     }
 
     if (inner_join == NULL)
@@ -1669,6 +1708,21 @@ pg_rule_join_left_asscom(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
         {
             inner_join = e;
             break;
+        }
+    }
+    if (inner_join == NULL)
+    {
+        foreach(lc, right_grp->physical_exprs)
+        {
+            PgGroupExpr *e = (PgGroupExpr *) lfirst(lc);
+            if ((e->op == PG_CASCADES_PHYSICAL_NESTLOOP ||
+                 e->op == PG_CASCADES_PHYSICAL_HASHJOIN ||
+                 e->op == PG_CASCADES_PHYSICAL_MERGEJOIN) &&
+                list_length(e->inputs) == 2)
+            {
+                inner_join = e;
+                break;
+            }
         }
     }
 
