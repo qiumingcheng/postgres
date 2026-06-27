@@ -97,6 +97,24 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
      *
      * The function implementation remains below for Phase 2, but is not called.
      */
+    /*
+     * Group merge may leave root_group with best entries that don't
+     * match root_req exactly (e.g., cross-joins after Final Cleanup).
+     * Fall back to the first available best entry as root. */
+    if (list_length(root_group->best_entries) > 0)
+    {
+        PgGroupBestEntry *entry = (PgGroupBestEntry *)
+            linitial(root_group->best_entries);
+        result = pg_cascades_build_plan_recurse(ctx, root_group,
+            entry->required, entry, &entry->output);
+        if (result != NULL)
+        {
+            ctx->root->query_pathkeys = entry->output.pathkeys;
+            pg_cascades_fix_empty_targetlists(ctx->root, result);
+            return result;
+        }
+    }
+
     if (cascades_planner_debug)
         elog(WARNING, "Cascades: no best_entries found for root group - "
              "this indicates incomplete optimization. Falling back to PG planner.");
