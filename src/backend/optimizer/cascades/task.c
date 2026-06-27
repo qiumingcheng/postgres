@@ -377,6 +377,14 @@ pg_task_derive_stats(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             expr->owner_group->rows = rows;
         if (width > 0 && expr->owner_group->width <= 0)
             expr->owner_group->width = width;
+
+        /* Phase 6: populate structured statistics */
+        if (!expr->owner_group->stats.derived)
+        {
+            expr->owner_group->stats.row_count = rows;
+            expr->owner_group->stats.width     = width;
+            expr->owner_group->stats.derived   = true;
+        }
     }
 
     expr->stats_derived = true;

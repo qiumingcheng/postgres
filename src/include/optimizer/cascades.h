@@ -235,8 +235,8 @@ struct PgGroupBestEntry
     PgOutputProperty output;        /* 该 expression 在该 required 下的输出 */
 };
 
-/* Statistics: group-level row/width estimates (Phase 6 MVP).
- * Standalone struct, not embedded in PgMemoGroup to avoid layout changes. */
+/* Phase 6: Structured statistics per group (StarRocks Statistics parity).
+ * Embedded in PgMemoGroup; palloc0 initializes to {0,0,false}. */
 typedef struct PgStatistics
 {
     double      row_count;
@@ -251,8 +251,9 @@ struct PgMemoGroup
     List       *logical_exprs;      /* List<PgGroupExpr *> */
     List       *physical_exprs;     /* List<PgGroupExpr *> */
 
-    double      rows;               /* 估算行数 */
-    int         width;              /* 估算宽度 */
+    double      rows;               /* 估算行数 (backward compat) */
+    int         width;              /* 估算宽度 (backward compat) */
+    PgStatistics stats;             /* Phase 6: structured statistics */
 
     List       *best_entries;       /* List<PgGroupBestEntry *> */
     RelOptInfo *rel;               /* 仅当此 group 映射到一个 PG 关系时 */
