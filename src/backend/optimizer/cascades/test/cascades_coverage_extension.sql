@@ -483,6 +483,11 @@ SELECT cov_test(5060, 'T61: union all simple', $$SELECT id FROM cascades_test_j1
 SELECT cov_test(5061, 'T62: union all with filter', $$SELECT id FROM cascades_test_j1 WHERE id > 10 UNION ALL SELECT id FROM cascades_test_j2 WHERE id > 20$$);
 SELECT cov_test(5062, 'T63: union all order limit', $$SELECT * FROM (SELECT id FROM cascades_test_j1 UNION ALL SELECT id FROM cascades_test_j2) t ORDER BY id LIMIT 5$$);
 
+-- P3: Window/CTE/SETOP fallback tests (Phase 6: verify correct fallback behavior)
+SELECT cov_test(5070, 'T64: window function fallback', $$SELECT id, val, row_number() OVER (ORDER BY id) FROM cascades_test_j1$$);
+SELECT cov_test(5071, 'T65: cte non-recursive', $$WITH t AS (SELECT id FROM cascades_test_j1 WHERE id > 10) SELECT * FROM t$$);
+SELECT cov_test(5072, 'T66: union non-all fallback', $$SELECT id FROM cascades_test_j1 UNION SELECT id FROM cascades_test_j2$$);
+
 SELECT cov_test(5056, 'T4: composite filter', $$SELECT count(*) AS c FROM cascades_test_t WHERE a > 10 AND name LIKE 'item_1%'$$);
 
 SELECT cov_test(5057, 'T6: bitmap and', $$SELECT count(*) AS c FROM cascades_test_t WHERE a = 1 AND b = 2$$);
