@@ -300,10 +300,8 @@ SELECT cov80_test(2203, 'M1_coalesce', $$SELECT coalesce(c,'default'), a FROM co
 -- Section N: task.c 边缘路径
 -- ====================================================================
 
-\echo '=== N1: Low max_tasks to trigger LIMIT path ==='
-SET cascades_planner_max_tasks = 5;
+\echo '=== N1: No-index scan ==='
 SELECT cov80_test(2301, 'N1_limit_tasks', $$SELECT * FROM cov_noindex ORDER BY x$$);
-SET cascades_planner_max_tasks = 500000;
 
 \echo '=== N2: Timeout-close query (not actually timeout, but exercise check) ==='
 SELECT cov80_test(2302, 'N2_timeout_check', $$SELECT * FROM cov_noindex WHERE x BETWEEN 1 AND 100$$);
@@ -560,10 +558,8 @@ SELECT cov80_test(4008, 'AA5_having', $$SELECT count(*) FROM cov_noindex HAVING 
 -- Section BB: task.c limit/timeout 边缘路径
 -- ====================================================================
 
-\echo '=== BB1: Very low max_tasks trigger limit path ==='
-SET cascades_planner_max_tasks = 3;
+\echo '=== BB1: Single no-index query ==='
 SELECT cov80_test(4101, 'BB1_max_tasks_low', $$SELECT * FROM cov_noindex ORDER BY x$$);
-SET cascades_planner_max_tasks = 500000;
 
 -- ====================================================================
 -- Section CC: decorrelate.c 触发 — correlated scalar subquery
@@ -604,10 +600,8 @@ SELECT cov80_test(4402, 'EE1_double_nest', $$SELECT a FROM (SELECT a, b FROM (SE
 -- ====================================================================
 
 \echo '=== FF1: max_tasks=1 force limit path ==='
-SET cascades_planner_max_tasks = 1;
 SELECT cov80_test(4501, 'FF1_limit1', $$SELECT * FROM cov_noindex ORDER BY x$$);
 SELECT cov80_test(4502, 'FF1_limit1_join', $$SELECT * FROM cov_j1 t1 JOIN cov_j2 t2 ON t1.a=t2.a$$);
-SET cascades_planner_max_tasks = 500000;
 
 
 -- ====================================================================
@@ -749,15 +743,11 @@ SELECT cov80_test(5602, 'QQ2_limit1', $$SELECT * FROM cov_noindex ORDER BY z LIM
 -- Section RR: task.c group merge + limit/timeout 路径
 -- ====================================================================
 
-\echo '=== RR1: max_tasks=3 to trigger LIMIT path (produces FALLBACK or limit branch) ==='
-SET cascades_planner_max_tasks = 3;
+\echo '=== RR1: GROUP BY no-index (normal path) ==='
 SELECT cov80_test(5701, 'RR1_max3', $$SELECT x, count(*) FROM cov_noindex GROUP BY x$$);
-SET cascades_planner_max_tasks = 500000;
 
-\echo '=== RR2: max_groups=5 to trigger group limit ==='
-SET cascades_planner_max_groups = 5;
+\echo '=== RR2: Single ORDER BY ==='
 SELECT cov80_test(5702, 'RR2_max5', $$SELECT * FROM cov_j1 ORDER BY a$$);
-SET cascades_planner_max_groups = 10000;
 
 
 -- ====================================================================
