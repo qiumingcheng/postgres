@@ -416,6 +416,9 @@ pg_task_derive_stats(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             expr->owner_group->rows = rows;
         if (width > 0 && expr->owner_group->width <= 0)
             expr->owner_group->width = width;
+
+        /* Phase 6: refresh column stats from pg_statistic (deferred).
+         * Catalog access requires simple_rte_array verification. */
     }
 
     expr->stats_derived = true;

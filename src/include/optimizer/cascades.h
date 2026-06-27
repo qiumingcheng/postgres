@@ -704,6 +704,8 @@ extern void pg_derive_expr_stats(PgPlannerCascadesContext *ctx,
 /* Phase 6: Statistics API (StarRocks parity — standalone, not embedded) */
 extern PgStatistics *pg_statistics_from_group(PgMemoGroup *group);
 extern void pg_statistics_populate_columns(PgMemoGroup *group);
+extern void pg_statistics_refresh_from_catalog(PgPlannerCascadesContext *ctx,
+    PgMemoGroup *group);
 extern PgStatistics *pg_statistics_derive(PgPlannerCascadesContext *ctx,
     PgGroupExpr *expr);
 

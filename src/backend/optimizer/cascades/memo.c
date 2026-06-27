@@ -936,6 +936,67 @@ pg_statistics_populate_columns(PgMemoGroup *group)
     }
 }
 
+/*
+ * pg_statistics_refresh_from_catalog:
+ *   Phase 6: Refresh column stats from pg_statistic at TaskScheduler time.
+ *   Called from pg_task_derive_stats when ctx->root is fully initialized.
+ */
+void
+pg_statistics_refresh_from_catalog(PgPlannerCascadesContext *ctx,
+                                    PgMemoGroup *group)
+{
+    RelOptInfo *rel = group->rel;
+    Oid    reloid = InvalidOid;
+    int    i;
+
+    if (ctx == NULL || rel == NULL || group->stats.num_columns <= 0)
+        return;
+
+    if (rel->relid > 0 &&
+        ctx->root->simple_rte_array != NULL &&
+        rel->relid < ctx->root->simple_rel_array_size)
+    {
+        RangeTblEntry *rte = ctx->root->simple_rte_array[rel->relid];
+        if (rte != NULL && rte->rtekind == RTE_RELATION)
+            reloid = rte->relid;
+    }
+
+    if (reloid == InvalidOid)
+        return;
+
+    for (i = 0; i < group->stats.num_columns; i++)
+    {
+        PgColumnStat *cs = &group->stats.columns[i];
+        HeapTuple statsTuple;
+
+        statsTuple = SearchSysCache3(STATRELATTINH,
+                                      ObjectIdGetDatum(reloid),
+                                      Int16GetDatum(cs->varattno),
+                                      BoolGetDatum(false));
+        if (HeapTupleIsValid(statsTuple))
+        {
+            Form_pg_statistic staForm;
+            float4 *numbers; int nnumbers;
+
+            staForm = (Form_pg_statistic) GETSTRUCT(statsTuple);
+            cs->null_frac  = staForm->stanullfrac;
+            cs->n_distinct = staForm->stadistinct;
+
+            if (get_attstatsslot(statsTuple, 0, 0,
+                                 STATISTIC_KIND_HISTOGRAM, InvalidOid,
+                                 &cs->hist_values, &cs->hist_nvalues,
+                                 &numbers, &nnumbers))
+            {
+                if (nnumbers > 0 && numbers != NULL)
+                    pfree(numbers);
+            }
+            ReleaseSysCache(statsTuple);
+        }
+    }
+
+    group->stats.derived = true;
+}
+
 __attribute__((noinline)) PgStatistics *
 pg_statistics_derive(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
