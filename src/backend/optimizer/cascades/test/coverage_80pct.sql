@@ -759,3 +759,24 @@ SET cascades_planner_max_groups = 5;
 SELECT cov80_test(5702, 'RR2_max5', $$SELECT * FROM cov_j1 ORDER BY a$$);
 SET cascades_planner_max_groups = 10000;
 
+
+-- ====================================================================
+-- Section SS: Join Enumeration 验证 — 3表 join 重排 (C2+C3 associativity)
+-- ====================================================================
+
+\echo '=== SS1: 3-table all permutations (trigger C2 JoinAssociativity) ==='
+SELECT cov80_test(5801, 'SS1_3table_abc', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a JOIN cov_j3 j3 ON j1.a=j3.a$$);
+SELECT cov80_test(5802, 'SS1_3table_filter', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a JOIN cov_j3 j3 ON j2.a=j3.a WHERE j1.b>3$$);
+
+\echo '=== SS2: 3-table with different join keys (trigger C3 JoinLeftAsscom) ==='
+SELECT cov80_test(5803, 'SS2_3table_acb', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 JOIN cov_j3 j3 ON j1.a=j3.a JOIN cov_j2 j2 ON j1.a=j2.a$$);
+
+\echo '=== SS3: 3-table self-join (C2+C3 on same table) ==='
+SELECT cov80_test(5804, 'SS3_3self', $$SELECT t1.a, t2.b, t3.c FROM cov_j1 t1 JOIN cov_j1 t2 ON t1.a=t2.a JOIN cov_j1 t3 ON t2.a=t3.a$$);
+
+\echo '=== SS4: 3-table cross-style (implicit join) ==='
+SELECT cov80_test(5805, 'SS4_3cross', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1, cov_j2 j2, cov_j3 j3 WHERE j1.a=j2.a AND j2.a=j3.a$$);
+
+\echo '=== SS5: 3-table with ORDER BY after reorder ==='
+SELECT cov80_test(5806, 'SS5_3order', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a JOIN cov_j3 j3 ON j1.a=j3.a ORDER BY j2.d$$);
+
