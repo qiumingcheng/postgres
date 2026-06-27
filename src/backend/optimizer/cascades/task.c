@@ -198,6 +198,8 @@ pg_task_optimize_group(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                     if (cg->lower_bound_cost > 0)
                         child_sum += cg->lower_bound_cost;
                 }
+                /* Add minimum join cost: NestLoop of 1-tuple children */
+                child_sum += cpu_tuple_cost * 2 + cpu_operator_cost;
                 if (child_sum > 0 &&
                     (group->lower_bound_cost <= 0 ||
                      child_sum < group->lower_bound_cost))
@@ -896,9 +898,9 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         entry->child_required_props = NIL;
         entry->output = output;
 
-        /* Upper-bound pruning */
+        /* Upper-bound pruning (same threshold as IMPORTED_PATH) */
         if (ctx->upper_bound_cost > 0 &&
-            entry->total_cost > ctx->upper_bound_cost * 2.0)
+            entry->total_cost > ctx->upper_bound_cost)
             return PG_CASCADES_OK;
 
         pg_group_update_best(expr->owner_group, entry);
