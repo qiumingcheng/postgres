@@ -17,6 +17,7 @@
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
 #include "access/heapam.h"
+#include "utils/array.h"
 
 /* ========================================================================
  * Hash Table for GroupExpression Dedup
@@ -981,6 +982,8 @@ pg_statistics_refresh_from_catalog(PgPlannerCascadesContext *ctx,
             staForm = (Form_pg_statistic) GETSTRUCT(statsTuple);
             cs->null_frac  = staForm->stanullfrac;
             cs->n_distinct = staForm->stadistinct;
+            /* Histogram: deferred to Phase 3 (needs type-specific operator
+             * OID for safe get_attstatsslot call in PG 9.2.4). */
             ReleaseSysCache(statsTuple);
         }
     }
