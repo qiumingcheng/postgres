@@ -17,7 +17,7 @@
  * Hash Table for GroupExpression Dedup
  * ======================================================================== */
 
-uint32
+__attribute__((noinline)) uint32
 pg_memo_hash_key(const void *key_ptr, Size keysize)
 {
     const PgExprHashKey *key = (const PgExprHashKey *) key_ptr;
@@ -32,7 +32,7 @@ pg_memo_hash_key(const void *key_ptr, Size keysize)
     return h;
 }
 
-int
+__attribute__((noinline)) int
 pg_memo_match_key(const void *key1, const void *key2, Size keysize)
 {
     const PgExprHashKey *a = (const PgExprHashKey *) key1;
@@ -841,7 +841,7 @@ pg_memo_derive_logical_property_v2(PgMemo *memo, PgPlannerCascadesContext *ctx)
  *   struct layout changes.  Allocated via palloc, caller owns memory.
  * ======================================================================== */
 
-PgStatistics *
+__attribute__((noinline)) PgStatistics *
 pg_statistics_from_group(PgMemoGroup *group)
 {
     PgStatistics *s = (PgStatistics *) palloc0(sizeof(PgStatistics));
@@ -860,17 +860,17 @@ pg_statistics_from_group(PgMemoGroup *group)
  *   RelOptInfo.  Reads avg_width from attr_widths; null_frac and
  *   n_distinct use defaults (Phase 2 will wire pg_statistic catalog).
  */
-void
+__attribute__((noinline)) void
 pg_statistics_populate_columns(PgMemoGroup *group)
 {
     RelOptInfo *rel = group->rel;
     int nattrs;
     int i;
 
-    if (rel == NULL || rel->min_attr <= 0)
+    if (rel == NULL || rel->max_attr <= 0)
         return;
 
-    nattrs = rel->max_attr - rel->min_attr + 1;
+    nattrs = rel->max_attr;  /* user attributes: 1..max_attr */
     if (nattrs <= 0 || nattrs > 100)  /* safety cap */
         return;
 
@@ -880,15 +880,14 @@ pg_statistics_populate_columns(PgMemoGroup *group)
 
     for (i = 0; i < nattrs; i++)
     {
-        AttrNumber attnum = (AttrNumber) (rel->min_attr + i);
+        AttrNumber attnum = (AttrNumber) (i + 1);  /* start from 1 */
         PgColumnStat *cs = &group->stats.columns[group->stats.num_columns];
 
         cs->varattno = attnum;
         cs->vartype  = InvalidOid;        /* Phase 2: from pg_attribute */
         cs->null_frac = 0.0;             /* Phase 2: from pg_statistic */
         cs->n_distinct = -1.0;           /* fraction mode: 100% unique */
-        cs->avg_width = (rel->attr_widths != NULL && attnum > 0 &&
-                         attnum <= rel->max_attr)
+        cs->avg_width = (rel->attr_widths != NULL && attnum <= rel->max_attr)
                          ? rel->attr_widths[attnum] : 8;
         if (cs->avg_width <= 0)
             cs->avg_width = 8;
@@ -897,7 +896,7 @@ pg_statistics_populate_columns(PgMemoGroup *group)
     }
 }
 
-PgStatistics *
+__attribute__((noinline)) PgStatistics *
 pg_statistics_derive(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgStatistics *s = (PgStatistics *) palloc0(sizeof(PgStatistics));
