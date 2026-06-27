@@ -37,36 +37,54 @@ SQL 查询
   ↓
 PG Parser / Analyzer / Rewriter
   ↓
-subquery_planner()
-  ├─ pull_up_sublinks()          # IN/EXISTS → semi/anti join
-  └─ grouping_planner()           # ★ Cascades 接入点
+standard_planner()
+  └─ subquery_planner()
+       ├─ SS_process_ctes()         # CTE → InitPlan（★ Cascades 拦不住）
+       ├─ pull_up_sublinks()        # IN/EXISTS → semi/anti join（★ 拦不住）
+       ├─ pull_up_subqueries()      # FROM 子查询提升（★ 拦不住）
+       ├─ flatten_simple_union_all()
+       ├─ expand_inherited_tables()
+       ├─ preprocess_expression()   # 表达式规范化
        │
-       ├─ [precheck] 支持性检查
-       │    ├─ 仅 SELECT（非 DML）
-       │    ├─ 无 Window / CTE / 递归 / 继承表 / FDW
-       │    ├─ UNION ALL 允许，其他 SETOP fallback
-       │    └─ 无相关子查询（SubPlan with parParam）
-       │
-       ├─ make_one_rel()           # PG 生成下层 scan/join Path
-       │
-       ├─ pg_memo_init_from_tree() ★ 构建 Memo
-       │    ├─ 1. 创建 Memo + 哈希表
-       │    ├─ 2. 构建 OptExpression 树（Query → 树）
-       │    └─ 3. 将树插入 Memo（Group + GroupExpression）
-       │
-       ├─ pg_memo_derive_logical_property()  # 逻辑属性推导
-       │
-       ├─ pg_cascades_logical_rewrite()      # 8 阶段改写流水线
-       │
-       ├─ pg_cascades_run_tasks()            # TaskScheduler 优化搜索
-       │
-       ├─ pg_cascades_extract_best_plan()    # 提取最优 Plan
-       │    └─ 两阶段提取：COMPOSABLE_OP 优先 → IMPORTED_PATH 回退
-       │
-       ├─ pg_cascades_validate_plan()        # 结构校验
-       ├─ pg_cascades_physical_rewrite()     # Material 节点插入
-       │
-       └─ copyObject(plan) → 返回 Plan *
+       └─ grouping_planner()        # ★ Cascades 接入点（太晚了）
+            │
+            ├─ ① pg_cascades_supported_query_precheck()   # 语义粗筛
+            │     · 仅 SELECT / 无 Window / 无递归 CTE
+            │     · 无关联 SubPlan / UNION ALL 放行
+            │
+            ├─ ② prepare_query_planner_inputs()           # 建基础设施
+            │     · setup_simple_rel_arrays() → 建 base RelOptInfo
+            │     · deconstruct_jointree()  → 展开 join tree → joinlist
+            │     · generate_base_implied_equalities() → 等价类
+            │
+            ├─ ③ pg_cascades_supported_query()            # 结构检查
+            │     · 每个 base rel 检查 rtekind / relkind / FDW
+            │
+            └─ ④ pg_cascades_try_grouping_planner()       # ★ 真正的主入口
+                 │
+                 ├─ 1. 创建 MemoryContext (PgCascadesMemo)
+                 ├─ 2. 初始化规则 (pattern + 5 组合并 + 排序)
+                 │
+                 ├─ 3. make_one_rel(root, joinlist)        # PG 生成下层 Path
+                 │      · set_rel_pathlist() → 各 scan/join 路径
+                 │      · 结果存入 prep->final_rel
+                 │
+                 ├─ 4. pg_memo_init_from_tree(&ctx)        # 构建 Memo
+                 │      · 创建 Memo + hash 去重表
+                 │      · Query → OptExpression 树
+                 │      · 插入 Memo（Group + GroupExpression）
+                 │
+                 ├─ 5. pg_memo_derive_logical_property()   # 逻辑属性推导
+                 ├─ 6. pg_cascades_logical_rewrite()       # 8 阶段改写
+                 ├─ 7. pg_memo_derive_logical_property_v2()# 改写后重推导
+                 ├─ 8. pg_cascades_run_tasks()             # TaskScheduler 搜索
+                 ├─ 9. pg_cascades_extract_best_plan()     # 提取最优 Plan
+                 ├─ 10. pg_cascades_validate_plan()        # 结构校验
+                 ├─ 11. pg_cascades_physical_rewrite()     # Material 插入
+                 │
+                 └─ 12. copyObject(plan) → MemoryContextDelete
+  ↓
+grouping_planner 后续: apply_scanjoin_target / sort / limit ...
   ↓
 set_plan_references() → PlannedStmt → Executor
 ```
@@ -122,9 +140,26 @@ PgGroupBestEntry          # 某属性下的最优表达式
 
 ## 三、执行流程详解
 
-### 3.1 步骤 1：支持性检查
+### 3.0 接入时机：为什么是 `grouping_planner` 内部？
 
-`pg_cascades_supported_query_precheck()` 做快速粗筛：
+Cascades 通过 GUC `enable_cascades_planner` 在 PG 的 `grouping_planner()` 中分支。接入点之前，`subquery_planner()` 已经做了以下不可逆的操作：
+
+| 步骤 | 函数 | 效果 | Cascades 能拦截？ |
+|------|------|------|------------------|
+| CTE 处理 | `SS_process_ctes()` | CTE 固化为 InitPlan + CteScan | ❌ 不能 |
+| SubLink 转换 | `pull_up_sublinks()` | ANY/EXISTS/IN → SemiJoin | ❌ 不能 |
+| 子查询提升 | `pull_up_subqueries()` | FROM 子查询提升到主查询 | ❌ 不能 |
+| UNION ALL 展开 | `flatten_simple_union_all()` | UNION ALL 转为 appendrel | ❌ 不能 |
+| 继承表展开 | `expand_inherited_tables()` | 分区表展开 | ❌ 不能 |
+| 表达式预处理 | `preprocess_expression()` | 类型推导、常量折叠 | ❌ 不能 |
+
+**这意味着**：Cascades 拿到的是 PG 已经做过一轮逻辑优化的"残局"。要支持 CTE/子查询，只能在 Memo 内对残余物做补救（如相关 SubPlan → Apply 算子），而不能重做 PG 已经完成的优化。
+
+### 3.1 步骤 ①-③：三层检查 + 基础设施
+
+在进入 `pg_cascades_try_grouping_planner()` 之前，`grouping_planner` 内部有三层串行调用：
+
+**① `pg_cascades_supported_query_precheck()`** — 语义级粗筛（[cascades.c:98](postgres/src/backend/optimizer/cascades/cascades.c#L98)）：
 
 | 检查项 | 不支持的 | 处理 |
 |--------|---------|------|
@@ -137,17 +172,33 @@ PgGroupBestEntry          # 某属性下的最优表达式
 | 聚合 | MIN/MAX 特殊优化 | fallback |
 | 子查询 | 相关 SubPlan | fallback |
 
-**UNION ALL 特殊处理**：UNION ALL 不需要去重，可作为 Append 计划处理，允许通过 precheck。
+**② `prepare_query_planner_inputs()`** — 建 PG 查询基础设施（[planner.c:1260](postgres/src/backend/optimizer/cascades/../plan/planner.c#L1260)）：
+- `setup_simple_rel_arrays()` → 为每个 RTE 建 `RelOptInfo`
+- `deconstruct_jointree()` → 展开 join tree → 产生 `joinlist`（后续 `make_one_rel` 的输入）
+- `generate_base_implied_equalities()` → 等价类推导
 
-### 3.2 步骤 2：构建下层路径
+**③ `pg_cascades_supported_query()`** — 结构级检查（[cascades.c:138](postgres/src/backend/optimizer/cascades/cascades.c#L138)）：
+- 检查每个 base rel 的 `rtekind == RTE_RELATION`（普通表）→ CTE（RTE_CTE）和子查询（RTE_SUBQUERY）在此被挡
+- 检查 `relkind` / FDW / 继承表
+- Phase 1 限制：3+ 表 JOIN + ORDER+LIMIT → fallback
 
-调用 PG 原生的 `make_one_rel(root, joinlist)` 生成所有 scan/join Path。
+**只有三步全部返回 OK，才进入真正的 Cascades 主入口。**
 
-**关键细节**：在调用前切换到 PG 的 planner context，否则 Path 会被分配在 Cascades 的 memo context 中——fallback 时访问已释放内存会 SIGSEGV。
+### 3.2 主入口：`pg_cascades_try_grouping_planner()`
 
-### 3.3 步骤 3：构建 Memo
+12 步全流程（[cascades.c:248-528](postgres/src/backend/optimizer/cascades/cascades.c#L248-L528)）：
 
-`pg_memo_init_from_tree()` 是 StarRocks `Memo.init()` 的等价函数：
+**Step 1-2. 环境初始化**
+- 创建专用 `MemoryContext` (`PgCascadesMemo`)
+- 初始化 rule patterns + 合并 5 组规则（Phase 1 impl + Phase 2 scan/join + Phase 4 join + Enforcer + Phase 3/5 trans），按 promise 降序排列
+- 检查 `trivial_result`（无 FROM 的查询）→ bail out
+
+**Step 3. `make_one_rel(root, joinlist)`** — PG 生成下层路径
+- 调用 PG 原生的 `make_one_rel()` 生成所有 scan/join Path
+- **关键细节**：在调用前切换到 PG 的 planner context，否则 Path 会被分配在 Cascades 的 memo context 中——fallback 时访问已释放内存会 SIGSEGV
+- 结果存入 `prep->final_rel`
+
+**Step 4. `pg_memo_init_from_tree()`** — 构建 Memo（StarRocks `Memo.init()` 等价函数）
 
 1. **创建 Memo 壳**：`palloc0` Memo + `hash_create` 去重哈希表
 2. **构建 OptExpression 树**：`pg_cascades_build_initial_tree()` 将 PG 的 Query + joinlist 转为逻辑表达式树：
@@ -157,13 +208,33 @@ PgGroupBestEntry          # 某属性下的最优表达式
    ```
 3. **插入 Memo**：`pg_memo_insert_expression_tree()` 递归将树转为 Group + GroupExpression。对 LogicalScan 导入 PG 的 Path 作为 IMPORTED_PATH 物理候选；对 LogicalJoin 查找 `join_rel_list` 匹配导入 join Path。
 
-### 3.4 步骤 4：逻辑属性推导
+**Step 5. `pg_memo_derive_logical_property()`** — 逻辑属性推导
+- 自底向上计算每个 Group 的 rows/width。同时填充 `PgStatistics` 结构体。
 
-`pg_memo_derive_logical_property()` 自底向上计算每个 Group 的 rows/width。同时填充 `PgStatistics` 结构体。
+**Step 6. `pg_cascades_logical_rewrite()`** — 8 阶段改写流水线
+- 在 Memo Group 上应用变换规则，详见 [3.3](#33-步骤-6改写流水线)
 
-### 3.5 步骤 5：改写流水线
+**Step 7. `pg_memo_derive_logical_property_v2()`** — 改写后重新推导
+- 改写可能产生新 group（如 JoinAssociativity 创建新 join），需要重新计算属性
 
-`pg_cascades_logical_rewrite()` 在 Memo Group 上应用变换规则，共 9 个阶段：
+**Step 7b. Root group 修正** — 改写可能把 root group 清空（合并到其他 group），遍历找到第一个非空 group 作为新 root
+
+**Step 8. `pg_cascades_run_tasks()`** — TaskScheduler 优化搜索，详见 [3.4](#34-步骤-8taskscheduler-优化)
+
+**Step 9. `pg_cascades_extract_best_plan()`** — 提取最优 Plan，详见 [3.5](#35-步骤-9计划提取)
+
+**Step 10. `pg_cascades_validate_plan()`** — 结构校验，递归检查 Plan 树完整性
+
+**Step 11. `pg_cascades_physical_rewrite()`** — 物理改写，在 NestLoop 内侧插入 Material 节点
+
+**Step 12. 清理**
+- `copyObject(plan)` 将 Plan 从 MemoContext 复制到调用方 context
+- `MemoryContextDelete(memo_cxt)` 释放所有 Cascades 内存
+- 返回 status → 调用方根据 status 决定 fallback 或使用 Cascades plan
+
+### 3.3 步骤 6：改写流水线
+
+`pg_cascades_logical_rewrite()` 在 Memo Group 上应用变换规则，共 8 个阶段（CTE Inline 和 Subquery 阶段当前为空占位）：
 
 | 阶段 | 规则数 | 遍历方向 | 说明 |
 |------|--------|---------|------|
@@ -177,7 +248,7 @@ PgGroupBestEntry          # 某属性下的最优表达式
 
 每阶段迭代至收敛（最多 10 轮），列裁剪用 top-down 遍历（上层需求向下传播）。
 
-### 3.6 步骤 6：TaskScheduler 优化
+### 3.4 步骤 8：TaskScheduler 优化
 
 `pg_cascades_run_tasks()` 是 LIFO 栈驱动的主循环。6 种任务：
 
@@ -214,7 +285,7 @@ ENFORCE_AND_COST           ← 4 状态机
 - **代价下界剪枝**：`lower_bound_cost > upper_bound_cost` → 整组跳过
 - **全局上界剪枝**：`child_total + local_cost > ctx->upper_bound_cost` → 跳过
 
-### 3.7 步骤 7：计划提取
+### 3.5 步骤 9：计划提取
 
 `pg_cascades_extract_best_plan()` 两阶段提取：
 
@@ -224,7 +295,7 @@ ENFORCE_AND_COST           ← 4 状态机
 对于 Scan/Join：`build_plan_recurse` 不处理 COMPOSABLE_OP 的 scan/join（返回 NULL），由 IMPORTED_PATH 处理。
 对于上层算子：COMPOSABLE_OP entry 递归构建——Sort → `make_sort_from_pathkeys`、Agg → `make_agg`、Limit → `make_limit` 等。
 
-### 3.8 步骤 8-9：后优化 + 清理
+### 3.6 步骤 10-12：后优化 + 清理
 
 - `pg_cascades_validate_plan()`：递归检查 Plan 树结构完整性
 - `pg_cascades_physical_rewrite()`：在 NestLoop 内侧插入 Material 节点
