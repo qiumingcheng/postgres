@@ -372,9 +372,11 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     }
 
     /* 5. Build lower paths if not already built.
-     * make_one_rel generates both base scan paths AND join paths via
-     * PG's standard_join_search.  Cascades adds its own join enumeration
-     * via Phase4 rules + JoinAssociativity in the task scheduler. */
+     * For ≤8 tables: PG's standard_join_search provides exhaustive DP.
+     * For >8 tables: GEQO provides an initial plan; Cascades then tries
+     *   to improve it via Phase4 rules + JoinAssociativity + bound pruning.
+     *   This is a StarRocks MultiJoinBinder-equivalent relay: GEQO sets
+     *   the upper bound, Cascades searches for local improvements. */
     if (!prep->lower_paths_built)
     {
         RelOptInfo *final_rel;
