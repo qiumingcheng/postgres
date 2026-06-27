@@ -982,8 +982,18 @@ pg_statistics_refresh_from_catalog(PgPlannerCascadesContext *ctx,
             staForm = (Form_pg_statistic) GETSTRUCT(statsTuple);
             cs->null_frac  = staForm->stanullfrac;
             cs->n_distinct = staForm->stadistinct;
-            /* Histogram: deferred to Phase 3 (needs type-specific operator
-             * OID for safe get_attstatsslot call in PG 9.2.4). */
+
+            /* Histogram: pass NULL for numbers (not needed, and pg_statistic
+             * may have NULL stanumbers for histogram slots). */
+            if (get_attstatsslot(statsTuple,
+                                 InvalidOid, -1,
+                                 STATISTIC_KIND_HISTOGRAM, InvalidOid,
+                                 NULL,    /* actualop */
+                                 &cs->hist_values, &cs->hist_nvalues,
+                                 NULL, NULL))       /* no numbers needed */
+            {
+                /* values copied by get_attstatsslot (datumCopy for by-ref) */
+            }
             ReleaseSysCache(statsTuple);
         }
     }
