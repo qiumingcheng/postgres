@@ -399,27 +399,30 @@ ENFORCE_AND_COST:
 
 ## 九、StarRocks 对比
 
-| 特性 | StarRocks | PG Cascades |
-|------|----------|------------|
-| 优化器语言 | Java | C |
-| 规则总数 | 198 | ~40 |
-| Join 枚举 | 完整（bushy trees） | Path 导入模式（Phase 2 设计就位） |
-| 统计信息 | 列级 + 直方图 | 行级（RelOptInfo.rows/width） |
-| 分布式属性 | DistributionProperty | 不需要（单机） |
-| 改写流水线 | 组合规则系统 | 8 阶段流水线 |
-| Window/CTE/SETOP | 完整支持 | fallback（UNION ALL 除外） |
-| 代价模型 | CPU/Memory/Network | PG costsize.c |
+| 特性 | StarRocks | PG Cascades | 差距 |
+|------|----------|------------|------|
+| 优化器语言 | Java | C | — |
+| 规则总数 | 198 | ~40 | 量级差距，已覆盖 Phase 1 核心规则 |
+| **JoinCommutativity** | ✅ A⋈B→B⋈A | ✅ 已启用（rewrite pipeline） | **无差距** |
+| **JoinAssociativity** | ✅ (A⋈B)⋈C→A⋈(B⋈C) | ⚠️ 规则存在，transform 被守卫拦截 | **有差距**：无法重组多表 join 树 |
+| Join 物理算子生成 | ✅ 实现规则生成 | ✅ Phase4 调用 `make_join_rel`→IMPORTED_PATH | **无差距** |
+| COMPOSABLE_OP join 代价 | ✅ 完整代价模型 | ✅ PG 公式，与 IMPORTED_PATH 公平竞争 | **无差距** |
+| Join 顺序发现 | ✅ 从平表列表构建所有树 | ⚠️ 初始树由 PG `deconstruct_jointree` 决定 | **有差距**：仅可交换，不可发现新顺序 |
+| 统计信息 | 列级 + 直方图 | 行级（RelOptInfo.rows/width + PgStatistics） | Phase 2 |
+| 分布式属性 | DistributionProperty | 不需要（单机） | — |
+| 改写流水线 | 组合规则系统 | 8 阶段流水线 | 覆盖核心场景 |
+| Window/CTE/SETOP | 完整支持 | fallback（UNION ALL 除外） | Phase 3 |
+| 代价模型 | CPU/Memory/Network | PG costsize.c | PG 单机模型更准确 |
 | 代码量 | ~10 万行 Java | ~8200 行 C |
 
 ---
 
 ## 十、下一步计划
 
-| 优先级 | 功能 | 状态 |
-|--------|------|------|
-| ~~P1~~ | Statistics 对象 | ✅ 完成 |
-| ~~P1~~ | Join Enumeration (Phase 1) | ✅ 完成（代价公平竞争） |
-| P2 | Join Enumeration (Phase 2) | 设计就位，需变换规则创建新 join 组合 |
-| P2 | JoinAssociativity 启用 | 规则已注册，需验证正确性 |
-| P3 | Window / CTE / 完整 SETOP | fallback |
-| — | 覆盖率 → 80% | 需 planbuild 代码变更 |
+| 优先级 | 功能 | 状态 | 说明 |
+|--------|------|------|------|
+| ~~P1~~ | Statistics 对象 | ✅ | `PgStatistics` 嵌入 `PgMemoGroup` |
+| ~~P1~~ | JoinCommutativity + 公平代价 | ✅ | 可交换 2 表 join，COMPOSABLE_OP 无惩罚分 |
+| **P2** | **JoinAssociativity 启用** | ⚠️ **主要差距** | 规则存在但 `pg_rule_join_associativity` 返回 NIL。需修复守卫条件 + 实现 (A⋈B)⋈C → A⋈(B⋈C) 变换。启用后可与 StarRocks join 枚举对齐 |
+| P3 | Window / CTE / 完整 SETOP | ❌ | fallback |
+| — | 覆盖率 → 80% | — | 需 planbuild 代码变更 |
