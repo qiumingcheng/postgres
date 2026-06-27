@@ -685,6 +685,11 @@ extern void pg_memo_derive_logical_property_v2(PgMemo *memo,
 extern void pg_derive_expr_stats(PgPlannerCascadesContext *ctx,
     PgGroupExpr *expr, double *out_rows, int *out_width);
 
+/* Phase 6: Statistics API (StarRocks parity — standalone, not embedded) */
+extern PgStatistics *pg_statistics_from_group(PgMemoGroup *group);
+extern PgStatistics *pg_statistics_derive(PgPlannerCascadesContext *ctx,
+    PgGroupExpr *expr);
+
 /* Phase 4: combination rule registration */
 extern void pg_cascades_init_combination_rules(void);
 extern PgCombinationRule *pg_cascades_get_combination_rules(int *num_rules);

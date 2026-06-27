@@ -809,6 +809,41 @@ pg_memo_derive_logical_property_v2(PgMemo *memo, PgPlannerCascadesContext *ctx)
 }
 
 /* ========================================================================
+ * Phase 6: Statistics API (StarRocks Statistics parity)
+ *
+ *   PgStatistics is standalone (not embedded in PgMemoGroup) to avoid
+ *   struct layout changes.  Allocated via palloc, caller owns memory.
+ * ======================================================================== */
+
+PgStatistics *
+pg_statistics_from_group(PgMemoGroup *group)
+{
+    PgStatistics *s = (PgStatistics *) palloc0(sizeof(PgStatistics));
+
+    if (group->rows > 0)
+        s->row_count = group->rows;
+    s->width   = group->width;
+    s->derived = true;
+
+    return s;
+}
+
+PgStatistics *
+pg_statistics_derive(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
+{
+    PgStatistics *s = (PgStatistics *) palloc0(sizeof(PgStatistics));
+    double rows = 0;
+    int    width = 0;
+
+    pg_derive_expr_stats(ctx, expr, &rows, &width);
+    s->row_count = rows;
+    s->width     = width;
+    s->derived   = true;
+
+    return s;
+}
+
+/* ========================================================================
  * Phase 5: Group-to-RelOptInfo mapping helpers
  * ======================================================================== */
 
