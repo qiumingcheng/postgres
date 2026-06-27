@@ -797,3 +797,21 @@ SELECT cov80_test(5903, 'TT3_mixed', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 JO
 \echo '=== TT4: LEFT+RIGHT mixed (guards should block all reorder) ==='
 SELECT cov80_test(5904, 'TT4_left_right', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 LEFT JOIN cov_j2 j2 ON j1.a=j2.a RIGHT JOIN cov_j3 j3 ON j2.a=j3.a$$);
 
+
+-- ====================================================================
+-- Section UU: 列级统计覆盖 — 触发 selectivity 估算 + clamp 分支
+-- ====================================================================
+
+\echo '=== UU1: Single-row table → sel > 0.9 clamp (upper bound) ==='
+SELECT cov80_test(6001, 'UU1_single_clamp', $$SELECT * FROM cascades_single WHERE val > 0$$);
+
+\echo '=== UU2: Normal table → sel = 1/rows (middle range) ==='
+SELECT cov80_test(6002, 'UU2_mid_range', $$SELECT a FROM cov_j1 WHERE a > 10$$);
+SELECT cov80_test(6003, 'UU2_multi_filter', $$SELECT a, b FROM cov_j1 WHERE b > 5 AND c = 'x1'$$);
+
+\echo '=== UU3: Filter on indexed column (column stats from scan group) ==='
+SELECT cov80_test(6004, 'UU3_idx_filter', $$SELECT id FROM coverage_t1 WHERE id > 50$$);
+
+\echo '=== UU4: Join with column stats from both sides ==='
+SELECT cov80_test(6005, 'UU4_join_stats', $$SELECT t1.id, t2.score FROM coverage_t1 t1 JOIN coverage_t2 t2 ON t1.id = t2.t1_id WHERE t1.val > 30$$);
+

@@ -886,7 +886,7 @@ pg_statistics_populate_columns(PgMemoGroup *group)
         cs->varattno = attnum;
         cs->vartype  = InvalidOid;        /* Phase 2: from pg_attribute */
         cs->null_frac = 0.0;             /* Phase 2: from pg_statistic */
-        cs->n_distinct = (rel->rows > 0) ? rel->rows : 1000.0; /* default */
+        cs->n_distinct = -1.0;           /* fraction mode: 100% unique */
         cs->avg_width = (rel->attr_widths != NULL && attnum > 0 &&
                          attnum <= rel->max_attr)
                          ? rel->attr_widths[attnum] : 8;
