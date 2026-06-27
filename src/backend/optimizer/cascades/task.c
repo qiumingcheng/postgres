@@ -997,26 +997,51 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                     }
 
                     /*
-                     * Child not ready for this required property.
+                     * Child not ready.  If even the child's lower bound
+                     * (from previous partial optimization) already exceeds
+                     * the global upper bound, skip without waiting.
+                     */
+                    if (child_group->lower_bound_cost > 0 &&
+                        ctx->upper_bound_cost > 0 &&
+                        task->total_cost + child_group->lower_bound_cost
+                            > ctx->upper_bound_cost)
+                    {
+                        task->cur_child_index++;
+                        continue;  /* child too expensive, try next */
+                    }
+
+                    /*
                      * Clone self to resume after child is optimized,
                      * then push OptimizeGroupTask for child.
+                     * When clone resumes, re-check bound with updated child costs.
                      */
-                    PgOptimizerTask *clone = pg_task_clone(task);
-                    PgOptimizerTask *child_task;
+                    {
+                        PgOptimizerTask *clone = pg_task_clone(task);
+                        PgOptimizerTask *child_task;
 
-                    clone->cur_child_index++; /* next time, try next */
-                    task_stack_push(ctx, clone);
+                        clone->cur_child_index++; /* resume at next child */
+                        task_stack_push(ctx, clone);
 
-                    child_task = (PgOptimizerTask *)
-                        palloc0(sizeof(PgOptimizerTask));
-                    child_task->type = PG_TASK_OPTIMIZE_GROUP;
-                    child_task->group = child_group;
-                    task_stack_push(ctx, child_task);
+                        child_task = (PgOptimizerTask *)
+                            palloc0(sizeof(PgOptimizerTask));
+                        child_task->type = PG_TASK_OPTIMIZE_GROUP;
+                        child_task->group = child_group;
+                        task_stack_push(ctx, child_task);
 
-                    return PG_CASCADES_OK; /* pause */
+                        return PG_CASCADES_OK; /* pause */
+                    }
                 }
 
-                /* Child ready: accumulate costs */
+                /* Child ready: bound check before accumulating */
+                if (ctx->upper_bound_cost > 0 &&
+                    task->total_cost + child_best->total_cost
+                        > ctx->upper_bound_cost)
+                {
+                    task->enforce_state = ENFORCE_COMPLETE;
+                    return PG_CASCADES_OK;
+                }
+
+                /* Accumulate costs */
                 task->startup_cost += child_best->startup_cost;
                 task->total_cost += child_best->total_cost;
                 task->cur_child_index++;
