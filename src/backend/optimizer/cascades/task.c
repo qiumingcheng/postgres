@@ -377,14 +377,6 @@ pg_task_derive_stats(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             expr->owner_group->rows = rows;
         if (width > 0 && expr->owner_group->width <= 0)
             expr->owner_group->width = width;
-
-        /* Phase 6: populate structured statistics */
-        if (!expr->owner_group->stats.derived)
-        {
-            expr->owner_group->stats.row_count = rows;
-            expr->owner_group->stats.width     = width;
-            expr->owner_group->stats.derived   = true;
-        }
     }
 
     expr->stats_derived = true;
@@ -794,23 +786,22 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
          expr->op <= PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN))
         return PG_CASCADES_OK;
 
-    /* COMPOSABLE_OP join: fast-path costing from statistics.
-     * IMPORTED_PATH join entries already handle production plan extraction;
-     * these entries validate the cost model and serve as Phase 2 foundation. */
+    /* COMPOSABLE_OP join: costing with PG-derived formulas.
+     * Plan extraction: IMPORTED_PATH handles production (two-pass in planbuild.c).
+     * Phase 6: no penalty — competes fairly with IMPORTED_PATH entries. */
     if (expr->mode == PG_PHYS_EXPR_COMPOSABLE_OP &&
         (expr->op >= PG_CASCADES_PHYSICAL_NESTLOOP &&
          expr->op <= PG_CASCADES_PHYSICAL_MERGEJOIN))
     {
         PgOutputProperty output;
         PgGroupBestEntry *entry;
-        Cost child_total = 0;
+        Cost child_startup = 0, child_total = 0;
         double outer_rows = 100, inner_rows = 100;
         int    outer_width = 10, inner_width = 10;
-        Cost   local_cost;
+        Cost   local_startup = 0, local_total = 0;
 
         MemSet(&output, 0, sizeof(PgOutputProperty));
 
-        /* Gather child stats */
         if (list_length(expr->inputs) >= 2)
         {
             PgMemoGroup *outer_grp = (PgMemoGroup *) linitial(expr->inputs);
@@ -821,61 +812,64 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             if (outer_grp->width > 0) outer_width = outer_grp->width;
             if (inner_grp->width > 0) inner_width = inner_grp->width;
 
-            /* Accumulate child costs from best entries (use cheapest) */
             if (list_length(outer_grp->best_entries) > 0)
             {
                 PgGroupBestEntry *be = (PgGroupBestEntry *)
                     linitial(outer_grp->best_entries);
-                child_total += be->total_cost;
+                child_startup += be->startup_cost;
+                child_total   += be->total_cost;
             }
             if (list_length(inner_grp->best_entries) > 0)
             {
                 PgGroupBestEntry *be = (PgGroupBestEntry *)
                     linitial(inner_grp->best_entries);
-                child_total += be->total_cost;
+                child_startup += be->startup_cost;
+                child_total   += be->total_cost;
             }
         }
 
-        /* Compute local join cost */
         switch (expr->op)
         {
             case PG_CASCADES_PHYSICAL_NESTLOOP:
-                local_cost = outer_rows * inner_rows * cpu_tuple_cost * 0.01;
+                local_total = outer_rows * inner_rows * cpu_tuple_cost * 0.01;
                 break;
             case PG_CASCADES_PHYSICAL_HASHJOIN:
-                local_cost = inner_rows * cpu_operator_cost
-                           + inner_rows * inner_width * cpu_tuple_cost * 0.01;
+                local_startup = inner_rows * cpu_operator_cost;
+                local_total = inner_rows * (cpu_operator_cost + cpu_tuple_cost * 0.01);
                 break;
             case PG_CASCADES_PHYSICAL_MERGEJOIN:
-                local_cost = outer_rows * cpu_operator_cost * 0.5;
+                local_total = (outer_rows + inner_rows) * cpu_operator_cost * 0.5;
                 break;
             default:
-                local_cost = 1.0;
                 break;
         }
-        if (local_cost < 0.01) local_cost = 0.01;
+        if (local_startup < 0.01) local_startup = 0.01;
+        if (local_total   < 0.01) local_total   = 0.01;
 
-        /* Output properties: conservative — no guaranteed pathkeys */
         output.pathkeys = NIL;
         output.required_outer = NULL;
-        output.rows = outer_rows * inner_rows * 0.1;  /* join selectivity */
+        output.rows = outer_rows * inner_rows * 0.1;
         output.width = outer_width + inner_width;
 
-        /* Phase 4: upper-bound pruning */
-        if (ctx->upper_bound_cost > 0 &&
-            child_total + local_cost > ctx->upper_bound_cost * 2.0)
-            return PG_CASCADES_OK;
-
-        /* Create best entry with conservative cost (higher than IMPORTED_PATH) */
         entry = (PgGroupBestEntry *) palloc0(sizeof(PgGroupBestEntry));
         entry->required = pg_required_property_copy(ctx, required);
         entry->expr = expr;
-        entry->startup_cost = local_cost;
-        entry->total_cost = child_total + local_cost + 10000.0; /* penalty */
+        entry->startup_cost = child_startup + local_startup;
+        entry->total_cost   = child_total   + local_total;
         entry->child_required_props = NIL;
         entry->output = output;
 
+        /* Upper-bound pruning */
+        if (ctx->upper_bound_cost > 0 &&
+            entry->total_cost > ctx->upper_bound_cost * 2.0)
+            return PG_CASCADES_OK;
+
         pg_group_update_best(expr->owner_group, entry);
+
+        if (ctx->upper_bound_cost == 0 ||
+            entry->total_cost < ctx->upper_bound_cost)
+            ctx->upper_bound_cost = entry->total_cost;
+
         return PG_CASCADES_OK;
     }
 

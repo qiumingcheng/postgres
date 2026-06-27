@@ -235,8 +235,9 @@ struct PgGroupBestEntry
     PgOutputProperty output;        /* 该 expression 在该 required 下的输出 */
 };
 
-/* Phase 6: Structured statistics per group (StarRocks Statistics parity).
- * Embedded in PgMemoGroup; palloc0 initializes to {0,0,false}. */
+/* Phase 6: Structured statistics (StarRocks Statistics parity).
+ * Defined for Phase 2 API readiness — currently accessed via helper
+ * functions that write to PgMemoGroup.rows/width fields. */
 typedef struct PgStatistics
 {
     double      row_count;
@@ -251,9 +252,8 @@ struct PgMemoGroup
     List       *logical_exprs;      /* List<PgGroupExpr *> */
     List       *physical_exprs;     /* List<PgGroupExpr *> */
 
-    double      rows;               /* 估算行数 (backward compat) */
-    int         width;              /* 估算宽度 (backward compat) */
-    PgStatistics stats;             /* Phase 6: structured statistics */
+    double      rows;               /* 估算行数 */
+    int         width;              /* 估算宽度 */
 
     List       *best_entries;       /* List<PgGroupBestEntry *> */
     RelOptInfo *rel;               /* 仅当此 group 映射到一个 PG 关系时 */

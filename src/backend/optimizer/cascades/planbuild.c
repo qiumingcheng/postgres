@@ -299,6 +299,8 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     (PgRequiredProperty *) pg_safe_linitial_child_req(best),
                     child_best, &child_out);
 
+                if (child == NULL)
+                    return NULL;
                 result = (Plan *) make_sort_from_pathkeys(ctx->root, child,
                     required->pathkeys, required->limit_tuples);
             }
@@ -524,6 +526,8 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     (PgRequiredProperty *) pg_safe_linitial_child_req(best),
                     child_best, &child_out);
 
+                if (child == NULL)
+                    return NULL;
                 result = (Plan *) make_unique(child, ctx->upper->distinctClause);
             }
             break;
@@ -561,6 +565,8 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     (PgRequiredProperty *) pg_safe_linitial_child_req(best),
                     child_best, &child_out);
 
+                if (child == NULL)
+                    return NULL;
                 result = (Plan *) make_limit(child,
                     ctx->root->parse->limitOffset,
                     ctx->root->parse->limitCount,

@@ -805,14 +805,6 @@ pg_memo_derive_logical_property_v2(PgMemo *memo, PgPlannerCascadesContext *ctx)
             group->rows = best_prop.rows;
         if (best_prop.width > 0 && group->width <= 0)
             group->width = best_prop.width;
-
-        /* Phase 6: sync structured statistics */
-        if (!group->stats.derived && group->rows > 0)
-        {
-            group->stats.row_count = group->rows;
-            group->stats.width    = group->width;
-            group->stats.derived  = true;
-        }
     }
 }
 
