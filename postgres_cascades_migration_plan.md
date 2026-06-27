@@ -468,23 +468,25 @@ ENFORCE_AND_COST:
 
 ---
 
-## 九、StarRocks 对比
+## 九、三方对比：StarRocks vs PG 原生 9.2.4 vs PG Cascades
 
-| 特性 | StarRocks | PG Cascades | 差距 |
-|------|----------|------------|------|
-| 优化器语言 | Java | C | — |
-| 规则总数 | 198 | ~40 | 量级差距，已覆盖 Phase 1 核心规则 |
-| **JoinCommutativity** | ✅ A⋈B→B⋈A | ✅ 已启用（rewrite pipeline） | **无差距** |
-| **JoinAssociativity** | ✅ (A⋈B)⋈C→A⋈(B⋈C) | ⚠️ 规则存在，transform 被守卫拦截 | **有差距**：无法重组多表 join 树 |
-| Join 物理算子生成 | ✅ 实现规则生成 | ✅ Phase4 调用 `make_join_rel`→IMPORTED_PATH | **无差距** |
-| COMPOSABLE_OP join 代价 | ✅ 完整代价模型 | ✅ PG 公式，与 IMPORTED_PATH 公平竞争 | **无差距** |
-| Join 顺序发现 | ✅ 从平表列表构建所有树 | ⚠️ 初始树由 PG `deconstruct_jointree` 决定 | **有差距**：仅可交换，不可发现新顺序 |
-| 统计信息 | 列级 + 直方图 | 行级（RelOptInfo.rows/width + PgStatistics） | Phase 2 |
-| 分布式属性 | DistributionProperty | 不需要（单机） | — |
-| 改写流水线 | 组合规则系统 | 8 阶段流水线 | 覆盖核心场景 |
-| Window/CTE/SETOP | 完整支持 | fallback（UNION ALL 除外） | Phase 3 |
-| 代价模型 | CPU/Memory/Network | PG costsize.c | PG 单机模型更准确 |
-| 代码量 | ~10 万行 Java | ~8200 行 C |
+| 领域 | StarRocks | PG 原生 9.2.4 | PG Cascades | 评估 |
+|------|-----------|-------------|-------------|------|
+| **JoinCommutativity** (A⋈B→B⋈A) | ✅ | ❌ 无 Cascades | ✅ 已实现 | 无差距 |
+| **JoinAssociativity** (A⋈B)⋈C↔A⋈(B⋈C) | ✅ | ❌ 无 Cascades | ✅ 已修复 (C2+C3) | 无差距 |
+| **N-ary Join 枚举** (MultiJoinNode→DP) | ✅ | ❌ standard_join_search+GEQO | ❌ 仅两两交换 | **高影响** |
+| **物理 Filter 算子** | ✅ 独立 PhysicalFilter | ⚠️ 合并到 baserestrictinfo | ⚠️ 同 PG 原生 | 低——PG 架构如此 |
+| **统一 TopN (Sort+Limit)** | ✅ PhysicalTopN | ❌ 分离 Sort+Limit | ⚠️ 同 PG 原生 | 低——PG 无需 |
+| **子查询解关联** | ✅ 5 规则流水线 | ✅ pull_up_sublinks（半/反连接）; ❌ 标量子查询无 Cascades | ❌ 标量子查询 fallback | **高影响** |
+| **CTE 优化** | ✅ produce/consume | ⚠️ SS_process_ctes 固化 | ❌ 同 PG 原生 | 中 |
+| **代价模型** | ✅ CPU/Memory 三分量 | ✅ costsize.c（单分量） | ✅ 复用 PG costsize.c | 低——PG 单机模型够用 |
+| **DistributionProperty** | ✅ BROADCAST/SHUFFLE | ❌ 单机不需要 | ❌ 不需要 | 无 |
+| **Window 函数** | ✅ PhysicalWindow | ✅ 原生支持 | ❌ fallback | 中 |
+| **列级统计** (null_frac/n_distinct) | ✅ | ✅ pg_statistic | ✅ 已接入真实值 | 完成 |
+| **直方图** (histogram_bounds) | ✅ | ✅ pg_statistic | ✅ 已接入 | 完成 |
+| **改写流水线** | 组合规则系统 | ❌ 无 | ✅ 8 阶段 + 组合规则 | 完成 |
+| **代码量** | ~10 万行 Java | — | ~8300 行 C | — |
+| **覆盖率** | — | — | 75.5% 行 / 92.1% 函数 | — |
 
 ---
 
@@ -492,8 +494,9 @@ ENFORCE_AND_COST:
 
 | 优先级 | 功能 | 状态 | 说明 |
 |--------|------|------|------|
-| ~~P1~~ | Statistics 对象 | ✅ | `PgStatistics` 嵌入 `PgMemoGroup` |
-| ~~P1~~ | JoinCommutativity + 公平代价 | ✅ | 可交换 2 表 join，COMPOSABLE_OP 无惩罚分 |
-| **P2** | **JoinAssociativity 启用** | ⚠️ **主要差距** | 规则存在但 `pg_rule_join_associativity` 返回 NIL。需修复守卫条件 + 实现 (A⋈B)⋈C → A⋈(B⋈C) 变换。启用后可与 StarRocks join 枚举对齐 |
-| P3 | Window / CTE / 完整 SETOP | ❌ | fallback |
-| — | 覆盖率 → 80% | — | 需 planbuild 代码变更 |
+| ~~P1~~ | 列级统计 + 直方图 | ✅ | null_frac/n_distinct 真实值 + 直方图已接入 pg_statistic |
+| ~~P1~~ | JoinAssociativity + LeftAsscom | ✅ | C2/C3 通过 relids 回退修复，132+ 次成功变换 |
+| **P1** | **N-ary Join 枚举** | ❌ | MultiJoinNode 展平 + DP/Greedy 搜索，5+ 表 JOIN 质变 |
+| **P1** | **子查询解关联** | ❌ | Apply→Join 流水线，标量子查询最常见优化入口 |
+| P2 | Window / CTE | ❌ | fallback |
+| P2 | 覆盖率 → 80% | — | 需 planbuild 代码变更 |
