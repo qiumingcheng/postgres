@@ -239,11 +239,15 @@ struct PgGroupBestEntry
  * Populated from PG's pg_statistic catalog for scan groups. */
 typedef struct PgColumnStat
 {
-    AttrNumber  varattno;      /* column attribute number */
-    Oid         vartype;        /* column type OID */
-    double      null_frac;      /* fraction of NULL values (0-1) */
-    double      n_distinct;     /* number of distinct values (<0 = fraction) */
-    double      avg_width;      /* average column width in bytes */
+    AttrNumber  varattno;       /* column attribute number */
+    Oid         vartype;         /* column type OID */
+    double      null_frac;       /* from pg_statistic.stanullfrac */
+    double      n_distinct;      /* from pg_statistic.stadistinct (<0=fraction) */
+    double      avg_width;       /* average column width in bytes */
+
+    /* Phase 6: histogram bounds for range predicate selectivity */
+    int         hist_nvalues;    /* number of histogram bucket boundaries */
+    Datum      *hist_values;     /* histogram boundary values (palloc'd array) */
 } PgColumnStat;
 
 /* Phase 6: Structured group-level statistics (StarRocks Statistics parity). */

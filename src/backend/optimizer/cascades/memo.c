@@ -12,6 +12,11 @@
 #include "nodes/bitmapset.h"
 #include "utils/memutils.h"
 #include "utils/hsearch.h"
+#include "utils/syscache.h"
+#include "utils/selfuncs.h"
+#include "catalog/pg_statistic.h"
+#include "catalog/pg_type.h"
+#include "access/heapam.h"
 
 /* ========================================================================
  * Hash Table for GroupExpression Dedup
@@ -880,18 +885,53 @@ pg_statistics_populate_columns(PgMemoGroup *group)
 
     for (i = 0; i < nattrs; i++)
     {
-        AttrNumber attnum = (AttrNumber) (i + 1);  /* start from 1 */
+        AttrNumber attnum = (AttrNumber) (i + 1);
         PgColumnStat *cs = &group->stats.columns[group->stats.num_columns];
+        HeapTuple   statsTuple;
+        Form_pg_statistic staForm;
+        float4     *numbers;
+        int         nnumbers;
 
         cs->varattno = attnum;
-        cs->vartype  = InvalidOid;        /* Phase 2: from pg_attribute */
-        cs->null_frac = 0.0;             /* Phase 2: from pg_statistic */
-        cs->n_distinct = -1.0;           /* fraction mode: 100% unique */
+        cs->vartype  = InvalidOid;
+        cs->null_frac = 0.0;
+        cs->n_distinct = -1.0;
         cs->avg_width = (rel->attr_widths != NULL && attnum <= rel->max_attr)
                          ? rel->attr_widths[attnum] : 8;
         if (cs->avg_width <= 0)
             cs->avg_width = 8;
+        cs->hist_nvalues = 0;
+        cs->hist_values  = NULL;
 
+        /* Phase 6: read real statistics from pg_statistic catalog */
+        statsTuple = SearchSysCache2(STATRELATTINH,
+                                      ObjectIdGetDatum(rel->relid),
+                                      Int16GetDatum(attnum));
+        if (!HeapTupleIsValid(statsTuple))
+        {
+            group->stats.num_columns++;
+            continue;
+        }
+
+        staForm = (Form_pg_statistic) GETSTRUCT(statsTuple);
+
+        /* null_frac and n_distinct from pg_statistic */
+        cs->null_frac  = staForm->stanullfrac;
+        cs->n_distinct = staForm->stadistinct;
+
+        /* Histogram: read STATISTIC_KIND_HISTOGRAM (kind=2) */
+        if (get_attstatsslot(statsTuple,
+                             0, 0,  /* type/typmod not needed for histogram */
+                             STATISTIC_KIND_HISTOGRAM, InvalidOid,
+                             &cs->hist_values, &cs->hist_nvalues,
+                             &numbers, &nnumbers))
+        {
+            /* histogram stored in hist_values[0..hist_nvalues-1] */
+            if (nnumbers > 0 && numbers != NULL)
+                pfree(numbers);
+        }
+
+        ReleaseSysCache(statsTuple);
         group->stats.num_columns++;
     }
 }
