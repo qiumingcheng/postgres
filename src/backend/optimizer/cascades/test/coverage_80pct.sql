@@ -780,3 +780,20 @@ SELECT cov80_test(5805, 'SS4_3cross', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1, 
 \echo '=== SS5: 3-table with ORDER BY after reorder ==='
 SELECT cov80_test(5806, 'SS5_3order', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a JOIN cov_j3 j3 ON j1.a=j3.a ORDER BY j2.d$$);
 
+
+-- ====================================================================
+-- Section TT: Outer Join 3-table — associativity guard 验证 (仅 INNER 可重排)
+-- ====================================================================
+
+\echo '=== TT1: 3-table LEFT JOIN (associativity blocked by join type guard) ==='
+SELECT cov80_test(5901, 'TT1_3left', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 LEFT JOIN cov_j2 j2 ON j1.a=j2.a JOIN cov_j3 j3 ON j1.a=j3.a$$);
+
+\echo '=== TT2: 3-table RIGHT JOIN (associativity blocked) ==='
+SELECT cov80_test(5902, 'TT2_3right', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 RIGHT JOIN cov_j2 j2 ON j1.a=j2.a JOIN cov_j3 j3 ON j1.a=j3.a$$);
+
+\echo '=== TT3: INNER+LEFT mixed 3-table ==='
+SELECT cov80_test(5903, 'TT3_mixed', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a LEFT JOIN cov_j3 j3 ON j2.a=j3.a$$);
+
+\echo '=== TT4: LEFT+RIGHT mixed (guards should block all reorder) ==='
+SELECT cov80_test(5904, 'TT4_left_right', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 LEFT JOIN cov_j2 j2 ON j1.a=j2.a RIGHT JOIN cov_j3 j3 ON j2.a=j3.a$$);
+
