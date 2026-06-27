@@ -981,15 +981,6 @@ pg_statistics_refresh_from_catalog(PgPlannerCascadesContext *ctx,
             staForm = (Form_pg_statistic) GETSTRUCT(statsTuple);
             cs->null_frac  = staForm->stanullfrac;
             cs->n_distinct = staForm->stadistinct;
-
-            if (get_attstatsslot(statsTuple, 0, 0,
-                                 STATISTIC_KIND_HISTOGRAM, InvalidOid,
-                                 &cs->hist_values, &cs->hist_nvalues,
-                                 &numbers, &nnumbers))
-            {
-                if (nnumbers > 0 && numbers != NULL)
-                    pfree(numbers);
-            }
             ReleaseSysCache(statsTuple);
         }
     }
