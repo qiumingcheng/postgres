@@ -1710,20 +1710,40 @@ pg_rule_join_left_asscom(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
             break;
         }
     }
+    /* Relids-based fallback: same as JoinAssociativity (C2).
+     * After Final Cleanup group merge, LOGICAL_JOIN may be gone from
+     * logical_exprs.  Find base groups by matching relids. */
     if (inner_join == NULL)
     {
-        foreach(lc, right_grp->physical_exprs)
+        Relids right_relids = pg_cascades_group_relids(ctx, right_grp);
+        if (right_relids != NULL)
         {
-            PgGroupExpr *e = (PgGroupExpr *) lfirst(lc);
-            if ((e->op == PG_CASCADES_PHYSICAL_NESTLOOP ||
-                 e->op == PG_CASCADES_PHYSICAL_HASHJOIN ||
-                 e->op == PG_CASCADES_PHYSICAL_MERGEJOIN) &&
-                list_length(e->inputs) == 2)
+            PgMemoGroup *found[2];
+            int nfound = 0;
+            ListCell *gc;
+
+            MemSet(found, 0, sizeof(found));
+            foreach(gc, ctx->memo->groups)
             {
-                inner_join = e;
-                break;
+                PgMemoGroup *g = (PgMemoGroup *) lfirst(gc);
+                if (g != left_grp && g != right_grp &&
+                    g->rel != NULL && g->rel->relids != NULL &&
+                    bms_overlap(g->rel->relids, right_relids))
+                {
+                    if (nfound < 2)
+                        found[nfound++] = g;
+                }
+            }
+
+            if (nfound >= 2 && found[0] != NULL && found[1] != NULL)
+            {
+                inner_join = pg_memo_new_group_expr(ctx,
+                                    PG_CASCADES_LOGICAL_JOIN);
+                inner_join->inputs = list_make2(found[0], found[1]);
             }
         }
+        if (right_relids != NULL)
+            bms_free(right_relids);
     }
 
     if (inner_join == NULL)
