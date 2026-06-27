@@ -705,3 +705,57 @@ SELECT cov80_test(5301, 'NN1_both_side', $$SELECT j1.a, j2.d FROM cov_j1 j1 JOIN
 \echo '=== NN2: Three-table with ORDER BY ==='
 SELECT cov80_test(5302, 'NN2_3table_order', $$SELECT j1.a, j2.d FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a JOIN cov_j3 j3 ON j1.a=j3.a ORDER BY j1.a$$);
 
+
+-- ====================================================================
+-- Section OO: postopt.c 覆盖 — NestLoop Material + validator 分支
+-- ====================================================================
+
+\echo '=== OO1: NestLoop with small outer → Material on inner ==='
+SELECT cov80_test(5401, 'OO1_nestloop_small', $$SELECT j1.* FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a WHERE j1.b=1$$);
+
+\echo '=== OO2: Result node with subplan (trigger Result validator) ==='
+SELECT cov80_test(5402, 'OO2_result', $$SELECT a, (SELECT max(d) FROM cov_j2) FROM cov_j1$$);
+
+\echo '=== OO3: Three-table nested loop chain ==='
+SELECT cov80_test(5403, 'OO3_three_nl', $$SELECT j1.a, j2.d, j3.f FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a JOIN cov_j3 j3 ON j1.a=j3.a WHERE j1.b<3 AND j2.d<30$$);
+
+-- ====================================================================
+-- Section PP: planbuild.c PHYSICAL_* 深度覆盖
+-- ====================================================================
+
+\echo '=== PP1: Single-table no-index all upper ops combo ==='
+SELECT cov80_test(5501, 'PP1_all_upper', $$SELECT x%5 AS g, count(*), avg(z) FROM cov_noindex GROUP BY g ORDER BY g LIMIT 3$$);
+
+\echo '=== PP2: No-index DISTINCT + ORDER BY + LIMIT ==='
+SELECT cov80_test(5502, 'PP2_dist_order_limit', $$SELECT DISTINCT x FROM cov_noindex ORDER BY x LIMIT 5$$);
+
+\echo '=== PP3: GROUP BY + HAVING without aggregates in SELECT ==='
+SELECT cov80_test(5503, 'PP3_group_having', $$SELECT b FROM cov_j1 GROUP BY b HAVING count(*)>5$$);
+
+\echo '=== PP4: ORDER BY on expression with LIMIT ==='
+SELECT cov80_test(5504, 'PP4_expr_order_limit', $$SELECT a+b AS s, c FROM cov_j1 ORDER BY s LIMIT 10$$);
+
+-- ====================================================================
+-- Section QQ: cascades.c 边缘路径
+-- ====================================================================
+
+\echo '=== QQ1: query that forces upper bound pruning ==='
+SELECT cov80_test(5601, 'QQ1_many_tables', $$SELECT j1.a, j2.d FROM cov_j1 j1 JOIN cov_j2 j2 ON j1.a=j2.a JOIN cov_j3 j3 ON j1.a=j3.a$$);
+
+\echo '=== QQ2: LIMIT 1 with ORDER BY ==='
+SELECT cov80_test(5602, 'QQ2_limit1', $$SELECT * FROM cov_noindex ORDER BY z LIMIT 1$$);
+
+-- ====================================================================
+-- Section RR: task.c group merge + limit/timeout 路径
+-- ====================================================================
+
+\echo '=== RR1: max_tasks=3 to trigger LIMIT path (produces FALLBACK or limit branch) ==='
+SET cascades_planner_max_tasks = 3;
+SELECT cov80_test(5701, 'RR1_max3', $$SELECT x, count(*) FROM cov_noindex GROUP BY x$$);
+SET cascades_planner_max_tasks = 500000;
+
+\echo '=== RR2: max_groups=5 to trigger group limit ==='
+SET cascades_planner_max_groups = 5;
+SELECT cov80_test(5702, 'RR2_max5', $$SELECT * FROM cov_j1 ORDER BY a$$);
+SET cascades_planner_max_groups = 10000;
+
