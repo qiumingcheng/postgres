@@ -350,6 +350,9 @@ pg_memo_insert_expression_tree(PgPlannerCascadesContext *ctx,
         group->rows = rel->rows;
         group->width = rel->width;
 
+        /* Phase 6: populate per-column statistics */
+        pg_statistics_populate_columns(group);
+
         /* Import PG paths as physical expression candidates */
         foreach(lc, rel->pathlist)
         {
@@ -826,6 +829,49 @@ pg_statistics_from_group(PgMemoGroup *group)
     s->derived = true;
 
     return s;
+}
+
+/*
+ * pg_statistics_populate_columns:
+ *   Populate per-column statistics for a base-table group from PG's
+ *   RelOptInfo.  Reads avg_width from attr_widths; null_frac and
+ *   n_distinct use defaults (Phase 2 will wire pg_statistic catalog).
+ */
+void
+pg_statistics_populate_columns(PgMemoGroup *group)
+{
+    RelOptInfo *rel = group->rel;
+    int nattrs;
+    int i;
+
+    if (rel == NULL || rel->min_attr <= 0)
+        return;
+
+    nattrs = rel->max_attr - rel->min_attr + 1;
+    if (nattrs <= 0 || nattrs > 100)  /* safety cap */
+        return;
+
+    group->stats.columns = (PgColumnStat *)
+        palloc0(sizeof(PgColumnStat) * nattrs);
+    group->stats.num_columns = 0;
+
+    for (i = 0; i < nattrs; i++)
+    {
+        AttrNumber attnum = (AttrNumber) (rel->min_attr + i);
+        PgColumnStat *cs = &group->stats.columns[group->stats.num_columns];
+
+        cs->varattno = attnum;
+        cs->vartype  = InvalidOid;        /* Phase 2: from pg_attribute */
+        cs->null_frac = 0.0;             /* Phase 2: from pg_statistic */
+        cs->n_distinct = (rel->rows > 0) ? rel->rows : 1000.0; /* default */
+        cs->avg_width = (rel->attr_widths != NULL && attnum > 0 &&
+                         attnum <= rel->max_attr)
+                         ? rel->attr_widths[attnum] : 8;
+        if (cs->avg_width <= 0)
+            cs->avg_width = 8;
+
+        group->stats.num_columns++;
+    }
 }
 
 PgStatistics *

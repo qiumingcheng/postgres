@@ -235,13 +235,24 @@ struct PgGroupBestEntry
     PgOutputProperty output;        /* 该 expression 在该 required 下的输出 */
 };
 
-/* Phase 6: Structured statistics (StarRocks Statistics parity).
- * Defined for Phase 2 API readiness — currently accessed via helper
- * functions that write to PgMemoGroup.rows/width fields. */
+/* Phase 6: Per-column statistics (StarRocks ColumnStatistic parity).
+ * Populated from PG's pg_statistic catalog for scan groups. */
+typedef struct PgColumnStat
+{
+    AttrNumber  varattno;      /* column attribute number */
+    Oid         vartype;        /* column type OID */
+    double      null_frac;      /* fraction of NULL values (0-1) */
+    double      n_distinct;     /* number of distinct values (<0 = fraction) */
+    double      avg_width;      /* average column width in bytes */
+} PgColumnStat;
+
+/* Phase 6: Structured group-level statistics (StarRocks Statistics parity). */
 typedef struct PgStatistics
 {
     double      row_count;
     int         width;
+    int         num_columns;    /* number of column stats entries */
+    PgColumnStat *columns;      /* palloc'd array of per-column stats */
     bool        derived;
 } PgStatistics;
 
@@ -252,8 +263,9 @@ struct PgMemoGroup
     List       *logical_exprs;      /* List<PgGroupExpr *> */
     List       *physical_exprs;     /* List<PgGroupExpr *> */
 
-    double      rows;               /* 估算行数 */
-    int         width;              /* 估算宽度 */
+    double      rows;               /* 估算行数 (backward compat) */
+    int         width;              /* 估算宽度 (backward compat) */
+    PgStatistics stats;             /* Phase 6: structured statistics */
 
     List       *best_entries;       /* List<PgGroupBestEntry *> */
     RelOptInfo *rel;               /* 仅当此 group 映射到一个 PG 关系时 */
@@ -687,6 +699,7 @@ extern void pg_derive_expr_stats(PgPlannerCascadesContext *ctx,
 
 /* Phase 6: Statistics API (StarRocks parity — standalone, not embedded) */
 extern PgStatistics *pg_statistics_from_group(PgMemoGroup *group);
+extern void pg_statistics_populate_columns(PgMemoGroup *group);
 extern PgStatistics *pg_statistics_derive(PgPlannerCascadesContext *ctx,
     PgGroupExpr *expr);
 
