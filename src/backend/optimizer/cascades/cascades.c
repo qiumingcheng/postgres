@@ -371,7 +371,10 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
         return PG_CASCADES_UNSUPPORTED;
     }
 
-    /* 5. Build lower paths if not already built */
+    /* 5. Build lower paths if not already built.
+     * make_one_rel generates both base scan paths AND join paths via
+     * PG's standard_join_search.  Cascades adds its own join enumeration
+     * via Phase4 rules + JoinAssociativity in the task scheduler. */
     if (!prep->lower_paths_built)
     {
         RelOptInfo *final_rel;
