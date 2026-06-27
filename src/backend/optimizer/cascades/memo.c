@@ -626,6 +626,29 @@ pg_derive_expr_stats(PgPlannerCascadesContext *ctx, PgGroupExpr *expr,
                 double sel = 0.5;
                 List *quals = (List *) expr->op_private;
 
+                /* Phase 6: use column stats to improve default selectivity */
+                if (child->stats.num_columns > 0 && child->stats.columns != NULL)
+                {
+                    double avg_ndv = 0;
+                    int i;
+                    for (i = 0; i < child->stats.num_columns; i++)
+                    {
+                        PgColumnStat *cs = &child->stats.columns[i];
+                        if (cs->n_distinct > 0 && cs->n_distinct < child_rows)
+                            avg_ndv += cs->n_distinct;
+                        else if (cs->n_distinct < 0)
+                            avg_ndv += child_rows * (-cs->n_distinct);
+                        else
+                            avg_ndv += child_rows;
+                    }
+                    if (child->stats.num_columns > 0)
+                        avg_ndv /= child->stats.num_columns;
+                    if (avg_ndv > 1.0 && avg_ndv < child_rows)
+                        sel = 1.0 / avg_ndv;  /* each distinct value selects 1/ndv rows */
+                    if (sel < 0.001) sel = 0.001;
+                    if (sel > 0.9)   sel = 0.9;
+                }
+
                 if (quals != NIL)
                 {
                     Selectivity pg_sel;
