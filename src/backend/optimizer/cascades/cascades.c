@@ -13,6 +13,7 @@
 #include "optimizer/planner.h"
 #include "optimizer/clauses.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/parsenodes.h"
 #include "utils/memutils.h"
 #include "catalog/pg_class.h"
 #include "miscadmin.h"
@@ -102,7 +103,15 @@ pg_cascades_supported_query_precheck(PlannerInfo *root,
     if (parse->commandType != CMD_SELECT)
         return PG_CASCADES_UNSUPPORTED;
     if (parse->setOperations)
-        return PG_CASCADES_UNSUPPORTED_SETOP;
+    {
+        SetOperationStmt *setOp = (SetOperationStmt *) parse->setOperations;
+
+        /* UNION ALL: no dedup needed — allow Cascades to optimize leaf
+         * queries.  PG's plan_set_operations() handles the top-level
+         * Append plan.  UNION/INTERSECT/EXCEPT fall back (need dedup). */
+        if (setOp->op != SETOP_UNION || !setOp->all)
+            return PG_CASCADES_UNSUPPORTED_SETOP;
+    }
     if (parse->hasWindowFuncs || upper->activeWindows != NIL)
         return PG_CASCADES_UNSUPPORTED_WINDOW;
     if (root->hasRecursion || parse->hasRecursive)
