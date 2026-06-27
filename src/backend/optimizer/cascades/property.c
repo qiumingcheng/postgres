@@ -299,4 +299,11 @@ pg_group_update_best(PgMemoGroup *group, PgGroupBestEntry *new_entry)
     /* Update per-group best cost for pruning */
     if (group->best_cost == 0 || new_entry->total_cost < group->best_cost)
         group->best_cost = new_entry->total_cost;
+
+    /* Phase 6: sync lower-bound for branch-and-bound pruning.
+     * When we first find a plan for this group, its cost becomes
+     * the lower bound for parent groups to prune against. */
+    if (group->lower_bound_cost <= 0 ||
+        new_entry->total_cost < group->lower_bound_cost)
+        group->lower_bound_cost = new_entry->total_cost;
 }

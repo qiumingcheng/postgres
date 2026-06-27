@@ -164,11 +164,48 @@ pg_task_optimize_group(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         return PG_CASCADES_OK;
 
     /*
-     * Phase 6: Cost lower-bound pruning (StarRocks parity).
-     * If this group's lower bound already exceeds the current global
-     * upper bound, no plan using this group can beat the best plan
-     * found so far — skip the entire group.
+     * Phase 6: Initialize lower-bound cost for pruning (StarRocks parity).
+     * For scan groups: cheapest physical path cost.
+     * For join groups: sum of cheapest child costs (children already opt'd).
+     * If this bound exceeds global upper_bound, skip the entire group.
      */
+    if (group->lower_bound_cost <= 0)
+    {
+        ListCell *lc2;
+        foreach(lc2, group->physical_exprs)
+        {
+            PgGroupExpr *pe = (PgGroupExpr *) lfirst(lc2);
+            if (pe->mode == PG_PHYS_EXPR_IMPORTED_PATH && pe->inputs == NIL)
+            {
+                Path *path = (Path *) pe->op_private;
+                if (group->lower_bound_cost <= 0 ||
+                    path->total_cost < group->lower_bound_cost)
+                    group->lower_bound_cost = path->total_cost;
+            }
+        }
+        /* For non-scan groups: lower bound ≥ sum of cheapest child costs */
+        if (group->lower_bound_cost <= 0)
+        {
+            ListCell *elc;
+            foreach(elc, group->logical_exprs)
+            {
+                PgGroupExpr *le = (PgGroupExpr *) lfirst(elc);
+                ListCell *clc;
+                Cost child_sum = 0;
+                foreach(clc, le->inputs)
+                {
+                    PgMemoGroup *cg = (PgMemoGroup *) lfirst(clc);
+                    if (cg->lower_bound_cost > 0)
+                        child_sum += cg->lower_bound_cost;
+                }
+                if (child_sum > 0 &&
+                    (group->lower_bound_cost <= 0 ||
+                     child_sum < group->lower_bound_cost))
+                    group->lower_bound_cost = child_sum;
+            }
+        }
+    }
+
     if (group->lower_bound_cost > 0 &&
         ctx->upper_bound_cost > 0 &&
         group->lower_bound_cost > ctx->upper_bound_cost)
