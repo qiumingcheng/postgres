@@ -143,6 +143,10 @@ pg_rule_join_to_nestloop(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
         (inner_grp->rows == 0 && inner_grp->width == 0))
         return NIL;
 
+    /* Respect PG GUC — skip if nestloop is disabled */
+    if (!enable_nestloop)
+        return NIL;
+
     {
         PgGroupExpr *result = pg_memo_new_group_expr(ctx,
                                                       PG_CASCADES_PHYSICAL_NESTLOOP);
@@ -167,6 +171,9 @@ pg_rule_join_to_hashjoin(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
         (inner_grp->rows == 0 && inner_grp->width == 0))
         return NIL;
 
+    if (!enable_hashjoin)
+        return NIL;
+
     {
         PgGroupExpr *result = pg_memo_new_group_expr(ctx,
                                                       PG_CASCADES_PHYSICAL_HASHJOIN);
@@ -189,6 +196,9 @@ pg_rule_join_to_mergejoin(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
         return NIL;
     if ((outer_grp->rows == 0 && outer_grp->width == 0) ||
         (inner_grp->rows == 0 && inner_grp->width == 0))
+        return NIL;
+
+    if (!enable_mergejoin)
         return NIL;
 
     {
