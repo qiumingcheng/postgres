@@ -143,10 +143,13 @@ pg_rule_join_to_nestloop(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
         (inner_grp->rows == 0 && inner_grp->width == 0))
         return NIL;
 
-    /* Respect PG GUC — skip if nestloop is disabled */
-    if (!enable_nestloop)
-        return NIL;
-
+    /*
+     * Always create COMPOSABLE_OP NESTLOOP — the cost function
+     * (cost_nestloop) adds disable_cost when enable_nestloop=off,
+     * making it a last resort that's only chosen when no other join
+     * method is viable (e.g., cross joins).  This matches PG's
+     * behavior: NestPaths are always generated, never disabled.
+     */
     {
         PgGroupExpr *result = pg_memo_new_group_expr(ctx,
                                                       PG_CASCADES_PHYSICAL_NESTLOOP);
