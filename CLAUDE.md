@@ -51,38 +51,47 @@ make -C src/backend/optimizer/cascades -j$(nproc) && make -C src/backend -j$(npr
 - **DB**: `cascades_test`
 - **Start**: `pg_ctl -D /tmp/pg_cascades_test -l /tmp/pg_cascades_test/logfile start`
 - **Stop**: `pg_ctl -D /tmp/pg_cascades_test stop`
-- **GUCs**: `enable_cascades_planner`, `cascades_planner_debug`, `cascades_planner_fallback_on_error`
+- **GUCs**:
+  - `enable_cascades_planner` — enable Cascades optimizer (default: off)
+  - `cascades_planner_debug` — emit 12-step CASCADES trace + rule/cost details (default: off)
+  - `cascades_planner_fallback_on_error` — silently fallback on internal errors instead of ERROR (default: off; test suite sets on)
+  - `cascades_planner_max_groups` — group limit (default: 10000)
+  - `cascades_planner_max_tasks` — task limit (default: 100000)
+  - `cascades_planner_timeout_ms` — timeout in ms (default: 0 = no limit)
 
 ## Code Architecture
 
-### Cascades Optimizer Components (12 files)
+### Cascades Optimizer Components (11 files)
 
 | File | Purpose |
 |------|---------|
-| `cascades.c` | Main entry, query precheck, fallback logic |
+| `cascades.c` | Main entry, 12-step orchestration, query precheck, fallback logic |
 | `memo.c` | Memo: groups, expressions, hash dedup, group merge |
-| `task.c` | LIFO TaskScheduler (optimize/explore/apply rules) |
-| `rule.c` | Transformation + implementation rules (14+ rules) |
+| `task.c` | LIFO TaskScheduler (6 task types) + rule application trace |
+| `rule.c` | 18 implementation + 25+ transformation rules |
 | `property.c` | Required/Output properties, best entry management |
 | `pattern.c` | Pattern matching for rule application |
 | `pg_adapter.c` | PG integration: build logical tree from make_one_rel paths |
-| `planbuild.c` | Extract best Plan from Memo (recursive + best-entry paths) |
-| `rewrite.c` | Logical rewrite pipeline (Phase 5+ rules) |
-| `postopt.c` | Post-optimization: plan validation + physical rewrite |
-| `decorrelate.c` | Subquery decorrelation (partial implementation) |
-| `debug.c` | Memo dump, fallback diagnostics |
+| `planbuild.c` | Extract best Plan: COMPOSABLE_OP priority → IMPORTED_PATH delegation |
+| `rewrite.c` | 8-stage logical rewrite pipeline |
+| `postopt.c` | Post-optimization: plan validation + Material insertion |
+| `debug.c` | Memo dump, rule dump (debug=on only) |
+
+> **Note**: `decorrelate.c` is planned but not yet implemented (subquery decorrelation → Apply operator).
 
 ### Conventions
 
 - **No `static` for cascades internal functions**: All helper functions are non-static so gcov can track real coverage. Do NOT add `static` to cascades functions.
 - **No self-test wrappers**: Removed all `*_self_test()` functions (were gcov hacks). Real query paths provide actual coverage.
 - **Group creation is in `pg_memo_new_group()`**: Clean, no side-effect calls.
+- **Debug trace**: Use `CASCADES_DEBUG(flag, "format", ...)` macro (defined in `cascades.h`). Never write `if (debug) elog(NOTICE, ...)` inline. The macro accepts any boolean flag: `cascades_planner_debug`, `ctx->debug`, or `ctx.debug`.
+- **Debug prefix**: All Cascades traces use `"CASCADES: ..."` prefix for grep-ability.
 
 ## Test Coverage
 
-- **372 tests** in `cascades_coverage_extension.sql`
+- **5072 tests** in `cascades_coverage_extension.sql` (372 original + 201 specialized + continued expansion)
 - **100% pass rate**, **0% fallback** (all use Cascades path)
-- **Coverage**: ~60% lines, ~80% functions (real query path coverage)
+- **Coverage**: **75.7%** lines, **90.6%** functions
 - Coverage drop after `make clean` → `.gcno`/`.gcda` stamp mismatch. Always clean rebuild before measuring.
 
 ## Critical Design Constraints
@@ -97,10 +106,351 @@ make -C src/backend/optimizer/cascades -j$(nproc) && make -C src/backend -j$(npr
 1. **Stamp mismatch in coverage**: After changing `.c` files, must `make clean` before rebuild
 2. **Modifying RelOptInfo**: Causes "variable not found in subplan target lists" in multi-table JOINs
 3. **Adding `static`**: Breaks gcov real-coverage tracking; cascades functions should stay non-static
+4. **COMPOSABLE_OP joins and plan extraction**: COMPOSABLE_OP join entries (mode=1) can become `best` when costs equal IMPORTED_PATH. planbuild only handles IMPORTED_PATH for scan/join ops — it delegates COMPOSABLE_OP to an IMPORTED_PATH entry of the same op type found in the group's `physical_exprs`. If no IMPORTED_PATH exists (e.g., new groups from JoinAssociativity), extraction fails → `NO_PLAN`.
+5. **enable_nestloop=off + cross join**: NestLoop is always created regardless of GUC — `cost_nestloop` adds `disable_cost` (1e10). Do NOT guard NestLoop creation with `enable_nestloop` in rules. HashJoin/MergeJoin SHOULD be guarded because PG skips their path generation entirely.
+
+## 12-Step Optimization Flow
+
+Inside `pg_cascades_try_grouping_planner()` ([cascades.c:248](postgres/src/backend/optimizer/cascades/cascades.c#L248)):
+
+```
+[1/12] Create MemoryContext (PgCascadesMemo)
+[2/12] Initialize rules (merge 5 groups: Phase1 impl + Phase2 scan/join + Phase4 join + Enforcer + Phase3/5 trans)
+[3/12] make_one_rel(root, joinlist) — PG generates lower scan/join paths → prep->final_rel
+[4/12] pg_memo_init_from_tree() — Query tree → OptExpression → Memo (groups + GroupExpressions)
+[5/12] pg_memo_derive_logical_property() — bottom-up rows/width per group
+[6/12] pg_cascades_logical_rewrite() — 8-stage rewrite pipeline (predicate pushdown, column prune, join reorder...)
+[7/12] pg_memo_derive_logical_property_v2() — re-derive after rewrite
+[7b]   Root group fixup — rewrite may empty root group, find replacement
+[8/12] pg_cascades_run_tasks() — LIFO task scheduler: OptimizeGroup → ExploreGroup → ApplyRule → EnforceAndCost
+[9/12] pg_cascades_extract_best_plan() — 2-pass: COMPOSABLE_OP first, IMPORTED_PATH fallback
+[10/12] pg_cascades_validate_plan() — structural integrity check
+[11/12] pg_cascades_physical_rewrite() — insert Material nodes on NestLoop inner sides
+[12/12] copyObject(plan) + MemoryContextDelete — escape memo context, return Plan*
+```
+
+## IMPORTED_PATH vs COMPOSABLE_OP (Critical Design)
+
+This is the single most important architectural decision. Every developer must understand this.
+
+| Aspect | IMPORTED_PATH (mode=0) | COMPOSABLE_OP (mode=1) |
+|--------|----------------------|------------------------|
+| **Source** | PG `make_one_rel()` Paths | Cascades implementation rules |
+| **op_private** | `Path *` (NestPath, HashPath, ...) | `PgJoinPrivate *` or operator params |
+| **Inputs** | NIL (Path tree is self-contained) | `List<Group *>` (child groups in Memo) |
+| **Cost** | Read from `Path.total_cost` | Computed via PG cost functions (cost_nestloop etc.) |
+| **Plan extraction** | `create_plan(root, path)` — one call | Recursive: extract children → wrap with PG `make_*()` |
+| **Used for** | Scan / Join | Upper ops (Agg, Sort, Limit, Project) + Join (costing) |
+
+**Why both?** PG's scan/join path generation has 20+ years of optimization. IMPORTED_PATH reuses it. PG has no upper Path types, so COMPOSABLE_OP handles those.
+
+**Plan extraction for joins**: COMPOSABLE_OP join entries delegate to IMPORTED_PATH entries of the same op type found in the same group. If no IMPORTED_PATH exists (Phase 2 new join groups), extraction fails → `NO_PLAN`.
+
+## Key Data Structures
+
+```
+PlannerContext (PgPlannerCascadesContext)
+├── root: PlannerInfo *           → PG planner state (non-owning)
+├── memo: PgMemo *
+│   ├── groups: List<Group *>     → all groups in the search space
+│   ├── root_group: Group *       → entry point for extraction
+│   └── group_expr_table: HTAB    → hash dedup by (op, inputs)
+├── task_stack: List<Task *>      → LIFO task stack
+├── impl_rules / trans_rules      → sorted rule arrays
+└── upper_bound_cost              → global pruning threshold
+
+Group (PgMemoGroup)
+├── id: int
+├── logical_exprs: List<GroupExpression *>
+├── physical_exprs: List<GroupExpression *>
+├── best_entries: List<BestEntry *>  → keyed by RequiredProperty
+├── rows / width                    → estimated output size
+├── rel: RelOptInfo *               → PG relation (base tables only)
+├── lower_bound_cost                → pruning lower bound
+└── best_cost                       → cached best total_cost
+
+GroupExpression (PgGroupExpr)
+├── op: PgCascadesOpKind             → operator type (see enum below)
+├── mode: IMPORTED_PATH | COMPOSABLE_OP
+├── inputs: List<Group *>           → child groups (NIL for IMPORTED_PATH scan)
+├── op_private: void *              → Path* | PgJoinPrivate* | ...
+├── owner_group: Group *            → back-reference
+├── explored_rules: Bitmapset       → rules already tried
+└── best_cost: Cost                 → cached best cost for this expression
+
+BestEntry (PgGroupBestEntry)
+├── required: RequiredProperty *    → hash key (what parent requires)
+├── expr: GroupExpression *         → the best expression
+├── startup_cost / total_cost
+├── child_required_props: List<RequiredProperty *>
+└── output: OutputProperty          → what this produces (rows, width, pathkeys)
+
+Task (PgOptimizerTask)
+├── type: 6 types (OPTIMIZE_GROUP, OPTIMIZE_EXPR, EXPLORE_GROUP,
+│                 APPLY_RULE, DERIVE_STATS, ENFORCE_AND_COST)
+├── group / expr / rule / required  → task-specific payload
+└── cur_child_index, enforce_state  → state machine fields
+```
+
+### Operator Kind Enum (PgCascadesOpKind)
+
+```
+Logical (0-8):   SCAN, FILTER, PROJECT, JOIN, AGG, DISTINCT, SORT, LIMIT, UNION
+Physical (9-22): SEQSCAN, INDEXSCAN, BITMAP_HEAPSCAN, BITMAP_AND, BITMAP_OR,
+                 NESTLOOP, HASHJOIN, MERGEJOIN, HASHAGG, GROUPAGG,
+                 SORT, UNIQUE, LIMIT, PROJECT
+```
+
+## Memory Management Rules
+
+| Allocation | Context | Lifetime | Cleanup |
+|-----------|---------|----------|---------|
+| PgMemo, Group, GroupExpression | `ctx.memo_cxt` (PgCascadesMemo) | Until plan extracted | `MemoryContextDelete(memo_cxt)` |
+| BestEntry, Task, RequiredProperty | `ctx.memo_cxt` | Single optimization run | Same as above |
+| PgJoinPrivate, PgSortPrivate | `ctx.memo_cxt` | Copied from logical expr | Same as above |
+| RelOptInfo, Path, RestrictInfo | PG's `root->planner_cxt` | PG manages | PG's MemoryContext system |
+| Plan (extracted) | PG's planner context | Until PlannedStmt built | `copyObject` escapes MemoContext |
+
+**Rule**: All Cascades-owned objects go in `ctx.memo_cxt`. All PG-owned objects stay in PG contexts. Cross-references use raw pointers (non-owning). The `copyObject(plan)` at [12/12] is the boundary crossing point.
+
+## How to Add a New Rule
+
+### Implementation Rule (logical → physical)
+
+1. **Write transform function** in `rule.c`:
+   ```c
+   List *pg_rule_my_new_rule(PgPlannerCascadesContext *ctx, PgGroupExpr *expr) {
+       // Create new physical GroupExpression
+       PgGroupExpr *result = pg_memo_new_group_expr(ctx, PG_CASCADES_PHYSICAL_XXXX);
+       result->mode = PG_PHYS_EXPR_COMPOSABLE_OP;  // or IMPORTED_PATH
+       result->inputs = expr->inputs;                // copy from logical
+       result->op_private = expr->op_private;        // share data
+       return list_make1(result);
+   }
+   ```
+
+2. **Register** in `rule.c` rule table (`g_impl_rules_phase1` or `g_impl_rules_phase2_join`):
+   ```c
+   {"LogicalXxx->PhysicalXxx", NULL, pg_rule_my_new_rule,
+    PG_CASCADES_LOGICAL_XXX, 0, PG_RULE_BIT_XXX, 0.5},
+   ```
+
+3. **Add rule bit** in `cascades.h` (`PG_RULE_BIT_XXX`)
+
+4. **Add operator kind** in `cascades.h` if new (`PgCascadesOpKind`)
+
+5. **Add plan extraction** in `planbuild.c` `pg_cascades_build_plan_recurse()`
+
+6. **Add costing** in `task.c` `ENFORCE_COMPUTE_COST` switch
+
+### Transformation Rule (logical → logical)
+
+1. **Write transform** in `rule.c`, returning `List<GroupExpression *>`
+2. **Register** in `g_trans_rules_phase3` or `g_trans_rules_phase5`
+3. **Add pattern** in `pg_cascades_init_rule_patterns()` if multi-node
+4. **Add to rewrite pipeline** in `rewrite.c` if needed
+
+## How to Add a New Operator
+
+1. **Add op kind** to `PgCascadesOpKind` enum in `cascades.h` (both logical and physical)
+2. **Add rule bit** if needed (`PG_RULE_BIT_XXX`)
+3. **Write impl rule** in `rule.c` (logical→physical transform)
+4. **Add costing** in `task.c` `ENFORCE_COMPUTE_COST` switch
+5. **Add plan extraction** in `planbuild.c` `build_plan_recurse()` switch
+6. **Add to pattern matcher** in `pattern.c` if multi-node pattern needed
+7. **Handle in Memo init** in `pg_adapter.c` `pg_cascades_build_initial_tree()` if needed
+8. **Handle in property derivation** in `memo.c` `pg_derive_expr_stats()`
+
+## Task Scheduler Internals
+
+6 task types, LIFO stack, self-bottom-up by push order:
+
+```
+OPTIMIZE_GROUP           ← entry point for each group
+  ├─ [push] ENFORCE_AND_COST × each physical expr × multiple required props
+  ├─ [push] OPTIMIZE_EXPRESSION × each logical expr
+  └─ [push] OPTIMIZE_GROUP(child)  # LIFO → children execute first
+
+OPTIMIZE_EXPRESSION
+  ├─ [push] APPLY_RULE × each matching impl rule
+  ├─ [push] TRANSFORM_RULE × each matching trans rule
+  └─ [push] EXPLORE_GROUP(child)
+
+APPLY_RULE
+  ├─ pattern match → transform() → insert new expression → push tasks
+
+ENFORCE_AND_COST (4-state machine)
+  ├─ ENFORCE_INIT → derive child required properties + output
+  ├─ ENFORCE_OPTIMIZE_CHILDREN → Clone+Resume if child not ready
+  ├─ ENFORCE_COMPUTE_COST → PG cost function → pg_group_update_best()
+  └─ ENFORCE_ENFORCE_PROPERTY → insert Sort enforcer if needed
+```
+
+**Key mechanisms**:
+- **Clone+Resume**: When a child group hasn't been optimized for a required property, clone the current ENFORCE_AND_COST task, push it back, then push OPTIMIZE_GROUP(child). When the child finishes, the clone resumes.
+- **Upper-bound pruning**: `ctx->upper_bound_cost` tightens as cheaper plans are found. Tasks exceeding it are skipped.
+- **Lower-bound pruning**: Each group tracks `lower_bound_cost`. If it exceeds `upper_bound_cost`, the entire group is skipped.
+
+## Integration Point
+
+Cascades hooks into PG at `grouping_planner()` ([planner.c:1229](postgres/src/backend/optimizer/plan/planner.c#L1229)), AFTER `subquery_planner()` has already processed:
+- `SS_process_ctes()` — CTEs → InitPlans
+- `pull_up_sublinks()` — ANY/EXISTS → semi-join
+- `pull_up_subqueries()` — FROM subquery pull-up
+
+**This means Cascades CANNOT intercept CTE or subquery processing.** The hook is too late. To intercept these, the hook would need to move to `planner()` level (via `planner_hook`).
+
+## Key Function Map
+
+| File | Key Functions |
+|------|--------------|
+| `cascades.c` | `pg_cascades_try_grouping_planner()`, `pg_cascades_supported_query_precheck()`, `pg_cascades_supported_query()`, `pg_cascades_handle_status_or_error()` |
+| `memo.c` | `pg_memo_init_from_tree()`, `pg_memo_insert_expression()`, `pg_memo_merge_group()`, `pg_derive_expr_stats()`, `pg_memo_new_group()` |
+| `task.c` | `pg_cascades_run_tasks()`, `pg_task_optimize_group()`, `pg_task_enforce_and_cost()`, `pg_task_apply_rule()`, `pg_cascades_check_limits()` |
+| `rule.c` | `pg_rule_join_to_nestloop/hashjoin/mergejoin()`, `pg_rule_join_commutativity/associativity/left_asscom()`, `pg_cascades_init_rule_patterns()` |
+| `property.c` | `pg_group_update_best()`, `pg_required_property_equal()`, `pg_derive_child_properties()`, `pg_output_satisfies_required()` |
+| `pattern.c` | `pg_pattern_match_full()`, `pg_pattern_leaf()`, `pg_pattern_tree()` |
+| `pg_adapter.c` | `pg_cascades_build_initial_tree()`, `pg_cascades_pathtype_to_opkind()` |
+| `planbuild.c` | `pg_cascades_extract_best_plan()`, `pg_cascades_build_plan_recurse()`, `pg_cascades_fix_empty_targetlists()` |
+| `rewrite.c` | `pg_cascades_logical_rewrite()`, 8 stage definitions in `g_rewrite_pipeline[]` |
+| `postopt.c` | `pg_cascades_validate_plan()`, `pg_cascades_physical_rewrite()` |
+| `debug.c` | `debug_print_cascades_memo()`, `debug_print_cascades_rules()` |
+
+## Debug Guide
+
+### Quick trace
+
+```sql
+SET enable_cascades_planner=on;
+SET cascades_planner_debug=on;
+SET client_min_messages=notice;
+EXPLAIN <your query>;
+```
+
+Output format:
+```
+CASCADES: ====== BEGIN optimization ======
+CASCADES: [1/12] MemoryContext created
+CASCADES: [3/12] make_one_rel OK (final_rel rows=100 width=20)
+CASCADES: [4/12] Memo init OK (5 groups, root=4)
+CASCADES: rule 'LogicalJoin->PhysicalMergeJoin' applied group=2 op=3 → 1 new, 0 merged
+CASCADES: cost group=4 op=22 mode=1 startup=0.0100 total=1.1477 (NEW)
+CASCADES: [7/12] Task scheduler done (tasks=50, upper_bound=1.15, status=0)
+CASCADES: [12/12] ====== END optimization (status=0) ======
+```
+
+### Common issues
+
+| Symptom | grep for | Likely cause |
+|---------|----------|-------------|
+| Status=11 (NO_PLAN) | `FAILED` `FAIL` | plan extraction failed — check `CASCADES: [8/12]` and PLANBUILD_PROJ traces |
+| Fallback | `fallback` | check precheck/supported_query return points |
+| Wrong plan chosen | `cost group=` | compare costs, check if COMPOSABLE_OP vs IMPORTED_PATH |
+| 3-table JOIN errors | `variable not found in subplan` | known Phase 1 limitation, use fallback_on_error=on |
+| All joins fallback silently | `make_one_rel` | check if PG generated any paths |
 
 ## Performance Notes
 
-- Cascades adds ~5-10% overhead for simple queries
+- Cascades adds ~3ms overhead for simple queries (Memo build + task scheduling)
 - Performance benefits appear with complex queries (5+ table JOINs)
 - Phase 1 focuses on correctness, not performance optimization
 - 100% of test queries use Cascades (0% fallback) indicates stability
+- Plan extraction: COMPOSABLE_OP upper ops built recursively; scan/join delegated to `create_plan()` via IMPORTED_PATH
+
+## Fallback Points (15 total)
+
+| Layer | Trigger | Status | GUC behavior |
+|-------|---------|--------|-------------|
+| Precheck | Non-SELECT, window, recursive CTE, modifying CTE, row locks, DISTINCT ON, MIN/MAX opt, correlated SubPlan | UNSUPPORTED (1-8) | Always silent |
+| Supported query | SETOP non-UNION-ALL, 3+ table JOIN+ORDER+LIMIT, RTE_CTE/RTE_SUBQUERY, inheritance, FDW, non-relation relkind | UNSUPPORTED (1-8) | Always silent |
+| Runtime | trivial_result, make_one_rel failed, Memo init failed | UNSUPPORTED / NO_PLAN | NO_PLAN depends on GUC |
+| Task limits | groups > max_groups, tasks > max_tasks, timeout | INTERNAL_LIMIT / INTERNAL_TIMEOUT | fallback_on_error=on → silent; =off → ERROR |
+| Extraction | no best_entries, child extraction failed | INTERNAL_NO_PLAN | fallback_on_error=on → silent; =off → ERROR |
+
+## Modified PG Source Files
+
+Beyond the cascades/ directory, these PG files were modified to add the Cascades integration point:
+
+| File | Change | Lines |
+|------|--------|-------|
+| `src/backend/optimizer/plan/planner.c` | Added `#include "optimizer/cascades.h"` and `if (enable_cascades_planner)` branch inside `grouping_planner()` | ~60 |
+| `src/include/optimizer/cascades.h` | All Cascades types, enums, macros, function declarations | ~720 |
+
+**No other PG files were modified.** The integration is isolated to `grouping_planner()` — a single `if` branch. Fallback is automatic: if Cascades returns non-OK status, the standard PG code path runs instead.
+
+## Test Files & Helpers
+
+### Test files
+
+| File | Contents |
+|------|---------|
+| `test/cascades_coverage_extension.sql` | Main test suite (5072 tests) |
+| `test/coverage_80pct.sql` | Targeted coverage expansion tests |
+
+### Test helper function
+
+```sql
+-- Returns 'CASCADES' if Cascades succeeds, 'FALLBACK' if it falls back to PG
+SELECT cov_test(<test_id>, '<name>', $$<SQL query>$$);
+```
+
+The function tries Cascades first (`enable_cascades_planner=on`), catches any exception, retries with PG (`enable_cascades_planner=off`), and records the result. All tests pass when every query returns CASCADES.
+
+### Adding a test
+
+```sql
+-- Simple: checks that Cascades can plan it
+SELECT cov_test(9001, 'my test', $$SELECT * FROM t1 JOIN t2 ON t1.id = t2.id$$);
+
+-- With GUC override: tests behavior under specific settings
+SET enable_nestloop = off;
+SELECT cov_test(9002, 'no NL join', $$SELECT * FROM t1 JOIN t2 ON t1.id = t2.id$$);
+```
+
+## Current Gaps & Roadmap
+
+### What's implemented
+
+- ✅ All single-table queries (filter, project, aggregate, sort, limit, distinct)
+- ✅ All 2-table JOINs (INNER, LEFT, RIGHT, SEMI, ANTI) via IMPORTED_PATH delegation
+- ✅ 8-stage logical rewrite pipeline
+- ✅ 18 implementation rules + 25+ transformation rules
+- ✅ Task scheduler with LIFO, Clone+Resume, upper/lower bound pruning
+- ✅ COMPOSABLE_OP costing using PG cost functions
+- ✅ enable_nestloop/hashjoin/mergejoin GUC support
+- ✅ UNION ALL
+- ✅ Full debug trace (CASCADES_DEBUG macro)
+
+### What's NOT implemented (fallback to PG)
+
+| Gap | Priority | Estimated lines | Notes |
+|-----|---------|----------------|-------|
+| **3+ table JOINs with ORDER+LIMIT** | P1 | ~200 | Known Phase 1 limitation: reltargetlist incomplete. Falls back to PG. |
+| **Subquery decorrelation** (decorrelate.c) | P1 | ~350 | Correlated SubPlans fallback. Minimal: SubPlan→Apply operator. |
+| **CTE (WITH queries)** | P2 | ~300 | RTE_CTE blocked. Single-ref non-recursive CTEs can be inlined. |
+| **Window functions** | P2 | ~500 | Fallback. Need Window operator in Memo. |
+| **FULL JOIN** | P2 | ~200 | Fallback via precheck (no operator kind or plan extraction). |
+| **Inheritance / partitioned tables** | P3 | ~400 | Fallback via precheck. |
+| **FDW (foreign tables)** | P3 | ~300 | Fallback via precheck. |
+| **True COMPOSABLE_OP join extraction** | P2 | ~150 | Currently delegates to IMPORTED_PATH. Needed for Phase 2 join enumeration. |
+| **Column-level statistics** | P2 | ~700 | NDV, null fraction, histogram from pg_statistic. |
+| **Join enumeration (Phase 2)** | P2 | ~500 | JoinAssociativity/LeftAsscom create new groups → need COMPOSABLE_OP join extraction first. |
+| **Coverage → 80%** | P1 | ~50 tests | planbuild.c (65.1%), postopt.c (68.8%) are lowest. |
+
+## Coverage Hot Spots
+
+Files sorted by coverage (lowest first — these need tests most):
+
+| File | Lines | Coverage | Gap |
+|------|-------|----------|-----|
+| `debug.c` | 32 | 0.0% | Only called with `cascades_planner_debug=on`, test suite sets off |
+| `planbuild.c` | 489 | **65.1%** | PHYSICAL_GROUPAGG, BITMAP_AND/OR, error paths |
+| `postopt.c` | 93 | **68.8%** | Nested subquery Material detection |
+| `rule.c` | 1333 | 72.3% | JoinAssociativity/LeftAsscom relids fallback paths |
+| `memo.c` | 680 | 73.3% | Group merge error paths, stats derivation branches |
+| `pattern.c` | 175 | 74.8% | Multi-node pattern matching with leaf groups |
+| `task.c` | 725 | 82.7% | Enforcer paths, Clone+Resume edge cases |
+| `cascades.c` | 263 | 83.0% | Fallback error paths, limit checks |
+| `property.c` | 179 | 83.2% | Property derivation for edge cases |
+| `pg_adapter.c` | 146 | 85.6% | UNION ALL tree building |
+| `rewrite.c` | 167 | 91.5% | CTE/Subquery skip paths |
