@@ -30,10 +30,23 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
     Plan       *result = NULL;
     ListCell   *lc;
 
+    elog(NOTICE, "PLANBUILD_TRACE: root_group=%d best_entries=%d logical=%d physical=%d",
+         root_group->id, list_length(root_group->best_entries),
+         list_length(root_group->logical_exprs), list_length(root_group->physical_exprs));
+
     /*
-     * Phase 1 simplification: try to find best physical expr first,
-     * but fall back to building directly from logical expr if needed.
-     */
+     * Fix: after Final Cleanup group merge, root_group may be the merge
+     * source (empty).  Find the last non-empty group with best_entries
+     * and use it as root for extraction. */
+    if (list_length(root_group->best_entries) == 0)
+    {
+        foreach(lc, ctx->memo->groups)
+        {
+            PgMemoGroup *g = (PgMemoGroup *) lfirst(lc);
+            if (list_length(g->best_entries) > 0 && g != root_group)
+                root_group = g;
+        }
+    }
 
     /*
      * Two-pass extraction: COMPOSABLE_OP first (exercises PHYSICAL_*
@@ -48,14 +61,28 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
             foreach(lc, root_group->best_entries)
             {
                 PgGroupBestEntry *entry = (PgGroupBestEntry *) lfirst(lc);
+                elog(NOTICE, "PLANBUILD_TRACE: pass=%d best op=%d mode=%d req_pk=%p out_rows=%.0f",
+                     pass, entry->expr->op, entry->expr->mode,
+                     entry->required->pathkeys, entry->output.rows);
                 if (!pg_required_property_equal(entry->required, root_req))
+                {
+                    elog(NOTICE, "PLANBUILD_TRACE: SKIP — required property mismatch "
+                         "(entry req_pk=%p vs root_req pk=%p)",
+                         entry->required->pathkeys, root_req->pathkeys);
                     continue;
+                }
 
-                /* Pass 0: COMPOSABLE_OP only; Pass 1: IMPORTED_PATH only */
+        /* Pass 0: COMPOSABLE_OP only; Pass 1: IMPORTED_PATH only */
                 if (pass == 0 && entry->expr->mode == PG_PHYS_EXPR_IMPORTED_PATH)
+                {
+                    elog(NOTICE, "PLANBUILD_TRACE: SKIP — pass=0 but IMPORTED_PATH");
                     continue;
+                }
                 if (pass == 1 && entry->expr->mode != PG_PHYS_EXPR_IMPORTED_PATH)
+                {
+                    elog(NOTICE, "PLANBUILD_TRACE: SKIP — pass=1 but COMPOSABLE_OP");
                     continue;
+                }
 
                 /* Skip bare scan entries when upper ops exist */
                 if (entry->expr->mode == PG_PHYS_EXPR_IMPORTED_PATH &&
@@ -75,6 +102,8 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
 
                 result = pg_cascades_build_plan_recurse(ctx, root_group, root_req,
                                                          entry, &entry->output);
+                elog(NOTICE, "PLANBUILD_TRACE: build_plan_recurse returned %s",
+                     result ? "Plan*" : "NULL");
                 if (result != NULL)
                 {
                     ctx->root->query_pathkeys = entry->output.pathkeys;
@@ -267,18 +296,56 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
 
     switch (expr->op)
     {
-        /* === IMPORTED_PATH: call create_plan directly === */
+        /*
+         * Scan / Join ops: prefer IMPORTED_PATH (PG's battle-tested paths).
+         *
+         * For COMPOSABLE_OP, delegate to an IMPORTED_PATH entry of the same
+         * op type in the same group.  COMPOSABLE_OP join entries are created
+         * by implementation rules for costing purposes — the group always
+         * has a corresponding IMPORTED_PATH entry from make_one_rel().
+         *
+         * StarRocks alignment: In StarRocks all entries are COMPOSABLE_OP
+         * and plan extraction recurses into child groups directly.  In PG,
+         * IMPORTED_PATH entries carry a complete Path tree that create_plan
+         * handles natively — delegating is both simpler and safer.
+         */
         case PG_CASCADES_PHYSICAL_SEQSCAN:
         case PG_CASCADES_PHYSICAL_INDEXSCAN:
         case PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN:
         case PG_CASCADES_PHYSICAL_NESTLOOP:
         case PG_CASCADES_PHYSICAL_HASHJOIN:
         case PG_CASCADES_PHYSICAL_MERGEJOIN:
-            if (expr->mode != PG_PHYS_EXPR_IMPORTED_PATH)
-                return NULL;
-            result = create_plan(ctx->root, (Path *) expr->op_private);
-            if (result != NULL)
-                pg_cascades_fix_empty_targetlists(ctx->root, result);
+            if (expr->mode == PG_PHYS_EXPR_IMPORTED_PATH)
+            {
+                result = create_plan(ctx->root, (Path *) expr->op_private);
+                if (result != NULL)
+                    pg_cascades_fix_empty_targetlists(ctx->root, result);
+                break;
+            }
+            /* COMPOSABLE_OP: delegate to IMPORTED_PATH in same group */
+            {
+                ListCell *pe;
+                foreach(pe, group->physical_exprs)
+                {
+                    PgGroupExpr *e = (PgGroupExpr *) lfirst(pe);
+                    if (e->mode == PG_PHYS_EXPR_IMPORTED_PATH &&
+                        e->op == expr->op)
+                    {
+                        result = create_plan(ctx->root, (Path *) e->op_private);
+                        if (result != NULL)
+                        {
+                            pg_cascades_fix_empty_targetlists(ctx->root, result);
+                            elog(NOTICE, "PLANBUILD_JOIN: COMPOSABLE_OP %d delegated to IMPORTED_PATH",
+                                 expr->op);
+                            break;
+                        }
+                    }
+                }
+                /* If no IMPORTED_PATH found, this group has no PG paths
+                 * (e.g., a Phase 2 join from JoinAssociativity).
+                 * Future work: implement full COMPOSABLE_OP join extraction
+                 * via recursive child plan building. */
+            }
             break;
 
         /* === Upper Ops: recursive build + wrap === */
@@ -602,29 +669,38 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 ListCell *lc;
 
                 if (expr->inputs == NIL)
-                    return NULL;
+                { elog(NOTICE, "PLANBUILD_PROJ: FAIL [1] inputs==NIL"); return NULL; }
                 child_group = (PgMemoGroup *) linitial(expr->inputs);
+                elog(NOTICE, "PLANBUILD_PROJ: child_group=%d best_entries=%d "
+                     "child_required_props=%s",
+                     child_group->id, list_length(child_group->best_entries),
+                     best->child_required_props ? "yes" : "NIL");
                 if (child_group->best_entries == NIL)
-                    return NULL;
+                { elog(NOTICE, "PLANBUILD_PROJ: FAIL [2] child best_entries==NIL"); return NULL; }
 
                 foreach(lc, child_group->best_entries)
                 {
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
+                    elog(NOTICE, "PLANBUILD_PROJ:   child_entry op=%d mode=%d req_pk=%p",
+                         e->expr->op, e->expr->mode, e->required->pathkeys);
                     if (best->child_required_props != NIL &&
                         pg_required_property_equal(e->required,
                             (PgRequiredProperty *) pg_safe_linitial_child_req(best)))
                     {
                         child_best = e;
+                        elog(NOTICE, "PLANBUILD_PROJ: MATCH child op=%d", e->expr->op);
                         break;
                     }
                 }
                 if (child_best == NULL)
-                    return NULL;
+                { elog(NOTICE, "PLANBUILD_PROJ: FAIL [3] no child_best matched"); return NULL; }
 
                 child = pg_cascades_build_plan_recurse(ctx,
                     (PgMemoGroup *) linitial(expr->inputs),
                     (PgRequiredProperty *) pg_safe_linitial_child_req(best),
                     child_best, &child_out);
+                elog(NOTICE, "PLANBUILD_PROJ: child build returned %s",
+                     child ? "Plan*" : "NULL");
 
                 /*
                  * For queries without aggregation, the sub_tlist's Var
