@@ -268,8 +268,7 @@ pg_group_update_best(PgMemoGroup *group, PgGroupBestEntry *new_entry)
         if (pg_required_property_equal(old->required, new_entry->required))
         {
             /* Replace in-place if new is cheaper */
-            if (cascades_planner_debug)
-                elog(NOTICE, "update_best: old_op=%d old_cost=%.4f new_op=%d new_cost=%.4f group=%d",
+            CASCADES_DEBUG(cascades_planner_debug, "update_best: old_op=%d old_cost=%.4f new_op=%d new_cost=%.4f group=%d",
                      old->expr->op, old->total_cost,
                      new_entry->expr->op, new_entry->total_cost,
                      group->id);
@@ -289,8 +288,7 @@ pg_group_update_best(PgMemoGroup *group, PgGroupBestEntry *new_entry)
         }
     }
 
-    if (cascades_planner_debug)
-        elog(NOTICE, "update_best: NEW entry op=%d cost=%.4f group=%d",
+    CASCADES_DEBUG(cascades_planner_debug, "update_best: NEW entry op=%d cost=%.4f group=%d",
              new_entry->expr->op, new_entry->total_cost, group->id);
 
     /* New required property */

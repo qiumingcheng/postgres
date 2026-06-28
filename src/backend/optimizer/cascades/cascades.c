@@ -174,8 +174,7 @@ pg_cascades_supported_query(PlannerInfo *root, PgCascadesUpperInfo *upper)
 
         if (num_base_rels >= 3)
         {
-            if (cascades_planner_debug)
-                elog(NOTICE, "Cascades: Phase 1 limitation - fallback for %d-table join with ORDER+LIMIT",
+            CASCADES_DEBUG(cascades_planner_debug, "Cascades: Phase 1 limitation - fallback for %d-table join with ORDER+LIMIT",
                      num_base_rels);
             return PG_CASCADES_UNSUPPORTED;
         }
@@ -257,6 +256,8 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
 
     MemSet(&ctx, 0, sizeof(PgPlannerCascadesContext));
 
+    CASCADES_DEBUG(cascades_planner_debug, "CASCADES: ====== BEGIN optimization ======");
+
     /* 1. Create Cascades MemoryContext */
     ctx.memo_cxt = AllocSetContextCreate(root->planner_cxt,
                                          "PgCascadesMemo",
@@ -264,6 +265,7 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
                                          ALLOCSET_DEFAULT_INITSIZE,
                                          ALLOCSET_DEFAULT_MAXSIZE);
     old_cxt = MemoryContextSwitchTo(ctx.memo_cxt);
+    CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [1/12] MemoryContext created");
 
     /* 2a. Initialize rule patterns (Phase 5: multi-node pattern matching) */
     pg_cascades_init_rule_patterns();
@@ -363,6 +365,9 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
         }
     }
 
+    CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [2/12] Rules initialized (impl=%d trans=%d)",
+             ctx.num_impl_rules, ctx.num_trans_rules);
+
     /* 4. Handle trivial_result */
     if (prep->trivial_result)
     {
@@ -417,10 +422,12 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     {
         MemoryContextSwitchTo(old_cxt);
         MemoryContextDelete(ctx.memo_cxt);
-        if (cascades_planner_debug)
-            elog(NOTICE, "Cascades: no valid lower paths");
+        CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [3/12] make_one_rel FAILED — no valid paths");
         return PG_CASCADES_INTERNAL_NO_PLAN;
     }
+
+    CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [3/12] make_one_rel OK (final_rel rows=%.0f width=%d)",
+             prep->final_rel->rows, prep->final_rel->width);
 
     /* 6. Build Memo from Query tree (StarRocks: Memo.init) */
     pg_memo_init_from_tree(&ctx);
@@ -429,11 +436,16 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     {
         MemoryContextSwitchTo(old_cxt);
         MemoryContextDelete(ctx.memo_cxt);
+        CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [4/12] Memo init FAILED — no root group");
         return PG_CASCADES_INTERNAL_NO_PLAN;
     }
 
+    CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [4/12] Memo init OK (%d groups, root=%d)",
+             list_length(ctx.memo->groups), ctx.memo->root_group->id);
+
     /* 7. Derive logical property */
     pg_memo_derive_logical_property(ctx.memo, ctx.memo->root_group, &ctx);
+    CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [5/12] Logical property derived");
 
     /*
      * 7c. Phase 4: Run staged + combination-rule rewrite on Memo groups.
@@ -468,12 +480,14 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
             if (best != NULL)
             {
                 ctx.memo->root_group = best;
-                if (ctx.debug)
-                    elog(NOTICE, "Cascades: updated root_group from %d to %d after rewrite",
+                CASCADES_DEBUG(ctx.debug, "Cascades: updated root_group from %d to %d after rewrite",
                          root_g->id, best->id);
             }
         }
     }
+
+    CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [6/12] Rewrite done (%d groups after rewrite)",
+             list_length(ctx.memo->groups));
 
     /* 8. Run task scheduler */
     {
@@ -489,6 +503,9 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
 
     status = pg_cascades_run_tasks(&ctx);
 
+    CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [7/12] Task scheduler done (tasks=%d, upper_bound=%.2f, status=%d)",
+             ctx.num_tasks_executed, ctx.upper_bound_cost, status);
+
     if (cascades_planner_debug)
     {
         debug_print_cascades_memo(&ctx);
@@ -500,7 +517,12 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     {
         *plan = pg_cascades_extract_best_plan(&ctx);
         if (*plan == NULL)
+        {
             status = PG_CASCADES_INTERNAL_NO_PLAN;
+            CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [8/12] Plan extraction FAILED — no valid plan");
+        }
+        else CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [8/12] Plan extraction OK (plan_type=%d)",
+                 (*plan)->type);
     }
 
     /*
@@ -512,7 +534,9 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     if (status == PG_CASCADES_OK && *plan != NULL)
     {
         pg_cascades_validate_plan(*plan);
+        CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [9/12] Plan validated");
         *plan = pg_cascades_physical_rewrite(&ctx, *plan);
+        CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [10/12] Physical rewrite done");
     }
 
     /* 10. Cleanup - copy plan out before deleting memo context */
@@ -523,6 +547,16 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     }
     MemoryContextSwitchTo(old_cxt);
     MemoryContextDelete(ctx.memo_cxt);
+
+    {
+        long secs;
+        int  microsecs;
+        TimestampDifference(ctx.start_time, GetCurrentTimestamp(),
+                            &secs, &microsecs);
+        CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [11/12] Cleanup done (elapsed=%.1fms)",
+                 secs * 1000.0 + microsecs / 1000.0);
+    }
+    CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [12/12] ====== END optimization (status=%d) ======", status);
 
     return status;
 }

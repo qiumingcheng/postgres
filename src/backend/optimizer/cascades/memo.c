@@ -219,8 +219,7 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
             if (parent_group != NULL && parent_group != owner_group)
             {
                 pg_memo_merge_group(ctx, owner_group, parent_group);
-                if (ctx->debug)
-                    elog(NOTICE, "Cascades: auto-merged group %d into group %d "
+                CASCADES_DEBUG(ctx->debug, "Cascades: auto-merged group %d into group %d "
                          "(duplicate expr op=%d)",
                          parent_group->id, owner_group->id, (int)expr->op);
             }
@@ -1220,7 +1219,6 @@ pg_memo_merge_group(PgPlannerCascadesContext *ctx,
     source->physical_exprs = NIL;
     source->best_entries = NIL;
 
-    if (ctx->debug)
-        elog(NOTICE, "Cascades: merged group %d into group %d",
+    CASCADES_DEBUG(ctx->debug, "Cascades: merged group %d into group %d",
              source->id, target->id);
 }

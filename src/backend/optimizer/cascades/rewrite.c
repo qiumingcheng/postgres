@@ -187,8 +187,7 @@ pg_rewrite_apply_rules_to_expr(PgPlannerCascadesContext *ctx,
         transform = pg_rewrite_lookup_transform(rr->name, &match_op);
         if (transform == NULL)
         {
-            if (ctx->debug)
-                elog(NOTICE, "Cascades rewrite: rule '%s' not found in rule registry",
+            CASCADES_DEBUG(ctx->debug, "Cascades rewrite: rule '%s' not found in rule registry",
                      rr->name);
             continue;
         }
@@ -213,8 +212,7 @@ pg_rewrite_apply_rules_to_expr(PgPlannerCascadesContext *ctx,
             if (new_group != NULL && new_group != group)
             {
                 changed = true;
-                if (ctx->debug)
-                    elog(NOTICE, "Cascades rewrite: rule '%s' produced new group %d",
+                CASCADES_DEBUG(ctx->debug, "Cascades rewrite: rule '%s' produced new group %d",
                          rr->name, new_group->id);
             }
         }
@@ -395,8 +393,7 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
 
     if (ctx->memo == NULL || ctx->memo->root_group == NULL)
     {
-        if (ctx->debug)
-            elog(NOTICE, "Cascades rewrite: no Memo/root group, skipping");
+        CASCADES_DEBUG(ctx->debug, "Cascades rewrite: no Memo/root group, skipping");
         return PG_CASCADES_OK;
     }
 
@@ -407,8 +404,7 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
         if (stage->rules == NULL || stage->num_rules == 0)
         {
             stages_without_rules++;
-            if (ctx->debug)
-                elog(NOTICE, "Cascades rewrite stage %d: %s (no rules, skipped)",
+            CASCADES_DEBUG(ctx->debug, "Cascades rewrite stage %d: %s (no rules, skipped)",
                      i, stage->name);
             continue;
         }
@@ -449,8 +445,7 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
                         ctx->memo->root_group, stage->rules, stage->num_rules);
                 }
 
-                if (ctx->debug)
-                    elog(NOTICE, "Cascades rewrite stage %d (%s) iteration %d: %s",
+                CASCADES_DEBUG(ctx->debug, "Cascades rewrite stage %d (%s) iteration %d: %s",
                          i, stage->name, iteration,
                          changed ? "changed" : "converged");
 
@@ -466,8 +461,7 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
                 ctx->memo->root_group, stage->rules, stage->num_rules);
             total_rules_applied++;
 
-            if (ctx->debug)
-                elog(NOTICE, "Cascades rewrite stage %d: %s (single-pass, %d rules)",
+            CASCADES_DEBUG(ctx->debug, "Cascades rewrite stage %d: %s (single-pass, %d rules)",
                      i, stage->name, stage->num_rules);
         }
     }
@@ -484,12 +478,10 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
 
         pg_rewrite_apply_rules_recursive(ctx, ctx->memo->root_group,
                                           g_rules_final_cleanup, num_cleanup);
-        if (ctx->debug)
-            elog(NOTICE, "Cascades rewrite: final cleanup (%d rules)", num_cleanup);
+        CASCADES_DEBUG(ctx->debug, "Cascades rewrite: final cleanup (%d rules)", num_cleanup);
     }
 
-    if (ctx->debug)
-        elog(NOTICE, "Cascades rewrite pipeline: %d stages with rules, "
+    CASCADES_DEBUG(ctx->debug, "Cascades rewrite pipeline: %d stages with rules, "
              "%d stages without rules (total %d)",
              stages_with_rules, stages_without_rules, REWRITE_NUM_STAGES);
 
@@ -582,8 +574,7 @@ pg_cascades_logical_rewrite(PgPlannerCascadesContext *ctx)
                         ctx->memo->root_group, combo_stage_rules, combo_num);
                 }
 
-                if (ctx->debug)
-                    elog(NOTICE, "Cascades combo rule '%s' iteration %d: %s",
+                CASCADES_DEBUG(ctx->debug, "Cascades combo rule '%s' iteration %d: %s",
                          cr->name, iteration,
                          changed ? "changed" : "converged");
 

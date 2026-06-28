@@ -213,8 +213,7 @@ pg_task_optimize_group(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         group->lower_bound_cost > ctx->upper_bound_cost)
     {
         group->optimized = true;  /* don't retry */
-        if (ctx->debug)
-            elog(NOTICE, "Cascades: pruned group %d (lower_bound=%.2f >= upper=%.2f)",
+        CASCADES_DEBUG(ctx->debug, "Cascades: pruned group %d (lower_bound=%.2f >= upper=%.2f)",
                  group->id, group->lower_bound_cost, ctx->upper_bound_cost);
         return PG_CASCADES_OK;
     }
@@ -367,11 +366,10 @@ pg_task_optimize_expression(PgPlannerCascadesContext *ctx, PgOptimizerTask *task
     foreach(lc, expr->inputs)
     {
         PgMemoGroup *child = (PgMemoGroup *) lfirst(lc);
+        PgOptimizerTask *t;
 
         if (child == expr->owner_group)
             continue;
-
-        PgOptimizerTask *t;
 
         t = (PgOptimizerTask *) palloc0(sizeof(PgOptimizerTask));
         t->type = PG_TASK_EXPLORE_GROUP;
@@ -583,6 +581,17 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             /* transform with this binder */
             new_exprs = rule->transform(ctx, expr);
 
+            {
+                int n_results = (new_exprs != NIL) ? list_length(new_exprs) : 0;
+                int merge_delta = 0;
+                if (new_exprs == NIL)
+                    merge_delta = list_length(expr->owner_group->logical_exprs) - old_logical_count;
+                CASCADES_DEBUG(cascades_planner_debug,
+                    "CASCADES: rule '%s' applied group=%d op=%d → %d new, %d merged",
+                    rule->name, expr->owner_group->id, expr->op,
+                    n_results, merge_delta);
+            }
+
             /*
              * Group merging detection: if transform returned NIL but the
              * group now has more logical expressions, a group-merging
@@ -607,8 +616,7 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                     task_stack_push(ctx, t);
                 }
 
-                if (ctx->debug)
-                    elog(NOTICE, "Cascades: rule '%s' merged %d expressions into group %d",
+                CASCADES_DEBUG(ctx->debug, "Cascades: rule '%s' merged %d expressions into group %d",
                          rule->name, new_count - old_logical_count,
                          expr->owner_group->id);
 
@@ -675,6 +683,16 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         new_exprs = rule->transform(ctx, expr);
         g_current_binder = NULL;
 
+        {
+            int n_results = (new_exprs != NIL) ? list_length(new_exprs) : 0;
+            int merge_delta = 0;
+            if (new_exprs == NIL)
+                merge_delta = list_length(expr->owner_group->logical_exprs) - old_logical_count;
+            CASCADES_DEBUG(cascades_planner_debug,
+                "CASCADES: trans-rule '%s' applied group=%d → %d new, %d merged",
+                rule->name, expr->owner_group->id, n_results, merge_delta);
+        }
+
         /*
          * Phase 5: Group merging detection.
          * If transform returned NIL but the owner group now has more
@@ -702,8 +720,7 @@ pg_task_apply_rule(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                 task_stack_push(ctx, t);
             }
 
-            if (ctx->debug)
-                elog(NOTICE, "Cascades: rule '%s' merged %d expressions into group %d",
+            CASCADES_DEBUG(ctx->debug, "Cascades: rule '%s' merged %d expressions into group %d",
                      rule->name, new_count - old_logical_count,
                      expr->owner_group->id);
 
@@ -1072,6 +1089,18 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             Cost child_total   = task->total_cost;
             double input_rows = 0;
             int    input_width = 0;
+            PgGroupBestEntry *old_best = NULL;
+
+            /* Save old best for comparison */
+            {
+                ListCell *blc;
+                foreach(blc, expr->owner_group->best_entries)
+                {
+                    PgGroupBestEntry *be = (PgGroupBestEntry *) lfirst(blc);
+                    if (pg_required_property_equal(be->required, task->required))
+                    { old_best = be; break; }
+                }
+            }
 
             /*
              * Phase 6: Per-expression cost caching.
@@ -1231,6 +1260,20 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                 entry->output = task->output_property;
 
                 pg_group_update_best(expr->owner_group, entry);
+
+                if (old_best)
+                    CASCADES_DEBUG(cascades_planner_debug,
+                        "CASCADES: cost group=%d op=%d mode=%d "
+                        "startup=%.4f total=%.4f (replaced op=%d cost=%.2f)",
+                        expr->owner_group->id, expr->op, expr->mode,
+                        task->startup_cost, task->total_cost,
+                        old_best->expr->op, old_best->total_cost);
+                else
+                    CASCADES_DEBUG(cascades_planner_debug,
+                        "CASCADES: cost group=%d op=%d mode=%d "
+                        "startup=%.4f total=%.4f (NEW)",
+                        expr->owner_group->id, expr->op, expr->mode,
+                        task->startup_cost, task->total_cost);
 
                 /*
                  * Phase 6: Per-expression cost caching.

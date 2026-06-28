@@ -144,9 +144,9 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
         }
     }
 
-    if (cascades_planner_debug)
-        elog(WARNING, "Cascades: no best_entries found for root group - "
-             "this indicates incomplete optimization. Falling back to PG planner.");
+    CASCADES_DEBUG(cascades_planner_debug,
+        "CASCADES: plan extraction FAILED — no best_entries in root group %d",
+        root_group->id);
     return NULL;
 }
 
@@ -188,11 +188,9 @@ pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
         return;
 
     /* Debug: log plan node details */
-    if (cascades_planner_debug)
-    {
-        elog(NOTICE, "fix_empty_targetlists: node type %d, targetlist length %d",
-             (int) nodeTag(plan), list_length(plan->targetlist));
-    }
+    CASCADES_DEBUG(cascades_planner_debug,
+        "CASCADES: fix_empty_targetlists node=%d tlist_len=%d",
+        (int) nodeTag(plan), list_length(plan->targetlist));
 
     /* Recurse into children first */
     if (plan->lefttree != NULL)
@@ -206,8 +204,7 @@ pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
      * is missing columns, we rebuild from the query's targetList. */
     if (plan->targetlist == NIL)
     {
-        if (cascades_planner_debug)
-            elog(NOTICE, "fix_empty_targetlists: node type %d has NIL targetlist, attempting fix",
+        CASCADES_DEBUG(cascades_planner_debug, "fix_empty_targetlists: node type %d has NIL targetlist, attempting fix",
                  (int) nodeTag(plan));
 
         /* For join nodes from create_plan(), NIL targetlist should NOT happen.
@@ -228,16 +225,14 @@ pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
         if (plan->lefttree != NULL && plan->lefttree->targetlist != NIL)
         {
             plan->targetlist = plan->lefttree->targetlist;
-            if (cascades_planner_debug)
-                elog(NOTICE, "fix_empty_targetlists: fixed node type %d using lefttree targetlist",
+            CASCADES_DEBUG(cascades_planner_debug, "fix_empty_targetlists: fixed node type %d using lefttree targetlist",
                      (int) nodeTag(plan));
             return;
         }
         if (plan->righttree != NULL && plan->righttree->targetlist != NIL)
         {
             plan->targetlist = plan->righttree->targetlist;
-            if (cascades_planner_debug)
-                elog(NOTICE, "fix_empty_targetlists: fixed node type %d using righttree targetlist",
+            CASCADES_DEBUG(cascades_planner_debug, "fix_empty_targetlists: fixed node type %d using righttree targetlist",
                      (int) nodeTag(plan));
             return;
         }
@@ -430,8 +425,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 if (best->child_required_props == NIL)
                     return NULL;
 
-                if (cascades_planner_debug)
-                    elog(NOTICE, "planbuild HashAgg: child_group=%d best_entries=%d child_required_props=%s",
+                CASCADES_DEBUG(cascades_planner_debug, "planbuild HashAgg: child_group=%d best_entries=%d child_required_props=%s",
                          child_group->id,
                          list_length(child_group->best_entries),
                          (best->child_required_props != NIL) ? "yes" : "NIL");
@@ -439,8 +433,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 foreach(lc, child_group->best_entries)
                 {
                     PgGroupBestEntry *e = (PgGroupBestEntry *) lfirst(lc);
-                    if (cascades_planner_debug)
-                        elog(NOTICE, "  child best: op=%d req_pathkeys=%p",
+                    CASCADES_DEBUG(cascades_planner_debug, "  child best: op=%d req_pathkeys=%p",
                              e->expr->op, e->required->pathkeys);
                     if (best->child_required_props != NIL &&
                         pg_required_property_equal(e->required,
@@ -458,8 +451,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 }
                 if (child_best == NULL)
                 {
-                    if (cascades_planner_debug)
-                        elog(WARNING, "planbuild HashAgg: child_best not found");
+                    CASCADES_DEBUG(cascades_planner_debug, "planbuild HashAgg: child_best not found");
                     return NULL;
                 }
 
@@ -469,8 +461,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                     child_best, &child_out);
                 if (child == NULL)
                 {
-                    if (cascades_planner_debug)
-                        elog(WARNING, "planbuild HashAgg: child plan is NULL");
+                    CASCADES_DEBUG(cascades_planner_debug, "planbuild HashAgg: child plan is NULL");
                     return NULL;
                 }
 
@@ -524,8 +515,7 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                 /* Guard: same as HashAgg case above */
                 if (child_group->best_entries == NIL)
                 {
-                    if (cascades_planner_debug)
-                        elog(WARNING, "planbuild GroupAgg: child_group=%d best_entries is NIL",
+                    CASCADES_DEBUG(cascades_planner_debug, "planbuild GroupAgg: child_group=%d best_entries is NIL",
                              child_group->id);
                     return NULL;
                 }

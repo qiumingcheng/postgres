@@ -574,6 +574,20 @@ extern int  cascades_planner_timeout_ms;
 extern int  cascades_planner_max_groups;
 extern int  cascades_planner_max_tasks;
 
+/*
+ * CASCADES_DEBUG — Cascades trace macro, gated by a debug flag.
+ *
+ * Replaces the repetitive pattern:
+ *     if (flag) elog(NOTICE, "CASCADES: ...");
+ *
+ * Usage:
+ *     CASCADES_DEBUG(cascades_planner_debug, "message %d", val);
+ *     CASCADES_DEBUG(ctx->debug,        "group=%d", gid);
+ *     CASCADES_DEBUG(ctx.debug,         "op=%d", op);
+ */
+#define CASCADES_DEBUG(flag, ...) \
+    do { if ((flag)) elog(NOTICE, __VA_ARGS__); } while(0)
+
 /* ========================================================================
  * 核心函数声明
  * ======================================================================== */

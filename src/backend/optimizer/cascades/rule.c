@@ -1068,8 +1068,7 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 
         if (num_rels >= 3)
         {
-            if (ctx->debug)
-                elog(NOTICE, "Cascades: PruneScanColumns disabled for "
+            CASCADES_DEBUG(ctx->debug, "Cascades: PruneScanColumns disabled for "
                      "multi-table join (n=%d) with ORDER+LIMIT to preserve join keys",
                      num_rels);
 
@@ -1105,8 +1104,7 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
                 if (!bms_is_empty(rel->attr_needed[ndx]))
                 {
                     any_attr_needed = true;
-                    if (ctx->debug)
-                        elog(NOTICE, "Cascades: PruneScanColumns keeping varno=%d varattno=%d — attr_needed",
+                    CASCADES_DEBUG(ctx->debug, "Cascades: PruneScanColumns keeping varno=%d varattno=%d — attr_needed",
                              (int)var->varno, (int)var->varattno);
                     new_tlist = lappend(new_tlist, var);
                     continue;  /* keep: needed by some join */
@@ -1151,8 +1149,7 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 
             if (num_rels >= 3 && pruned)
             {
-                if (ctx->debug)
-                    elog(NOTICE, "Cascades: PruneScanColumns skipping pruning for "
+                CASCADES_DEBUG(ctx->debug, "Cascades: PruneScanColumns skipping pruning for "
                          "multi-table join (n=%d) with ORDER+LIMIT", num_rels);
 
                 list_free(new_tlist);
@@ -1172,8 +1169,7 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
         /* Re-estimate: fewer columns → narrower rows */
         set_baserel_size_estimates(ctx->root, rel);
 
-        if (ctx->debug)
-            elog(NOTICE, "Cascades: PruneScanColumns reduced reltargetlist "
+        CASCADES_DEBUG(ctx->debug, "Cascades: PruneScanColumns reduced reltargetlist "
                  "for rel %d to %d columns",
                  rel->relid, list_length(new_tlist));
     }

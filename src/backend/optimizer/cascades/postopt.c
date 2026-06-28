@@ -231,10 +231,9 @@ pg_cascades_physical_rewrite_recurse(PgPlannerCascadesContext *ctx, Plan *plan)
             {
                 plan->righttree = materialize_finished_plan(inner);
 
-                if (ctx->debug)
-                    elog(NOTICE, "Cascades postopt: inserted Material on "
-                         "NestLoop inner (inner type=%d)",
-                         (int) nodeTag(inner));
+                CASCADES_DEBUG(ctx->debug,
+                    "CASCADES: postopt inserted Material on NestLoop inner (type=%d)",
+                    (int) nodeTag(inner));
             }
         }
     }
