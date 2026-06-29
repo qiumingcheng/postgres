@@ -796,6 +796,12 @@ typedef struct PgOperatorVtable {
     PgDeriveStatsFn    derive_stats_fn;
 } PgOperatorVtable;
 
+/* planbuild.c — shared helpers for build wrapper functions */
+extern PgRequiredProperty *pg_safe_linitial_child_req(PgGroupBestEntry *best);
+extern Plan *pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
+    PgMemoGroup *group, PgRequiredProperty *required,
+    PgGroupBestEntry *best, PgOutputProperty *output);
+
 /* Registry API */
 extern void pg_registry_init(void);
 extern void pg_registry_register_operator(PgOperatorVtable *vt);
