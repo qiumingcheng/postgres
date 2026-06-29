@@ -626,6 +626,7 @@ extern void pg_cascades_run_pre_memo_rules(PlannerInfo *root);
 extern Node *preprocess_expression(PlannerInfo *root, Node *expr, int kind);
 extern void preprocess_qual_conditions(PlannerInfo *root, Node *jtnode);
 extern Plan *grouping_planner(PlannerInfo *root, double tuple_fraction);
+extern void preprocess_rowmarks(PlannerInfo *root);
 extern PgCascadesStatus pg_cascades_supported_query_precheck(
     PlannerInfo *root, PgCascadesUpperInfo *upper);
 extern PgCascadesStatus pg_cascades_supported_query(

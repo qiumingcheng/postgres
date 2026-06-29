@@ -31,6 +31,13 @@ int  cascades_planner_max_groups = 10000;
 int  cascades_planner_max_tasks = 100000;
 
 /* Forward declarations for pre-memo rule functions */
+static void pg_pre_memo_init_flags(PlannerInfo *root);
+static void pg_pre_memo_flatten_union(PlannerInfo *root);
+static void pg_pre_memo_rowmarks(PlannerInfo *root);
+static void pg_pre_memo_normalize(PlannerInfo *root);
+static void pg_pre_memo_expand(PlannerInfo *root);
+static bool pg_pre_memo_oj_applicable(PlannerInfo *root);
+static void pg_pre_memo_reduce_oj(PlannerInfo *root);
 static void pg_pre_memo_inline_ctes(PlannerInfo *root);
 static void pg_pre_memo_convert_sublinks(PlannerInfo *root);
 static void pg_pre_memo_pullup_subqueries(PlannerInfo *root);
@@ -43,14 +50,39 @@ static void pg_pre_memo_pullup_subqueries(PlannerInfo *root);
  * is a self-contained optimization that operates on PlannerInfo.
  * ======================================================================== */
 
+/*
+ * Pre-Memo rule execution order matches PG's subquery_planner:
+ *   Init → CTE → SubLink → Union → RowMark → Inherit → Expression → OuterJoin
+ */
 static PgPreMemoRule g_pre_memo_rules[] = {
-    /* ---- Phase 4: CTE / SubLink / Subquery Pull-up ---- */
+    /* ---- Phase 0: PlannerInfo Init (flag setup needed by later phases) ---- */
+    {"PlannerInfoInit",
+     0, NULL, pg_pre_memo_init_flags},
+
+    /* ---- Phase 1: CTE Processing (SS_process_ctes) ---- */
     {"CTEInline",
-     4, NULL, pg_pre_memo_inline_ctes},
+     1, NULL, pg_pre_memo_inline_ctes},
+
+    /* ---- Phase 2: SubLink → Join + Subquery Pull-up + UNION ALL
+         (pull_up_sublinks → pull_up_subqueries → flatten_simple_union_all) ---- */
     {"SubLinkToJoin",
-     4, NULL, pg_pre_memo_convert_sublinks},
+     2, NULL, pg_pre_memo_convert_sublinks},
     {"SubqueryPullUp",
-     4, NULL, pg_pre_memo_pullup_subqueries},
+     2, NULL, pg_pre_memo_pullup_subqueries},
+    {"UnionAllFlatten",
+     2, NULL, pg_pre_memo_flatten_union},
+
+    /* ---- Phase 3: RowMark + Table Expansion
+         (preprocess_rowmarks → expand_inherited_tables) ---- */
+    {"RowMarkInit",
+     3, NULL, pg_pre_memo_rowmarks},
+    {"InheritTableExpand",
+     3, NULL, pg_pre_memo_expand},
+
+    /* ---- Phase 4: Outer Join Reduction (reduce_outer_joins) ---- */
+    {"OuterJoinReduce",
+     4, pg_pre_memo_oj_applicable, pg_pre_memo_reduce_oj},
+
     {NULL, 0, NULL, NULL}  /* sentinel */
 };
 
@@ -92,6 +124,95 @@ pg_cascades_run_pre_memo_rules(PlannerInfo *root)
 /* ========================================================================
  * Phase 2: Pre-Memo Rule Implementations
  * ======================================================================== */
+
+/*
+ * PlannerInfoInit (Phase 0): set flags needed by later phases.
+ *   hasJoinRTEs, hasHavingQual, hasPseudoConstantQuals.
+ */
+static void
+pg_pre_memo_init_flags(PlannerInfo *root)
+{
+    ListCell *l;
+    root->hasJoinRTEs = false;
+    foreach(l, root->parse->rtable)
+    {
+        RangeTblEntry *rte = (RangeTblEntry *) lfirst(l);
+        if (rte->rtekind == RTE_JOIN)
+        {
+            root->hasJoinRTEs = true;
+            break;
+        }
+    }
+    root->hasHavingQual = (root->parse->havingQual != NULL);
+    root->hasPseudoConstantQuals = false;
+}
+
+/*
+ * UnionAllFlatten (Phase 2): matches PG's flatten_simple_union_all.
+ */
+static void
+pg_pre_memo_flatten_union(PlannerInfo *root)
+{
+    if (root->parse->setOperations)
+        flatten_simple_union_all(root);
+}
+
+/*
+ * RowMarkInit (Phase 3): matches PG's preprocess_rowmarks.
+ */
+static void
+pg_pre_memo_rowmarks(PlannerInfo *root)
+{
+    preprocess_rowmarks(root);
+}
+
+/*
+ * ExpressionNormalize (Phase 4): matches PG's preprocess_expression step.
+ *   Handles targetList, returningList, jointree quals, havingQual.
+ */
+static void
+pg_pre_memo_normalize(PlannerInfo *root)
+{
+    Query *parse = root->parse;
+    parse->targetList = (List *)
+        preprocess_expression(root, (Node *) parse->targetList, EXPRKIND_TARGET);
+    parse->returningList = (List *)
+        preprocess_expression(root, (Node *) parse->returningList, EXPRKIND_TARGET);
+    preprocess_qual_conditions(root, (Node *) parse->jointree);
+    parse->havingQual = preprocess_expression(root, parse->havingQual, EXPRKIND_QUAL);
+}
+
+/*
+ * InheritTableExpand (Phase 3): matches PG's expand_inherited_tables.
+ */
+static void
+pg_pre_memo_expand(PlannerInfo *root)
+{
+    expand_inherited_tables(root);
+}
+
+/*
+ * OuterJoinReduce (Phase 5): matches PG's reduce_outer_joins.
+ *   Applicable only when the query contains outer joins.
+ */
+static bool
+pg_pre_memo_oj_applicable(PlannerInfo *root)
+{
+    ListCell *l;
+    foreach(l, root->parse->rtable)
+    {
+        RangeTblEntry *rte = (RangeTblEntry *) lfirst(l);
+        if (rte->rtekind == RTE_JOIN && IS_OUTER_JOIN(rte->jointype))
+            return true;
+    }
+    return false;
+}
+
+static void
+pg_pre_memo_reduce_oj(PlannerInfo *root)
+{
+    reduce_outer_joins(root);
+}
 
 /*
  * CTEInline: inline single-reference non-recursive SELECT CTEs.
@@ -234,32 +355,16 @@ pg_cascades_planner_hook(Query *parse, int cursorOptions,
     root->non_recursive_plan = NULL;
     root->hasJoinRTEs = false;
 
-    /* ---- 3. Pre-Memo rewrite rules (BEFORE semantic preprocessing,
-     *        since CTE inline needs raw parse tree) ---- */
+    /* ---- 3. Pre-Memo rewrite rules (Phase 0-4) ---- */
     pg_cascades_run_pre_memo_rules(root);
 
-    /* ---- 4. Semantic preprocessing (from subquery_planner) ---- */
+    /* ---- 4. Expression normalization (linear pass, must run once) ---- */
     parse->targetList = (List *)
         preprocess_expression(root, (Node *) parse->targetList, EXPRKIND_TARGET);
     parse->returningList = (List *)
         preprocess_expression(root, (Node *) parse->returningList, EXPRKIND_TARGET);
     preprocess_qual_conditions(root, (Node *) parse->jointree);
     parse->havingQual = preprocess_expression(root, parse->havingQual, EXPRKIND_QUAL);
-
-    /* Expand inheritance, outer join simplification */
-    expand_inherited_tables(root);
-    {
-        bool hasOuterJoins = false;
-        ListCell *l;
-        foreach(l, parse->rtable)
-        {
-            RangeTblEntry *rte = (RangeTblEntry *) lfirst(l);
-            if (rte->rtekind == RTE_JOIN && IS_OUTER_JOIN(rte->jointype))
-            { hasOuterJoins = true; break; }
-        }
-        if (hasOuterJoins)
-            reduce_outer_joins(root);
-    }
 
     /* ---- 5. Dispatch to grouping_planner ---- */
     {

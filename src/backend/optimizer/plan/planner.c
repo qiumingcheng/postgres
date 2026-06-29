@@ -61,7 +61,7 @@ Node *preprocess_expression(PlannerInfo *root, Node *expr, int kind);
 void preprocess_qual_conditions(PlannerInfo *root, Node *jtnode);
 static Plan *inheritance_planner(PlannerInfo *root);
 Plan *grouping_planner(PlannerInfo *root, double tuple_fraction);
-static void preprocess_rowmarks(PlannerInfo *root);
+void preprocess_rowmarks(PlannerInfo *root);
 static double preprocess_limit(PlannerInfo *root,
 				 double tuple_fraction,
 				 int64 *offset_est, int64 *count_est);
@@ -2023,7 +2023,7 @@ get_base_rel_indexes(Node *jtnode)
 /*
  * preprocess_rowmarks - set up PlanRowMarks if needed
  */
-static void
+void
 preprocess_rowmarks(PlannerInfo *root)
 {
 	Query	   *parse = root->parse;
