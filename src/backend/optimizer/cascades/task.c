@@ -1142,6 +1142,19 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
              * For Project and Limit, we compute local cost and
              * add it to child costs.
              */
+            /* vtable dispatch: only Upper Ops (HASHAGG+) — scan/join handle elsewhere */
+            if (expr->op >= PG_CASCADES_PHYSICAL_HASHAGG)
+            {
+                PgOperatorVtable *vt = pg_registry_get_vtable(expr->op);
+                if (vt && vt->cost_fn)
+                {
+                    vt->cost_fn(ctx, expr->owner_group, expr,
+                                input_rows, input_width,
+                                child_startup, child_total,
+                                &task->startup_cost, &task->total_cost);
+                    goto cost_done;
+                }
+            }
             switch (expr->op)
             {
                 case PG_CASCADES_PHYSICAL_HASHAGG:
@@ -1230,6 +1243,7 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                     break;
             }
             (void) 0;
+        cost_done:
 
             /* Per-expression pruning (above) via expr->best_cost
              * already prevents redundant ENFORCE_AND_COST runs. */
