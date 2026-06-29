@@ -312,13 +312,11 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * If there is a WITH list, process each WITH query and build an initplan
 	 * SubPlan structure for it.
 	 */
-	if (!enable_cascades_planner)
-	{
+	/* Always run CTE + SubLink processing — Cascades precheck catches residuals */
 	if (parse->cteList)
 		SS_process_ctes(root);
 	if (parse->hasSubLinks)
 		pull_up_sublinks(root);
-	}
 
 	/*
 	 * When Cascades is on, run pre-Memo rewrite rules instead of
@@ -327,6 +325,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	if (enable_cascades_planner)
 	{
 		pg_cascades_ensure_hook();
+pg_cascades_run_pre_memo_rules(root);
 	}
 
 	/*
@@ -340,7 +339,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * Check to see if any subqueries in the jointree can be merged into this
 	 * query.
 	 */
-	if (!enable_cascades_planner)
+	if (true /* always run pull_up_sublinks */)
 		parse->jointree = (FromExpr *)
 		pull_up_subqueries(root, (Node *) parse->jointree, NULL, NULL);
 
