@@ -167,6 +167,8 @@ pg_pre_memo_pullup_subqueries(PlannerInfo *root)
  * Phase 2: planner_hook — new entry point
  * ======================================================================== */
 
+static bool g_hook_registered = false;
+
 static PlannedStmt *
 pg_cascades_planner_hook(Query *parse, int cursorOptions,
                          ParamListInfo boundParams)
@@ -179,14 +181,30 @@ pg_cascades_planner_hook(Query *parse, int cursorOptions,
 }
 
 /*
+ * pg_cascades_ensure_hook:
+ *   Lazy-init: register the planner_hook on first Cascades query.
+ *   Called from subquery_planner when enable_cascades_planner is on.
+ *   Safe to call multiple times (static guard).
+ */
+void
+pg_cascades_ensure_hook(void)
+{
+    if (!g_hook_registered)
+    {
+        planner_hook = pg_cascades_planner_hook;
+        g_hook_registered = true;
+    }
+}
+
+/*
  * pg_cascades_register_hook:
- *   Register the planner_hook at module load time.
- *   Sets the boundary: all planning enters through Cascades.
+ *   Explicit registration (for use in _PG_init when available).
  */
 void
 pg_cascades_register_hook(void)
 {
     planner_hook = pg_cascades_planner_hook;
+    g_hook_registered = true;
 }
 
 /*

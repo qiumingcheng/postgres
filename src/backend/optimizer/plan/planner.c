@@ -325,7 +325,10 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * PG SS_process_ctes/pull_up_sublinks/pull_up_subqueries.
 	 */
 	if (enable_cascades_planner)
+	{
+		pg_cascades_ensure_hook();
 		pg_cascades_run_pre_memo_rules(root);
+	}
 
 	/*
 	 * Scan the rangetable for set-returning functions, and inline them if

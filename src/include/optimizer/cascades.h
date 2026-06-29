@@ -616,6 +616,7 @@ extern PgCascadesStatus pg_cascades_optimize(
 extern PgCascadesStatus pg_cascades_try_grouping_planner(
     PlannerInfo *root, QueryPlannerPrepResult *prep,
     PgCascadesUpperInfo *upper, Plan **plan);  /* legacy alias */
+extern void pg_cascades_ensure_hook(void);
 extern void pg_cascades_register_hook(void);
 extern void pg_cascades_run_pre_memo_rules(PlannerInfo *root);
 extern PgCascadesStatus pg_cascades_supported_query_precheck(
