@@ -11,6 +11,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/planner.h"
+#include "optimizer/prep.h"
 #include "optimizer/clauses.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
@@ -28,6 +29,179 @@ bool cascades_planner_fallback_on_error = false;
 int  cascades_planner_timeout_ms = 0;
 int  cascades_planner_max_groups = 10000;
 int  cascades_planner_max_tasks = 100000;
+
+/* Forward declarations for pre-memo rule functions */
+static void pg_pre_memo_inline_ctes(PlannerInfo *root);
+static void pg_pre_memo_convert_sublinks(PlannerInfo *root);
+static void pg_pre_memo_pullup_subqueries(PlannerInfo *root);
+
+/* ========================================================================
+ * Phase 2: Pre-Memo Rewrite Rules
+ *
+ * StarRocks alignment: these rules run on the Query tree before Memo
+ * is built, equivalent to StarRocks' RewriteTreeTask phase.  Each rule
+ * is a self-contained optimization that operates on PlannerInfo.
+ * ======================================================================== */
+
+static PgPreMemoRule g_pre_memo_rules[] = {
+    /* ---- Phase 4: CTE / SubLink / Subquery Pull-up ---- */
+    {"CTEInline",
+     4, NULL, pg_pre_memo_inline_ctes},
+    {"SubLinkToJoin",
+     4, NULL, pg_pre_memo_convert_sublinks},
+    {"SubqueryPullUp",
+     4, NULL, pg_pre_memo_pullup_subqueries},
+    {NULL, 0, NULL, NULL}  /* sentinel */
+};
+
+/*
+ * pg_cascades_run_pre_memo_rules:
+ *   Execute pre-Memo rules in phase order, iterating within each phase
+ *   until convergence (max 5 iterations per phase).
+ */
+void
+pg_cascades_run_pre_memo_rules(PlannerInfo *root)
+{
+    int phase;
+    int max_phase = 5;
+
+    for (phase = 1; phase <= max_phase; phase++)
+    {
+        int iteration = 0;
+        bool changed;
+        do {
+            int i;
+            changed = false;
+            for (i = 0; g_pre_memo_rules[i].name != NULL; i++)
+            {
+                PgPreMemoRule *r = &g_pre_memo_rules[i];
+                if (r->phase != phase) continue;
+                if (r->applicable && !r->applicable(root)) continue;
+
+                CASCADES_DEBUG(cascades_planner_debug,
+                    "CASCADES: pre-memo rule '%s' phase=%d iter=%d",
+                    r->name, phase, iteration);
+                r->apply(root);
+                changed = true;
+            }
+            iteration++;
+        } while (changed && iteration < 5);
+    }
+}
+
+/* ========================================================================
+ * Phase 2: Pre-Memo Rule Implementations
+ * ======================================================================== */
+
+/*
+ * CTEInline: inline single-reference non-recursive SELECT CTEs.
+ *   - cterefcount == 1 && !cterecursive && commandType == SELECT
+ *   - RTE_CTE → RTE_SUBQUERY (PG's make_one_rel auto-handles RTE_SUBQUERY)
+ */
+static void
+pg_pre_memo_inline_ctes(PlannerInfo *root)
+{
+    Query *parse = root->parse;
+    ListCell *lc;
+
+    if (parse->cteList == NIL) return;
+
+    foreach(lc, parse->cteList)
+    {
+        CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+        Query *cte_query;
+        Index   rti;
+        RangeTblEntry *rte;
+        ListCell *rlc;
+
+        if (cte->cterecursive)          continue;
+        if (cte->cterefcount != 1)      continue;
+        cte_query = (Query *) cte->ctequery;
+        if (cte_query->commandType != CMD_SELECT) continue;
+
+        /* Find the RTE_CTE referencing this CTE */
+        rti = 1;
+        foreach(rlc, parse->rtable)
+        {
+            rte = (RangeTblEntry *) lfirst(rlc);
+            if (rte->rtekind == RTE_CTE &&
+                rte->ctename && strcmp(rte->ctename, cte->ctename) == 0)
+            {
+                rte->rtekind = RTE_SUBQUERY;
+                rte->subquery = cte_query;
+                cte->cterefcount = 0;  /* mark as handled */
+                CASCADES_DEBUG(cascades_planner_debug,
+                    "CASCADES: inlined CTE \"%s\" → RTE_SUBQUERY",
+                    cte->ctename);
+                break;
+            }
+            rti++;
+        }
+    }
+}
+
+/*
+ * SubLinkToJoin: convert ANY/EXISTS SubLinks to semi/anti joins.
+ *   Directly delegates to PG's pull_up_sublinks() — a public function
+ *   that only modifies the parse tree, with no dependency on grouping_planner.
+ */
+static void
+pg_pre_memo_convert_sublinks(PlannerInfo *root)
+{
+    if (!root->parse->hasSubLinks) return;
+    pull_up_sublinks(root);
+}
+
+/*
+ * SubqueryPullUp: pull up simple FROM-subqueries into the main query.
+ *   Delegates to PG's pull_up_subqueries().
+ */
+static void
+pg_pre_memo_pullup_subqueries(PlannerInfo *root)
+{
+    root->parse->jointree = (FromExpr *)
+        pull_up_subqueries(root, (Node *) root->parse->jointree, NULL, NULL);
+}
+
+/* ========================================================================
+ * Phase 2: planner_hook — new entry point
+ * ======================================================================== */
+
+static PlannedStmt *
+pg_cascades_planner_hook(Query *parse, int cursorOptions,
+                         ParamListInfo boundParams)
+{
+    /*
+     * Pre-Memo rules execute inside subquery_planner() (planner.c:327).
+     * The hook provides a clean entry point at the planner() level.
+     */
+    return standard_planner(parse, cursorOptions, boundParams);
+}
+
+/*
+ * pg_cascades_register_hook:
+ *   Register the planner_hook at module load time.
+ *   Sets the boundary: all planning enters through Cascades.
+ */
+void
+pg_cascades_register_hook(void)
+{
+    planner_hook = pg_cascades_planner_hook;
+}
+
+/*
+ * pg_cascades_optimize:
+ *   New entry point name — wraps pg_cascades_try_grouping_planner.
+ *   This is the clean public API; the old name is kept as a legacy alias.
+ */
+PgCascadesStatus
+pg_cascades_optimize(PlannerInfo *root,
+                     QueryPlannerPrepResult *prep,
+                     PgCascadesUpperInfo *upper,
+                     Plan **plan)
+{
+    return pg_cascades_try_grouping_planner(root, prep, upper, plan);
+}
 
 /* ========================================================================
  * SubPlan 检测 (Phase 6b: 区分 correlated vs uncorrelated)
@@ -192,7 +366,8 @@ pg_cascades_supported_query(PlannerInfo *root, PgCascadesUpperInfo *upper)
 
         rte = root->simple_rte_array[rti];
 
-        if (rte->rtekind != RTE_RELATION)
+        if (rte->rtekind != RTE_RELATION &&
+            rte->rtekind != RTE_SUBQUERY)  /* inlined CTEs → RTE_SUBQUERY */
             return PG_CASCADES_UNSUPPORTED_RTE_KIND;
         if (rte->inh)
             return PG_CASCADES_UNSUPPORTED_INHERITANCE;

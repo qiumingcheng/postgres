@@ -589,13 +589,35 @@ extern int  cascades_planner_max_tasks;
     do { if ((flag)) elog(NOTICE, __VA_ARGS__); } while(0)
 
 /* ========================================================================
+ * Phase 2: Pre-Memo Rewrite Rule
+ *
+ * Pre-Memo rules run on the Query tree BEFORE Memo is built, following
+ * StarRocks' RewriteTreeTask pattern.  They handle optimizations that
+ * must happen at the parse-tree level (CTE inlining, SubLink conversion,
+ * subquery pull-up) before make_one_rel() generates lower paths.
+ * ======================================================================== */
+
+typedef struct PgPreMemoRule
+{
+    const char *name;
+    int         phase;          /* execution phase 1-5, rules within a phase iterate */
+    bool        (*applicable)(PlannerInfo *root);
+    void        (*apply)(PlannerInfo *root);
+} PgPreMemoRule;
+
+/* ========================================================================
  * 核心函数声明
  * ======================================================================== */
 
 /* cascades.c */
-extern PgCascadesStatus pg_cascades_try_grouping_planner(
+extern PgCascadesStatus pg_cascades_optimize(
     PlannerInfo *root, QueryPlannerPrepResult *prep,
     PgCascadesUpperInfo *upper, Plan **plan);
+extern PgCascadesStatus pg_cascades_try_grouping_planner(
+    PlannerInfo *root, QueryPlannerPrepResult *prep,
+    PgCascadesUpperInfo *upper, Plan **plan);  /* legacy alias */
+extern void pg_cascades_register_hook(void);
+extern void pg_cascades_run_pre_memo_rules(PlannerInfo *root);
 extern PgCascadesStatus pg_cascades_supported_query_precheck(
     PlannerInfo *root, PgCascadesUpperInfo *upper);
 extern PgCascadesStatus pg_cascades_supported_query(

@@ -312,20 +312,20 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * If there is a WITH list, process each WITH query and build an initplan
 	 * SubPlan structure for it.
 	 */
+	if (!enable_cascades_planner)
+	{
 	if (parse->cteList)
 		SS_process_ctes(root);
-
-	/*
-	 * Phase 6: Attempt scalar subquery decorrelation BEFORE pull_up_sublinks.
-
-	/*
-	 * Look for ANY and EXISTS SubLinks in WHERE and JOIN/ON clauses, and try
-	 * to transform them into joins.  Note that this step does not descend
-	 * into subqueries; if we pull up any subqueries below, their SubLinks are
-	 * processed just before pulling them up.
-	 */
 	if (parse->hasSubLinks)
 		pull_up_sublinks(root);
+	}
+
+	/*
+	 * When Cascades is on, run pre-Memo rewrite rules instead of
+	 * PG SS_process_ctes/pull_up_sublinks/pull_up_subqueries.
+	 */
+	if (enable_cascades_planner)
+		pg_cascades_run_pre_memo_rules(root);
 
 	/*
 	 * Scan the rangetable for set-returning functions, and inline them if
@@ -338,7 +338,8 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * Check to see if any subqueries in the jointree can be merged into this
 	 * query.
 	 */
-	parse->jointree = (FromExpr *)
+	if (!enable_cascades_planner)
+		parse->jointree = (FromExpr *)
 		pull_up_subqueries(root, (Node *) parse->jointree, NULL, NULL);
 
 	/*
