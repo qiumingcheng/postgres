@@ -426,6 +426,8 @@ pg_cascades_planner_hook(Query *parse, int cursorOptions,
  *   Called from subquery_planner when enable_cascades_planner is on.
  *   Safe to call multiple times (static guard).
  */
+static bool g_registry_initialized = false;
+
 void
 pg_cascades_ensure_hook(void)
 {
@@ -433,6 +435,21 @@ pg_cascades_ensure_hook(void)
     {
         planner_hook = pg_cascades_planner_hook;
         g_hook_registered = true;
+    }
+
+    /* Lazy-init registry + modules once on first Cascades query */
+    if (!g_registry_initialized)
+    {
+        g_registry_initialized = true;
+        pg_registry_init();
+        pg_module_scan_init();
+        pg_module_filter_init();
+        pg_module_project_init();
+        pg_module_join_init();
+        pg_module_agg_init();
+        pg_module_sort_init();
+        pg_module_limit_init();
+        pg_module_distinct_init();
     }
 }
 
