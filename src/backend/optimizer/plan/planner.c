@@ -327,7 +327,6 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	if (enable_cascades_planner)
 	{
 		pg_cascades_ensure_hook();
-		pg_cascades_run_pre_memo_rules(root);
 	}
 
 	/*

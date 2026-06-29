@@ -75,9 +75,9 @@ static PgPreMemoRule g_pre_memo_rules[] = {
 
     /* ---- Phase 2: SubLink → Join + Subquery Pull-up + UNION ALL
          (pull_up_sublinks → pull_up_subqueries → flatten_simple_union_all) ---- */
-    {"SubLinkToJoin",
+/*DISABLED*/    {"SubLinkToJoin",
      2, NULL, pg_pre_memo_convert_sublinks},
-    {"SubqueryPullUp",
+/*DISABLED*/    {"SubqueryPullUp",
      2, NULL, pg_pre_memo_pullup_subqueries},
     {"UnionAllFlatten",
      2, NULL, pg_pre_memo_flatten_union},
@@ -177,7 +177,6 @@ pg_pre_memo_rowmarks(PlannerInfo *root)
 }
 
 /*
- * ExpressionNormalize (Phase 4): matches PG's preprocess_expression step.
  *   Handles targetList, returningList, jointree quals, havingQual.
  */
 static void
@@ -272,7 +271,7 @@ pg_pre_memo_inline_ctes(PlannerInfo *root)
 }
 
 /*
- * SubLinkToJoin: convert ANY/EXISTS SubLinks to semi/anti joins.
+/*DISABLED*/ * SubLinkToJoin: convert ANY/EXISTS SubLinks to semi/anti joins.
  *   Directly delegates to PG's pull_up_sublinks() — a public function
  *   that only modifies the parse tree, with no dependency on grouping_planner.
  */
@@ -284,7 +283,7 @@ pg_pre_memo_convert_sublinks(PlannerInfo *root)
 }
 
 /*
- * SubqueryPullUp: pull up simple FROM-subqueries into the main query.
+/*DISABLED*/ * SubqueryPullUp: pull up simple FROM-subqueries into the main query.
  *   Delegates to PG's pull_up_subqueries().
  */
 static void
