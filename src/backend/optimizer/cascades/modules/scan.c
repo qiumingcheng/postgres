@@ -48,5 +48,4 @@ void pg_module_scan_register_rules(void)
         "PruneScanColumns", PG_CASCADES_LOGICAL_SCAN, 0,
         NULL, pg_rule_prune_scan_columns, 0.6, PG_RULE_BIT_PRUNE_SCAN_COLS);
 
-	pg_module_scan_register_rules();
 }

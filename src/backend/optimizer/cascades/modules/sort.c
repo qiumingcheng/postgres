@@ -18,7 +18,6 @@ static void pg_cost_sort(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     *out_startup = dummy_path.startup_cost;
     *out_total   = dummy_path.total_cost;
 
-	pg_module_sort_register_rules();
 }
 static Plan *pg_build_sort(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     PgGroupExpr *expr, PgGroupBestEntry *best,
@@ -43,7 +42,6 @@ static Plan *pg_build_sort(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     return (Plan *) make_sort_from_pathkeys(ctx->root, child,
         required->pathkeys, required->limit_tuples);
 
-	pg_module_sort_register_rules();
 }
 void pg_module_sort_init(void)
 {
@@ -77,5 +75,4 @@ void pg_module_sort_register_rules(void)
         "PruneSortColumns", PG_CASCADES_LOGICAL_SORT, 0,
         NULL, pg_rule_prune_sort_columns, 0.5, PG_RULE_BIT_PRUNE_SORT_COLS);
 
-	pg_module_sort_register_rules();
 }

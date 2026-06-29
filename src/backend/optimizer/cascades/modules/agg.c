@@ -22,7 +22,6 @@ pg_cost_agg(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     *out_startup = dummy_path.startup_cost;
     *out_total   = dummy_path.total_cost;
 
-	pg_module_agg_register_rules();
 }
 
 /* ── Build Plan (from planbuild.c switch, exact copy) ── */
@@ -92,7 +91,6 @@ pg_build_agg(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     *output = best->output;
     return result;
 
-	pg_module_agg_register_rules();
 }
 
 /* ── Stats (from memo.c switch) ── */
@@ -110,7 +108,6 @@ pg_derive_agg_stats(PgPlannerCascadesContext *ctx, PgGroupExpr *expr,
     if (list_length(expr->inputs) >= 1)
         *out_width = ((PgMemoGroup *) linitial(expr->inputs))->width;
 
-	pg_module_agg_register_rules();
 }
 
 /* ── init ── */
@@ -129,7 +126,7 @@ void pg_module_agg_init(void)
         .derive_stats_fn = pg_derive_agg_stats,
     });
 
-	pg_module_agg_register_rules();
+/* removed */
 }
 
 /* Rule declarations for agg module */
@@ -164,5 +161,4 @@ void pg_module_agg_register_rules(void)
         "PushDownAggLimit", PG_CASCADES_LOGICAL_AGG, 0,
         g_pat_agg_limit_leaf, pg_rule_pushdown_agg_limit, 0.4, PG_RULE_BIT_PUSHDOWN_AGG_LIMIT);
 
-	pg_module_agg_register_rules();
 }

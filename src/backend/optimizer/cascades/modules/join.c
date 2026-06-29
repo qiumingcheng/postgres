@@ -91,5 +91,4 @@ void pg_module_join_register_rules(void)
         "PruneJoinColumns", PG_CASCADES_LOGICAL_JOIN, 0,
         NULL, pg_rule_prune_join_columns, 0.5, PG_RULE_BIT_PRUNE_JOIN_COLS);
 
-	pg_module_join_register_rules();
 }

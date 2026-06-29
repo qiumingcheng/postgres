@@ -12,7 +12,6 @@ static void pg_cost_limit(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     *out_startup = child_startup;
     *out_total = child_startup + (child_total - child_startup) * frac;
 
-	pg_module_limit_register_rules();
 }
 static Plan *pg_build_limit(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     PgGroupExpr *expr, PgGroupBestEntry *best,
@@ -37,7 +36,6 @@ static Plan *pg_build_limit(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     return (Plan *) make_limit(child, ctx->root->parse->limitOffset,
         ctx->root->parse->limitCount, ctx->upper->offset_est, ctx->upper->count_est);
 
-	pg_module_limit_register_rules();
 }
 void pg_module_limit_init(void) {
     pg_registry_register_operator(&(PgOperatorVtable){
@@ -76,5 +74,4 @@ void pg_module_limit_register_rules(void)
         "PushDownLimitJoin", PG_CASCADES_LOGICAL_LIMIT, 0,
         g_pat_limit_join_leaf_leaf, pg_rule_pushdown_limit_join, 0.4, PG_RULE_BIT_PUSHDOWN_LIMIT_JOIN);
 
-	pg_module_limit_register_rules();
 }

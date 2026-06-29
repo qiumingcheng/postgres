@@ -12,7 +12,6 @@ pg_cost_project(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     *out_startup = child_startup;
     *out_total   = child_total;
 
-	pg_module_project_register_rules();
 }
 
 static Plan *
@@ -54,7 +53,6 @@ pg_build_project(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     /* Agg/grouping: wrap with Result */
     return (Plan *) make_result(ctx->root, ctx->upper->sub_tlist, NULL, child);
 
-	pg_module_project_register_rules();
 }
 
 void pg_module_project_init(void)
@@ -95,5 +93,4 @@ void pg_module_project_register_rules(void)
         "PruneProjectColumns", PG_CASCADES_LOGICAL_PROJECT, 0,
         NULL, pg_rule_prune_project_columns, 0.6, PG_RULE_BIT_PRUNE_PROJ_COLS);
 
-	pg_module_project_register_rules();
 }

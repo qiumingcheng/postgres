@@ -27,5 +27,4 @@ void pg_module_filter_register_rules(void)
         "PushDownPredicateScan", PG_CASCADES_LOGICAL_FILTER, 0,
         NULL, pg_rule_pushdown_predicate_scan, 0.6, PG_RULE_BIT_PUSHDOWN_PRED_SCAN);
 
-	pg_module_filter_register_rules();
 }

@@ -282,11 +282,11 @@ static PgRule g_trans_rules_phase3[] = {
 };
 
 /* Phase 4: Forward declarations for path-generation join rules */
-static List *pg_rule_join_to_hashjoin_phase4(PgPlannerCascadesContext *ctx,
+List *pg_rule_join_to_hashjoin_phase4(PgPlannerCascadesContext *ctx,
                                               PgGroupExpr *expr);
-static List *pg_rule_join_to_nestloop_phase4(PgPlannerCascadesContext *ctx,
+List *pg_rule_join_to_nestloop_phase4(PgPlannerCascadesContext *ctx,
                                               PgGroupExpr *expr);
-static List *pg_rule_join_to_mergejoin_phase4(PgPlannerCascadesContext *ctx,
+List *pg_rule_join_to_mergejoin_phase4(PgPlannerCascadesContext *ctx,
                                                PgGroupExpr *expr);
 
 /*
@@ -373,7 +373,7 @@ static PgRule g_impl_rules_phase2_join[] = {
  *   Helper: find the first logical expression of a given op kind
  *   in a Memo group.  Returns NULL if none found.
  */
-static PgGroupExpr *
+PgGroupExpr *
 pg_memo_group_first_logical(PgMemoGroup *group, PgCascadesOpKind op)
 {
     ListCell *lc;
@@ -398,7 +398,7 @@ pg_memo_group_first_logical(PgMemoGroup *group, PgCascadesOpKind op)
  *   Phase 6: inputs are PgMemoGroup* (Memo groups), not PgGroupExpr*.
  *   Look up the first LogicalProject in the child group to examine.
  */
-static List *
+List *
 pg_rule_merge_project_with_child(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *child_group;
@@ -439,7 +439,7 @@ pg_rule_merge_project_with_child(PgPlannerCascadesContext *ctx, PgGroupExpr *exp
  *   当 scan 的 RelOptInfo->rows == 0 时，标记 group 为空。
  *   Side-effect-only：不生成新 expression，只更新 group->rows=0。
  */
-static List *
+List *
 pg_rule_prune_empty_scan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     RelOptInfo *rel = expr->owner_group->rel;
@@ -459,7 +459,7 @@ pg_rule_prune_empty_scan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *
  *   Phase 6: inputs are PgMemoGroup*, look up LogicalProject in child group.
  */
-static List *
+List *
 pg_rule_eliminate_project(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *child_group;
@@ -511,7 +511,7 @@ pg_rule_eliminate_project(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   Use child_group->rel directly since tree-based LogicalScan groups
  *   have rel set by pg_memo_insert_expression_tree.
  */
-static List *
+List *
 pg_rule_pushdown_predicate_scan(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *child_group;
@@ -616,7 +616,7 @@ pg_rule_merge_limit_with_sort(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  * H1: EliminateSortWithConstantKey
  *   当 Sort 的所有 pathkeys 都来自常量表达式时，消除无效 Sort。
  */
-static List *
+List *
 pg_rule_eliminate_sort_with_constant_key(PgPlannerCascadesContext *ctx,
                                           PgGroupExpr *expr)
 {
@@ -644,7 +644,7 @@ pg_rule_eliminate_sort_with_constant_key(PgPlannerCascadesContext *ctx,
  *   将一侧的 Filter 条件合并到 Join 的 restrictlist 中。
  *   仅对 INNER JOIN 生效。
  */
-static List *
+List *
 pg_rule_merge_filter_with_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *outer_input;
@@ -692,7 +692,7 @@ pg_rule_merge_filter_with_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  * E3: PruneEmptyUnion
  *   LogicalUnion(A, B) where A 的 group->rows == 0 → 消除空分支。
  */
-static List *
+List *
 pg_rule_prune_empty_union(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     ListCell   *lc;
@@ -747,7 +747,7 @@ pg_rule_prune_empty_union(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   LogicalAgg(LogicalAgg(A)) → LogicalAgg(A)
  *   合并两层聚合：如果内层 Agg 和外层 Agg 的 groupClause 相同，合并。
  */
-static List *
+List *
 pg_rule_merge_two_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *inner;
@@ -779,7 +779,7 @@ pg_rule_merge_two_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   LogicalJoin(LogicalProject(A), LogicalProject(B))
  *   → LogicalJoin(A, B) when Projects are trivial passthrough.
  */
-static List *
+List *
 pg_rule_merge_join_with_child_project(PgPlannerCascadesContext *ctx,
                                        PgGroupExpr *expr)
 {
@@ -819,7 +819,7 @@ pg_rule_merge_join_with_child_project(PgPlannerCascadesContext *ctx,
  *   Sets group->logical_prop.output_columns to the restricted column set.
  *   B1 (PruneScanColumns) reads this to prune reltargetlist lower down.
  */
-static List *
+List *
 pg_rule_prune_agg_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgCascadesUpperInfo *upper = ctx->upper;
@@ -877,7 +877,7 @@ pg_rule_prune_agg_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   in the tree — needed for B4's column propagation where child columns
  *   from multiple tables must all be preserved.
  */
-static bool
+bool
 pg_collect_var_attnos_walker(Node *node, void *context)
 {
     Bitmapset **needed = (Bitmapset **) context;
@@ -893,7 +893,7 @@ pg_collect_var_attnos_walker(Node *node, void *context)
     return expression_tree_walker(node, pg_collect_var_attnos_walker, context);
 }
 
-static void
+void
 pg_collect_all_var_attnos(Node *expr, Bitmapset **needed)
 {
     pg_collect_var_attnos_walker(expr, needed);
@@ -906,7 +906,7 @@ pg_collect_all_var_attnos(Node *expr, Bitmapset **needed)
  *   maps them through the project target list to derive what
  *   the child needs, and sets the child group's output_columns.
  */
-static List *
+List *
 pg_rule_prune_project_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgCascadesUpperInfo *upper = ctx->upper;
@@ -951,7 +951,7 @@ pg_rule_prune_project_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   LogicalSort(A): keep only sort key columns + parent required columns.
  *   Sets group->logical_prop.output_columns to the restricted set.
  */
-static List *
+List *
 pg_rule_prune_sort_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     Bitmapset  *needed = NULL;
@@ -989,7 +989,7 @@ pg_rule_prune_sort_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   LogicalJoin(A, B) where A->rows==0 or B->rows==0 → mark group as empty.
  *   Side-effect: sets group->rows=0 so upper nodes can detect empty sets.
  */
-static List *
+List *
 pg_rule_prune_empty_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *outer_grp, *inner_grp;
@@ -1013,7 +1013,7 @@ pg_rule_prune_empty_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   Uses baserestrictinfo + logical_prop.output_columns from parent
  *   propagation (B2-B5) + best_entries' required_columns.
  */
-static List *
+List *
 pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     RelOptInfo *rel = expr->owner_group->rel;
@@ -1184,7 +1184,7 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   Sets group->logical_prop.output_columns to the restricted column set.
  *   B1 (PruneScanColumns) reads this to prune reltargetlist lower down.
  */
-static List *
+List *
 pg_rule_prune_join_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgJoinPrivate *join_priv = (PgJoinPrivate *) expr->op_private;
@@ -1235,7 +1235,7 @@ pg_rule_prune_join_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   LogicalFilter(LogicalProject(A)) → LogicalProject(LogicalFilter(A))
  *   将 Filter 穿过 Project 下推。仅当 filter 列在 project 输出中时安全。
  */
-static List *
+List *
 pg_rule_pushdown_predicate_project(PgPlannerCascadesContext *ctx,
                                     PgGroupExpr *expr)
 {
@@ -1279,7 +1279,7 @@ pg_rule_pushdown_predicate_project(PgPlannerCascadesContext *ctx,
  *   LogicalLimit(LogicalJoin(A,B)) → LogicalJoin(LogicalLimit(A), LogicalLimit(B))
  *   仅对 INNER JOIN 生效。将 LIMIT 下推到两侧。
  */
-static List *
+List *
 pg_rule_pushdown_limit_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *join_expr;
@@ -1331,7 +1331,7 @@ pg_rule_pushdown_limit_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   LogicalFilter(LogicalAgg(A)) → LogicalAgg(LogicalFilter(A))
  *   将 filter 转为 HAVING（仅当 filter 列在 GROUP BY 中时安全）。
  */
-static List *
+List *
 pg_rule_pushdown_predicate_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *agg_expr;
@@ -1376,7 +1376,7 @@ pg_rule_pushdown_predicate_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   LogicalAgg(LogicalLimit(A)) → LogicalLimit(LogicalAgg(A))
  *   交换 Agg 和 Limit：先聚合再限制，通常更高效。
  */
-static List *
+List *
 pg_rule_pushdown_agg_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *limit_expr;
@@ -1405,7 +1405,7 @@ pg_rule_pushdown_agg_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   LogicalJoin(A, const_B) where B has rows==1 → eliminate join.
  *   First version: only when one side is provably single-row.
  */
-static List *
+List *
 pg_rule_eliminate_join_with_constant(PgPlannerCascadesContext *ctx,
                                       PgGroupExpr *expr)
 {
@@ -1449,7 +1449,7 @@ pg_rule_eliminate_join_with_constant(PgPlannerCascadesContext *ctx,
  *   LogicalLeftJoin(A, B) where B columns are unreferenced → InnerJoin or drop B.
  *   First version: always convert LEFT to INNER (conservative).
  */
-static List *
+List *
 pg_rule_outer_join_elimination(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgJoinPrivate *join_priv;
@@ -1482,7 +1482,7 @@ pg_rule_outer_join_elimination(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   LogicalFilter(LogicalJoin(A, B)) → LogicalJoin(Filter(A), Filter(B))
  *   将 WHERE 条件下推到 Join 两侧。第一版仅对 INNER JOIN 生效。
  */
-static List *
+List *
 pg_rule_pushdown_predicate_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgGroupExpr *join_expr;
@@ -1576,7 +1576,7 @@ pg_rule_pushdown_predicate_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
  *   at physical implementation time via group->rel.  The structural
  *   transform is qual-agnostic.
  */
-static List *
+List *
 pg_rule_join_associativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *left_grp, *right_grp;
@@ -1690,7 +1690,7 @@ pg_rule_join_associativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   Mirror of C2.  When the right input group contains a JOIN expression,
  *   pull it out to form a left-deep tree.
  */
-static List *
+List *
 pg_rule_join_left_asscom(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *left_grp, *right_grp;
@@ -1807,7 +1807,7 @@ pg_rule_join_left_asscom(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   - Inner group has group->rel != NULL (base relation)
  *   - Inner group->rel has a unique index or primary key
  */
-static List *
+List *
 pg_rule_inner_to_semi(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *inner_grp;
@@ -1895,7 +1895,7 @@ pg_rule_inner_to_semi(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *
  *   Returns NIL (side effect: calls pg_memo_merge_group).
  */
-static List *
+List *
 pg_rule_eliminate_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     Query *parse = ctx->root->parse;
@@ -1935,7 +1935,7 @@ pg_rule_eliminate_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *
  *   Pattern: LogicalLimit(child is a group containing LogicalLimit)
  */
-static List *
+List *
 pg_rule_merge_limit_with_child_limit(PgPlannerCascadesContext *ctx,
                                       PgGroupExpr *expr)
 {
@@ -1984,7 +1984,7 @@ pg_rule_merge_limit_with_child_limit(PgPlannerCascadesContext *ctx,
  *
  *   Returns NIL (side effect: calls pg_memo_merge_group).
  */
-static List *
+List *
 pg_rule_eliminate_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgMemoGroup *child_group;
@@ -2023,7 +2023,7 @@ pg_rule_eliminate_agg(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
  *   Pattern: leaf (matches any group)
  *   Transform: creates PhysicalSort(child) with pathkeys from required property
  */
-static List *
+List *
 pg_rule_enforce_sort(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     /*
@@ -2624,7 +2624,7 @@ pg_cascades_get_combination_rules(int *num_rules)
  *   base relations having valid RelOptInfo with pathlist populated.
  * ======================================================================== */
 
-static RelOptInfo *
+RelOptInfo *
 pg_rule_join_get_child_rel(PgPlannerCascadesContext *ctx, PgMemoGroup *child_grp)
 {
     /* Direct mapping: base rel group */
@@ -2638,7 +2638,7 @@ pg_rule_join_get_child_rel(PgPlannerCascadesContext *ctx, PgMemoGroup *child_grp
 /*
  * Phase 4 HashJoin: LogicalJoin → PhysicalHashJoin via make_join_rel
  */
-static List *
+List *
 pg_rule_join_to_hashjoin_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgJoinPrivate *join_priv;
@@ -2688,7 +2688,7 @@ pg_rule_join_to_hashjoin_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
 /*
  * Phase 4 NestLoop: LogicalJoin → PhysicalNestLoop via make_join_rel
  */
-static List *
+List *
 pg_rule_join_to_nestloop_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgJoinPrivate *join_priv;
@@ -2738,7 +2738,7 @@ pg_rule_join_to_nestloop_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr
 /*
  * Phase 4 MergeJoin: LogicalJoin → PhysicalMergeJoin via make_join_rel
  */
-static List *
+List *
 pg_rule_join_to_mergejoin_phase4(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
 {
     PgJoinPrivate *join_priv;
