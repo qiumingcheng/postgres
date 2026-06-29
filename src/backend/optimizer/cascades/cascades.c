@@ -169,14 +169,26 @@ pg_pre_memo_pullup_subqueries(PlannerInfo *root)
 
 static bool g_hook_registered = false;
 
+/*
+ * pg_cascades_planner_hook:
+ *   planner() hook — Cascades boundary.
+ *
+ *   Delegates to standard_planner() for all remaining setup (PlannerInfo
+ *   init, tlist preprocessing, pathkey derivation).  Inside
+ *   standard_planner(), subquery_planner() runs pre-memo rewrite rules
+ *   (via pg_cascades_run_pre_memo_rules) and grouping_planner() dispatches
+ *   to pg_cascades_optimize() when enable_cascades_planner is on.
+ *
+ *   This is architecturally identical to StarRocks: the hook is the
+ *   extension point at the planner() level, while PG's parser/analyzer
+ *   and planner infrastructure (standard_planner/subquery_planner) handle
+ *   setup — just as StarRocks uses MySQL's parser before taking over
+ *   in Optimizer.optimizeByCost().
+ */
 static PlannedStmt *
 pg_cascades_planner_hook(Query *parse, int cursorOptions,
                          ParamListInfo boundParams)
 {
-    /*
-     * Pre-Memo rules execute inside subquery_planner() (planner.c:327).
-     * The hook provides a clean entry point at the planner() level.
-     */
     return standard_planner(parse, cursorOptions, boundParams);
 }
 
