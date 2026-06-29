@@ -289,9 +289,8 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
 
     *output = best->output;
 
-    /* vtable dispatch: module-registered build-plan function */
-    if (expr->op > PG_CASCADES_PHYSICAL_PROJECT &&
-        expr->op <= PG_CASCADES_LOGICAL_JOIN + 100)
+    /* vtable dispatch: only Upper Ops (HASHAGG+) — scan/join use switch */
+    if (expr->op >= PG_CASCADES_PHYSICAL_HASHAGG)
     {
         PgOperatorVtable *vt = pg_registry_get_vtable(expr->op);
         if (vt && vt->build_plan_fn)

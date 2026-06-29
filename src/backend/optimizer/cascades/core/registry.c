@@ -29,9 +29,15 @@ pg_registry_init(void)
 void
 pg_registry_register_operator(PgOperatorVtable *vt)
 {
+    PgOperatorVtable *copy;
     if (vt == NULL) return;
-    if (vt->op >= 0 && vt->op < 64)
-        g_registry.operators[vt->op] = vt;
+    if (vt->op < 0 || vt->op >= 64) return;
+
+    /* Copy to heap — caller's vtable is on the stack */
+    copy = (PgOperatorVtable *) MemoryContextAllocZero(TopMemoryContext,
+                                                        sizeof(PgOperatorVtable));
+    memcpy(copy, vt, sizeof(PgOperatorVtable));
+    g_registry.operators[vt->op] = copy;
 }
 
 /* ── Register rule (promise-sorted insertion) ── */
