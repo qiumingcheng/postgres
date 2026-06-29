@@ -35,3 +35,10 @@ SELECT 'EC2', count(*) FROM cascades_test_t WHERE id = 1;
 SELECT 'EC3', CASE WHEN a > 50 THEN 'hi' WHEN a > 25 THEN 'mid' ELSE 'lo' END, count(*) FROM cascades_test_t GROUP BY 1;
 
 \echo '=== ALL DONE ==='
+
+\echo '=== Distinct edge cases ==='
+SELECT 'DT1', count(*) FROM (SELECT DISTINCT a FROM cascades_test_t) s;
+SELECT 'DT2', count(*) FROM (SELECT DISTINCT a, b FROM cascades_test_t) s;
+SELECT 'DT3', count(*) FROM (SELECT DISTINCT a FROM cascades_test_t WHERE a > 10 ORDER BY a) s;
+SELECT 'DT4', a, count(*) FROM (SELECT DISTINCT a, b FROM cascades_test_t) s GROUP BY a;
+SELECT 'DT5', count(*) FROM (SELECT DISTINCT ON (a) a, b FROM cascades_test_t) s;

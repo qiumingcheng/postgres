@@ -7,6 +7,7 @@
 #include "postgres.h"
 #include "optimizer/cascades.h"
 #include "optimizer/cost.h"
+#include "core/registry.h"
 #include "optimizer/clauses.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
@@ -1155,93 +1156,9 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                     goto cost_done;
                 }
             }
-            switch (expr->op)
-            {
-                case PG_CASCADES_PHYSICAL_HASHAGG:
-                {
-                    Path dummy_path;
-                    MemSet(&dummy_path, 0, sizeof(Path));
-                    dummy_path.pathtype = T_Agg;
-                    cost_agg(&dummy_path, ctx->root, AGG_HASHED,
-                             &ctx->upper->agg_costs,
-                             ctx->upper->numGroupCols,
-                             ctx->upper->dNumGroups,
-                             child_startup, child_total, input_rows);
-                    task->startup_cost = dummy_path.startup_cost;
-                    task->total_cost = dummy_path.total_cost;
-                    break;
-                }
-                case PG_CASCADES_PHYSICAL_GROUPAGG:
-                {
-                    Path dummy_path;
-                    MemSet(&dummy_path, 0, sizeof(Path));
-                    dummy_path.pathtype = T_Agg;
-                    cost_agg(&dummy_path, ctx->root, AGG_SORTED,
-                             &ctx->upper->agg_costs,
-                             ctx->upper->numGroupCols,
-                             ctx->upper->dNumGroups,
-                             child_startup, child_total, input_rows);
-                    task->startup_cost = dummy_path.startup_cost;
-                    task->total_cost = dummy_path.total_cost;
-                    break;
-                }
-                case PG_CASCADES_PHYSICAL_SORT:
-                {
-                    Path dummy_path;
-                    double limit_tuples = required->limit_tuples;
-                    MemSet(&dummy_path, 0, sizeof(Path));
-                    dummy_path.pathtype = T_Sort;
-                    cost_sort(&dummy_path, ctx->root,
-                              required->pathkeys,
-                              child_total,
-                              input_rows, input_width,
-                              0.0,         /* comparison_cost */
-                              work_mem,
-                              (limit_tuples > 0) ? limit_tuples : -1.0);
-                    task->startup_cost = dummy_path.startup_cost;
-                    task->total_cost = dummy_path.total_cost;
-                    break;
-                }
-                case PG_CASCADES_PHYSICAL_UNIQUE:
-                {
-                    Path dummy_path;
-                    MemSet(&dummy_path, 0, sizeof(Path));
-                    dummy_path.pathtype = T_Unique;
-                    cost_sort(&dummy_path, ctx->root,
-                              ctx->upper->distinct_pathkeys,
-                              child_total,
-                              input_rows, input_width,
-                              0.0, work_mem, -1.0);
-                    task->startup_cost = dummy_path.startup_cost;
-                    task->total_cost = dummy_path.total_cost;
-                    break;
-                }
-                case PG_CASCADES_PHYSICAL_LIMIT:
-                {
-                    double frac = 1.0;
-                    if (required->limit_tuples > 0 &&
-                        required->limit_tuples < input_rows)
-                        frac = required->limit_tuples / input_rows;
-                    task->startup_cost = child_startup;
-                    task->total_cost = child_startup +
-                        (child_total - child_startup) * frac;
-                    break;
-                }
-                case PG_CASCADES_PHYSICAL_PROJECT:
-                {
-                    QualCost qcost;
-                    MemSet(&qcost, 0, sizeof(QualCost));
-                    cost_qual_eval(&qcost, ctx->upper->tlist, ctx->root);
-                    task->startup_cost = child_startup + qcost.startup;
-                    task->total_cost = child_total +
-                        qcost.per_tuple * input_rows;
-                    break;
-                }
-                default:
-                    task->startup_cost = child_startup + 0.01;
-                    task->total_cost = child_total + 0.01;
-                    break;
-            }
+            /* Upper ops costed via vtable above;              * default for scan/join (IMPORTED_PATH). */
+            task->startup_cost = child_startup + 0.01;
+            task->total_cost = child_total + 0.01;
             (void) 0;
         cost_done:
 

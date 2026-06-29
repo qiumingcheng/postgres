@@ -1296,9 +1296,12 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 			pg_cascades_handle_status_or_error(cascades_status,
 											   cascades_planner_debug);
 
-			/* fallback: use finish function if prepare already done */
+			/* fallback: force fresh make_one_rel — Cascades step [3]
+			 * already built paths but final_rel may be stale after
+			 * memo operations. Reset flag so finish rebuilds clean. */
 			if (prep != NULL)
 			{
+				prep->lower_paths_built = false;
 				finish_query_planner_after_prepare(root, prep,
 												   sub_tlist,
 												   tuple_fraction,

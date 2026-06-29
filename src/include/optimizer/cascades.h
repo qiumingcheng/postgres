@@ -677,13 +677,24 @@ extern void pg_group_update_best(PgMemoGroup *group,
 /* rule.c */
 extern PgRule *pg_cascades_get_impl_rules(int *num_rules);
 extern PgRule *pg_cascades_get_trans_rules(int *num_rules);
-extern PgRule *pg_cascades_get_impl_rules_phase2(int *num_rules);
-extern PgRule *pg_cascades_get_impl_rules_phase2_scan(int *num_rules);
-extern PgRule *pg_cascades_get_impl_rules_phase2_join(int *num_rules);
-extern PgRule *pg_cascades_get_impl_rules_phase4_join(int *num_rules);
+/* Module init functions (one per operator module) */
+extern void pg_module_scan_init(void);
+extern void pg_module_filter_init(void);
+extern void pg_module_project_init(void);
+extern void pg_module_join_init(void);
+extern void pg_module_agg_init(void);
+extern void pg_module_sort_init(void);
+extern void pg_module_limit_init(void);
+extern void pg_module_distinct_init(void);
+extern void pg_module_union_init(void);
+
+/* Memo utility — find first logical expression of a given op in a group */
+extern PgGroupExpr *pg_memo_group_first_logical(PgMemoGroup *group, PgCascadesOpKind op);
+
+/* Backward-compatible rule accessors (delegated to registry) */
 extern PgRule *pg_cascades_get_trans_rules_phase5(int *num_rules);
-extern PgRule *pg_cascades_get_enforcer_rules(int *num_rules);
-extern PgRule *pg_cascades_get_rules_sorted(PgRule *rules, int *num_rules);
+
+/* Pattern initialization (pattern.c) */
 extern void pg_cascades_init_rule_patterns(void);
 
 /* Phase 5: Binder helper for pattern-based rules */
@@ -762,56 +773,13 @@ extern PgCombinationRule *pg_cascades_get_combination_rules(int *num_rules);
 extern void debug_print_cascades_memo(PgPlannerCascadesContext *ctx);
 extern void debug_print_cascades_rules(PgPlannerCascadesContext *ctx);
 
-/* ========================================================================
- * Module Registry: operator vtable + rule registration
- * ======================================================================== */
-
-typedef enum PgRuleCategory {
-    PG_RULE_PRE_MEMO,          /* pre-Memo rules (g_pre_memo_rules) */
-    PG_RULE_MEMO_TRANSFORM,    /* Memo transform rules (g_trans_rules_phase3/5) */
-    PG_RULE_MEMO_IMPL,         /* Memo impl rules (g_impl_rules_phase1/2/4) */
-} PgRuleCategory;
-
-/* Vtable callback signatures */
-typedef void (*PgCostFn)(PgPlannerCascadesContext *ctx,
-    PgMemoGroup *group, PgGroupExpr *expr,
-    double input_rows, int input_width,
-    Cost child_startup, Cost child_total,
-    Cost *out_startup, Cost *out_total);
-
-typedef Plan *(*PgBuildPlanFn)(PgPlannerCascadesContext *ctx,
-    PgMemoGroup *group, PgGroupExpr *expr,
-    PgGroupBestEntry *best, PgRequiredProperty *required,
-    PgOutputProperty *output);
-
-typedef void (*PgDeriveStatsFn)(PgPlannerCascadesContext *ctx,
-    PgGroupExpr *expr, double *out_rows, int *out_width);
-
-/* Operator vtable */
-typedef struct PgOperatorVtable {
-    PgCascadesOpKind   op;
-    const char        *name;
-    PgCostFn           cost_fn;
-    PgBuildPlanFn      build_plan_fn;
-    PgDeriveStatsFn    derive_stats_fn;
-} PgOperatorVtable;
-
 /* planbuild.c — shared helpers for build wrapper functions */
 extern PgRequiredProperty *pg_safe_linitial_child_req(PgGroupBestEntry *best);
 extern Plan *pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
     PgMemoGroup *group, PgRequiredProperty *required,
     PgGroupBestEntry *best, PgOutputProperty *output);
 
-/* Registry API */
-extern void pg_registry_init(void);
-extern void pg_registry_register_operator(PgOperatorVtable *vt);
-extern void pg_registry_register_rule(PgRuleCategory cat,
-    const char *name, PgCascadesOpKind from_op, PgCascadesOpKind to_op,
-    void *pattern_or_null,
-    List *(*transform)(PgPlannerCascadesContext *, PgGroupExpr *),
-    double promise, int rule_bit);
-extern PgOperatorVtable *pg_registry_get_vtable(PgCascadesOpKind op);
-extern List *pg_registry_get_rules(PgRuleCategory cat);
-extern int  pg_registry_next_rule_bit(void);
+/* Registry types and API — see core/registry.h for full declarations;
+ * cascades internal files include it directly. */
 
 #endif /* CASCADES_H */

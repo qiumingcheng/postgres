@@ -7,6 +7,7 @@
 
 #include "postgres.h"
 #include "optimizer/cascades.h"
+#include "core/registry.h"
 #include "optimizer/paths.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
@@ -442,6 +443,10 @@ pg_cascades_ensure_hook(void)
     {
         g_registry_initialized = true;
         pg_registry_init();
+
+        /* Patterns must be ready before modules register rules with them */
+        pg_cascades_init_rule_patterns();
+
         pg_module_scan_init();
         pg_module_filter_init();
         pg_module_project_init();
@@ -450,6 +455,7 @@ pg_cascades_ensure_hook(void)
         pg_module_sort_init();
         pg_module_limit_init();
         pg_module_distinct_init();
+        pg_module_union_init();
     }
 }
 
@@ -699,7 +705,6 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
 {
     PgPlannerCascadesContext ctx;
     PgCascadesStatus status;
-    PgRule     *rules;
     MemoryContext old_cxt;
 
     MemSet(&ctx, 0, sizeof(PgPlannerCascadesContext));
@@ -731,86 +736,12 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     ctx.fallback_reasons = NIL;
     ctx.upper_bound_cost = 0;  /* Phase 4 */
 
-    /* 3. Set up rules (Phase 4: sorted by promise descending) */
+    /* 3. Set up rules — from module registry (promise-sorted) */
     {
-        int num_impl, num_trans;
-
-        /*
-         * Merge: Phase 1 impl + Phase 2 scan/join (COMPOSABLE_OP) +
-         * Phase 4 join (make_join_rel) + Enforcer rules.
-         *
-         * Phase 2 scan rules (bits 6-8) create COMPOSABLE_OP physical
-         * scan expressions.  pg_derive_child_properties now handles
-         * COMPOSABLE_OP safely (checks mode before casting op_private).
-         * These rules give the task scheduler alternative physical
-         * implementations to cost and compare.
-         */
-        rules = pg_cascades_get_impl_rules(&num_impl);
-        {
-            PgRule *enf_rules, *join_rules, *scan_rules, *join2_rules;
-            int     num_enforcer, num_join, num_scan, num_join2;
-            int     total;
-            PgRule *merged;
-
-            enf_rules = pg_cascades_get_enforcer_rules(&num_enforcer);
-            join_rules = pg_cascades_get_impl_rules_phase4_join(&num_join);
-            scan_rules = pg_cascades_get_impl_rules_phase2_scan(&num_scan);
-            join2_rules = pg_cascades_get_impl_rules_phase2_join(&num_join2);
-            total = num_impl + num_join + num_scan + num_join2 + num_enforcer;
-            merged = (PgRule *) palloc(sizeof(PgRule) * (total + 1));
-
-            if (num_impl > 0)
-                memcpy(merged, rules, sizeof(PgRule) * num_impl);
-            if (num_join > 0)
-                memcpy(&merged[num_impl], join_rules, sizeof(PgRule) * num_join);
-            if (num_scan > 0)
-                memcpy(&merged[num_impl + num_join], scan_rules,
-                       sizeof(PgRule) * num_scan);
-            if (num_join2 > 0)
-                memcpy(&merged[num_impl + num_join + num_scan], join2_rules,
-                       sizeof(PgRule) * num_join2);
-            if (num_enforcer > 0)
-                memcpy(&merged[num_impl + num_join + num_scan + num_join2],
-                       enf_rules, sizeof(PgRule) * num_enforcer);
-            MemSet(&merged[total], 0, sizeof(PgRule));
-
-            ctx.impl_rules = pg_cascades_get_rules_sorted(merged, &total);
-            ctx.num_impl_rules = total;
-            pfree(merged);
-        }
-
-        /* Merge Phase 3 + Phase 5 transformation rules */
-        rules = pg_cascades_get_trans_rules(&num_trans);
-        {
-            PgRule *phase5_rules;
-            int     num_phase5;
-
-            phase5_rules = pg_cascades_get_trans_rules_phase5(&num_phase5);
-            if (num_phase5 > 0)
-            {
-                int total = num_trans + num_phase5;
-                PgRule *merged = (PgRule *) palloc(sizeof(PgRule) * (total + 1));
-
-                if (num_trans > 0)
-                    memcpy(merged, rules, sizeof(PgRule) * num_trans);
-                memcpy(&merged[num_trans], phase5_rules,
-                       sizeof(PgRule) * num_phase5);
-                MemSet(&merged[total], 0, sizeof(PgRule)); /* sentinel */
-
-                ctx.trans_rules = pg_cascades_get_rules_sorted(merged, &total);
-                ctx.num_trans_rules = total;
-            }
-            else if (num_trans > 0)
-            {
-                ctx.trans_rules = pg_cascades_get_rules_sorted(rules, &num_trans);
-                ctx.num_trans_rules = num_trans;
-            }
-            else
-            {
-                ctx.trans_rules = NULL;
-                ctx.num_trans_rules = 0;
-            }
-        }
+        ctx.impl_rules = pg_registry_get_rules_array(PG_RULE_MEMO_IMPL,
+                                                      &ctx.num_impl_rules);
+        ctx.trans_rules = pg_registry_get_rules_array(PG_RULE_MEMO_TRANSFORM,
+                                                       &ctx.num_trans_rules);
     }
 
     CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [2/12] Rules initialized (impl=%d trans=%d)",

@@ -12,6 +12,26 @@
 #include "postgres.h"
 #include "optimizer/cascades.h"
 #include "nodes/pg_list.h"
+#include "utils/memutils.h"
+
+/* ========================================================================
+ * Global pattern objects (allocated in TopMemoryContext, shared across rules)
+ * ======================================================================== */
+PgPattern *g_pat_leaf1 = NULL;
+PgPattern *g_pat_leaf2 = NULL;
+PgPattern *g_pat_join_leaf_leaf = NULL;
+PgPattern *g_pat_join_join_leaf_leaf_leaf = NULL;
+PgPattern *g_pat_join_leaf_join_leaf_leaf = NULL;
+PgPattern *g_pat_filter_join_leaf_leaf = NULL;
+PgPattern *g_pat_filter_project_leaf = NULL;
+PgPattern *g_pat_limit_sort_leaf = NULL;
+PgPattern *g_pat_limit_join_leaf_leaf = NULL;
+PgPattern *g_pat_agg_agg_leaf = NULL;
+PgPattern *g_pat_agg_limit_leaf = NULL;
+PgPattern *g_pat_join_project_leaf_project_leaf = NULL;
+PgPattern *g_pat_project_project_leaf = NULL;
+PgPattern *g_pat_join_filter_leaf_leaf = NULL;
+
 
 /* ========================================================================
  * Pattern constructors
@@ -357,3 +377,140 @@ pg_pattern_match_full(PgPattern *pattern, PgGroupExpr *root)
     /* Unknown pattern type */
     return NIL;
 }
+
+/* === pg_cascades_init_rule_patterns (moved from rule.c) === */
+
+void
+pg_cascades_init_rule_patterns(void)
+{
+    int i;
+    int num_rules;
+    MemoryContext old_cxt;
+
+    /* Already initialized */
+    if (g_pat_leaf1 != NULL)
+        return;
+
+    /*
+     * Allocate pattern objects in TopMemoryContext so they survive
+     * the lifecycle of the Cascades memo context.  Without this,
+     * g_pat_leaf1 becomes a dangling pointer when the memo context
+     * is deleted, and the idempotency guard above sees != NULL,
+     * causing use-after-free on subsequent planner calls.
+     */
+    old_cxt = MemoryContextSwitchTo(TopMemoryContext);
+
+    /* Create shared leaf patterns */
+    g_pat_leaf1 = pg_pattern_leaf();
+    g_pat_leaf2 = pg_pattern_leaf();
+
+    /* C2: JoinAssociativity — Join(Join(Leaf, Leaf), Leaf) */
+    g_pat_join_join_leaf_leaf_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
+        list_make2(
+            pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
+                list_make2(pg_pattern_leaf(), pg_pattern_leaf())),
+            pg_pattern_leaf()));
+
+    /* C3: JoinLeftAsscom — Join(Leaf, Join(Leaf, Leaf)) */
+    g_pat_join_leaf_join_leaf_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
+        list_make2(
+            pg_pattern_leaf(),
+            pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
+                list_make2(pg_pattern_leaf(), pg_pattern_leaf()))));
+
+    /* A2: PushDownPredicateJoin — Filter(Join(Leaf, Leaf)) */
+    g_pat_filter_join_leaf_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_FILTER,
+        list_make1(
+            pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
+                list_make2(pg_pattern_leaf(), pg_pattern_leaf()))));
+
+    /* A4: PushDownPredicateProject — Filter(Project(Leaf)) */
+    g_pat_filter_project_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_FILTER,
+        list_make1(
+            pg_pattern_tree(PG_CASCADES_LOGICAL_PROJECT,
+                list_make1(pg_pattern_leaf()))));
+
+    /* D1: MergeLimitWithSort — Limit(Sort(Leaf)) */
+    g_pat_limit_sort_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_LIMIT,
+        list_make1(
+            pg_pattern_tree(PG_CASCADES_LOGICAL_SORT,
+                list_make1(pg_pattern_leaf()))));
+
+    /* D2: PushDownLimitJoin — Limit(Join(Leaf, Leaf)) */
+    g_pat_limit_join_leaf_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_LIMIT,
+        list_make1(
+            pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
+                list_make2(pg_pattern_leaf(), pg_pattern_leaf()))));
+
+    /* F2: MergeTwoAgg — Agg(Agg(Leaf)) */
+    g_pat_agg_agg_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_AGG,
+        list_make1(
+            pg_pattern_tree(PG_CASCADES_LOGICAL_AGG,
+                list_make1(pg_pattern_leaf()))));
+
+    /* F3: PushDownAggLimit — Agg(Limit(Leaf)) */
+    g_pat_agg_limit_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_AGG,
+        list_make1(
+            pg_pattern_tree(PG_CASCADES_LOGICAL_LIMIT,
+                list_make1(pg_pattern_leaf()))));
+
+    /* G4: MergeJoinWithChildProject — Join(Project(Leaf), Project(Leaf)) */
+    g_pat_join_project_leaf_project_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
+        list_make2(
+            pg_pattern_tree(PG_CASCADES_LOGICAL_PROJECT,
+                list_make1(pg_pattern_leaf())),
+            pg_pattern_tree(PG_CASCADES_LOGICAL_PROJECT,
+                list_make1(pg_pattern_leaf()))));
+
+    /* H2: MergeProjectWithChild — Project(Project(Leaf)) */
+    g_pat_project_project_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_PROJECT,
+        list_make1(
+            pg_pattern_tree(PG_CASCADES_LOGICAL_PROJECT,
+                list_make1(pg_pattern_leaf()))));
+
+    /* H4: MergeFilterWithJoin — Join(Filter(Leaf), Leaf) */
+    g_pat_join_filter_leaf_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
+        list_make2(
+            pg_pattern_tree(PG_CASCADES_LOGICAL_FILTER,
+                list_make1(pg_pattern_leaf())),
+            pg_pattern_leaf()));
+
+    /* Also create simple Join(Leaf, Leaf) for JoinCommutativity */
+    g_pat_join_leaf_leaf = pg_pattern_tree(PG_CASCADES_LOGICAL_JOIN,
+        list_make2(pg_pattern_leaf(), pg_pattern_leaf()));
+
+    /*
+     * Patterns are assigned to rules at registration time via
+     * pg_registry_register_rule() in each module's init function.
+     * No static array patching needed.
+     */
+
+    MemoryContextSwitchTo(old_cxt);
+}
+
+
+/* === pg_cascades_init_combination_rules (moved from rule.c) === */
+
+/* Combination rules — consumed by rewrite.c */
+static PgCombinationRule g_combination_rules[] = {
+    {"GP_PUSH_DOWN_PREDICATE", NULL, true},
+    {"GP_PRUNE_COLUMNS", NULL, true},
+    {"GP_JOIN_REORDER", NULL, true},
+    {"GP_PRUNE_EMPTY", NULL, true},
+    {NULL, NULL, false}  /* sentinel */
+};
+
+PgCombinationRule *
+pg_cascades_get_combination_rules(int *num_rules)
+{
+    *num_rules = (int)(sizeof(g_combination_rules) / sizeof(PgCombinationRule)) - 1;
+    return g_combination_rules;
+}
+
+void
+pg_cascades_init_combination_rules(void)
+{
+    /* No dynamic initialization needed — combination rules are
+     * driven by pg_cascades_logical_rewrite() at runtime. */
+}
+

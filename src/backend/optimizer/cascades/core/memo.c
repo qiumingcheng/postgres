@@ -6,6 +6,7 @@
 
 #include "postgres.h"
 #include "optimizer/cascades.h"
+#include "core/registry.h"
 #include "optimizer/paths.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/cost.h"
@@ -1234,3 +1235,21 @@ pg_memo_merge_group(PgPlannerCascadesContext *ctx,
     CASCADES_DEBUG(ctx->debug, "Cascades: merged group %d into group %d",
              source->id, target->id);
 }
+
+PgGroupExpr *
+pg_memo_group_first_logical(PgMemoGroup *group, PgCascadesOpKind op)
+{
+    ListCell *lc;
+
+    if (group == NULL)
+        return NULL;
+
+    foreach(lc, group->logical_exprs)
+    {
+        PgGroupExpr *e = (PgGroupExpr *) lfirst(lc);
+        if (e->op == op)
+            return e;
+    }
+    return NULL;
+}
+
