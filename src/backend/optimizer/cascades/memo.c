@@ -569,18 +569,6 @@ pg_derive_expr_stats(PgPlannerCascadesContext *ctx, PgGroupExpr *expr,
     double rows = 0;
     int    width = 0;
 
-    /* vtable dispatch: module-registered stats functions */
-    {
-        PgOperatorVtable *vt = pg_registry_get_vtable(expr->op);
-        if (vt && vt->derive_stats_fn)
-        {
-            vt->derive_stats_fn(ctx, expr, &rows, &width);
-            if (out_rows) *out_rows = rows;
-            if (out_width) *out_width = width;
-            return;
-        }
-    }
-
     switch (expr->op)
     {
         case PG_CASCADES_LOGICAL_SCAN:
