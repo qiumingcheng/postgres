@@ -17,6 +17,8 @@ static void pg_cost_sort(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
         child_total, input_rows, input_width, 0.0, work_mem, lt);
     *out_startup = dummy_path.startup_cost;
     *out_total   = dummy_path.total_cost;
+
+	pg_module_sort_register_rules();
 }
 static Plan *pg_build_sort(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     PgGroupExpr *expr, PgGroupBestEntry *best,
@@ -40,6 +42,8 @@ static Plan *pg_build_sort(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     *output = best->output;
     return (Plan *) make_sort_from_pathkeys(ctx->root, child,
         required->pathkeys, required->limit_tuples);
+
+	pg_module_sort_register_rules();
 }
 void pg_module_sort_init(void)
 {
@@ -47,4 +51,31 @@ void pg_module_sort_init(void)
         .op = PG_CASCADES_PHYSICAL_SORT, .name = "Sort",
         .cost_fn = pg_cost_sort, .build_plan_fn = pg_build_sort,
     });
+
+	pg_module_sort_register_rules();
+}
+
+/* Rule declarations for sort module */
+/* Auto-generated from rule.c — do not edit by hand */
+extern List *pg_rule_eliminate_sort_with_constant_key(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_enforce_sort(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_prune_sort_columns(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_sort_to_physical_sort(PgPlannerCascadesContext *, PgGroupExpr *);
+
+void pg_module_sort_register_rules(void)
+{
+    pg_registry_register_rule(PG_RULE_MEMO_TRANSFORM,
+        "EliminateSortWithConstKey", PG_CASCADES_LOGICAL_SORT, 0,
+        NULL, pg_rule_eliminate_sort_with_constant_key, 0.5, PG_RULE_BIT_ELIM_SORT_CONST_KEY);
+    pg_registry_register_rule(PG_RULE_MEMO_TRANSFORM,
+        "EnforceSort", 0, 0,
+        NULL, pg_rule_enforce_sort, 0.0, PG_RULE_BIT_ENFORCE_SORT);
+    pg_registry_register_rule(PG_RULE_MEMO_IMPL,
+        "LogicalSort->PhysicalSort", PG_CASCADES_LOGICAL_SORT, PG_CASCADES_PHYSICAL_SORT,
+        NULL, pg_rule_sort_to_physical_sort, 1.0, PG_RULE_BIT_SORT_TO_SORT);
+    pg_registry_register_rule(PG_RULE_MEMO_TRANSFORM,
+        "PruneSortColumns", PG_CASCADES_LOGICAL_SORT, 0,
+        NULL, pg_rule_prune_sort_columns, 0.5, PG_RULE_BIT_PRUNE_SORT_COLS);
+
+	pg_module_sort_register_rules();
 }

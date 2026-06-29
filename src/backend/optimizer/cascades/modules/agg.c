@@ -21,6 +21,8 @@ pg_cost_agg(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
              ctx->upper->dNumGroups, child_startup, child_total, input_rows);
     *out_startup = dummy_path.startup_cost;
     *out_total   = dummy_path.total_cost;
+
+	pg_module_agg_register_rules();
 }
 
 /* ── Build Plan (from planbuild.c switch, exact copy) ── */
@@ -89,6 +91,8 @@ pg_build_agg(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
 
     *output = best->output;
     return result;
+
+	pg_module_agg_register_rules();
 }
 
 /* ── Stats (from memo.c switch) ── */
@@ -105,6 +109,8 @@ pg_derive_agg_stats(PgPlannerCascadesContext *ctx, PgGroupExpr *expr,
     }
     if (list_length(expr->inputs) >= 1)
         *out_width = ((PgMemoGroup *) linitial(expr->inputs))->width;
+
+	pg_module_agg_register_rules();
 }
 
 /* ── init ── */
@@ -122,4 +128,41 @@ void pg_module_agg_init(void)
         .build_plan_fn = pg_build_agg,
         .derive_stats_fn = pg_derive_agg_stats,
     });
+
+	pg_module_agg_register_rules();
+}
+
+/* Rule declarations for agg module */
+/* Auto-generated from rule.c — do not edit by hand */
+extern List *pg_rule_agg_to_groupagg(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_agg_to_hashagg(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_eliminate_agg(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_merge_two_agg(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_prune_agg_columns(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_pushdown_agg_limit(PgPlannerCascadesContext *, PgGroupExpr *);
+extern PgPattern *g_pat_agg_agg_leaf;
+extern PgPattern *g_pat_agg_limit_leaf;
+
+void pg_module_agg_register_rules(void)
+{
+    pg_registry_register_rule(PG_RULE_MEMO_TRANSFORM,
+        "EliminateAgg", PG_CASCADES_LOGICAL_AGG, 0,
+        NULL, pg_rule_eliminate_agg, 0.6, PG_RULE_BIT_ELIMINATE_AGG);
+    pg_registry_register_rule(PG_RULE_MEMO_IMPL,
+        "LogicalAgg->PhysicalGroupAgg", PG_CASCADES_LOGICAL_AGG, PG_CASCADES_PHYSICAL_GROUPAGG,
+        NULL, pg_rule_agg_to_groupagg, 0.7, PG_RULE_BIT_AGG_TO_GROUPAGG);
+    pg_registry_register_rule(PG_RULE_MEMO_IMPL,
+        "LogicalAgg->PhysicalHashAgg", PG_CASCADES_LOGICAL_AGG, PG_CASCADES_PHYSICAL_HASHAGG,
+        NULL, pg_rule_agg_to_hashagg, 0.8, PG_RULE_BIT_AGG_TO_HASHAGG);
+    pg_registry_register_rule(PG_RULE_MEMO_TRANSFORM,
+        "MergeTwoAgg", PG_CASCADES_LOGICAL_AGG, 0,
+        g_pat_agg_agg_leaf, pg_rule_merge_two_agg, 0.5, PG_RULE_BIT_MERGE_TWO_AGG);
+    pg_registry_register_rule(PG_RULE_MEMO_TRANSFORM,
+        "PruneAggColumns", PG_CASCADES_LOGICAL_AGG, 0,
+        NULL, pg_rule_prune_agg_columns, 0.5, PG_RULE_BIT_PRUNE_AGG_COLS);
+    pg_registry_register_rule(PG_RULE_MEMO_TRANSFORM,
+        "PushDownAggLimit", PG_CASCADES_LOGICAL_AGG, 0,
+        g_pat_agg_limit_leaf, pg_rule_pushdown_agg_limit, 0.4, PG_RULE_BIT_PUSHDOWN_AGG_LIMIT);
+
+	pg_module_agg_register_rules();
 }

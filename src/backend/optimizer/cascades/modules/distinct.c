@@ -18,6 +18,8 @@ pg_cost_unique(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
         child_total, input_rows, input_width, 0.0, work_mem, -1.0);
     *out_startup = dummy_path.startup_cost;
     *out_total   = dummy_path.total_cost;
+
+	pg_module_distinct_register_rules();
 }
 
 static Plan *
@@ -46,6 +48,8 @@ pg_build_unique(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
 
     *output = best->output;
     return (Plan *) make_unique(child, ctx->upper->distinctClause);
+
+	pg_module_distinct_register_rules();
 }
 
 void pg_module_distinct_init(void)
@@ -55,4 +59,19 @@ void pg_module_distinct_init(void)
         .cost_fn = pg_cost_unique,
         .build_plan_fn = pg_build_unique,
     });
+
+	pg_module_distinct_register_rules();
+}
+
+/* Rule declarations for distinct module */
+/* Auto-generated from rule.c — do not edit by hand */
+extern List *pg_rule_distinct_to_unique(PgPlannerCascadesContext *, PgGroupExpr *);
+
+void pg_module_distinct_register_rules(void)
+{
+    pg_registry_register_rule(PG_RULE_MEMO_IMPL,
+        "LogicalDistinct->PhysicalUnique", PG_CASCADES_LOGICAL_DISTINCT, PG_CASCADES_PHYSICAL_UNIQUE,
+        NULL, pg_rule_distinct_to_unique, 1.0, PG_RULE_BIT_DISTINCT_TO_UNIQUE);
+
+	pg_module_distinct_register_rules();
 }

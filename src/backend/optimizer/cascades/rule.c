@@ -2368,20 +2368,20 @@ pg_cascades_get_enforcer_rules(int *num_rules)
  * ======================================================================== */
 
 /* Static pattern nodes for multi-node rules */
-static PgPattern *g_pat_leaf1 = NULL;
-static PgPattern *g_pat_leaf2 = NULL;
-static PgPattern *g_pat_join_leaf_leaf = NULL;
-static PgPattern *g_pat_join_join_leaf_leaf_leaf = NULL;
-static PgPattern *g_pat_join_leaf_join_leaf_leaf = NULL;
-static PgPattern *g_pat_filter_join_leaf_leaf = NULL;
-static PgPattern *g_pat_filter_project_leaf = NULL;
-static PgPattern *g_pat_limit_sort_leaf = NULL;
-static PgPattern *g_pat_limit_join_leaf_leaf = NULL;
-static PgPattern *g_pat_agg_agg_leaf = NULL;
-static PgPattern *g_pat_agg_limit_leaf = NULL;
-static PgPattern *g_pat_join_project_leaf_project_leaf = NULL;
-static PgPattern *g_pat_project_project_leaf = NULL;
-static PgPattern *g_pat_join_filter_leaf_leaf = NULL;
+PgPattern *g_pat_leaf1 = NULL;
+PgPattern *g_pat_leaf2 = NULL;
+PgPattern *g_pat_join_leaf_leaf = NULL;
+PgPattern *g_pat_join_join_leaf_leaf_leaf = NULL;
+PgPattern *g_pat_join_leaf_join_leaf_leaf = NULL;
+PgPattern *g_pat_filter_join_leaf_leaf = NULL;
+PgPattern *g_pat_filter_project_leaf = NULL;
+PgPattern *g_pat_limit_sort_leaf = NULL;
+PgPattern *g_pat_limit_join_leaf_leaf = NULL;
+PgPattern *g_pat_agg_agg_leaf = NULL;
+PgPattern *g_pat_agg_limit_leaf = NULL;
+PgPattern *g_pat_join_project_leaf_project_leaf = NULL;
+PgPattern *g_pat_project_project_leaf = NULL;
+PgPattern *g_pat_join_filter_leaf_leaf = NULL;
 
 /*
  * pg_cascades_init_rule_patterns:

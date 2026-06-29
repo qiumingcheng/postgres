@@ -1,4 +1,8 @@
-# 核心重构总结：
+# 重构目标:
+当我支持一个新的优化功能（例如，空间连接）的时候，我会为这个功能添加一个模块，可以为他通过添加逻辑优化规则、逻辑分解优化规则、物理优化规则，就可以完成该功能的逻辑优化、逻辑分解优化、物理优化，
+
+
+# 核心重构要点：
 规则四分类：LOGICAL_TRANSFORM / LOGICAL_DECOMPOSE / PHYSICAL_IMPL / PHYSICAL_REWRITE——覆盖从逻辑到物理全链路
 代价函数独立注册：不在 vtable 里，而在注册中心 cost_fns[op_kind] 中。同算子可注册多个代价模型（"default" / "gpu" / "distributed"），按 priority 竞争
 Vtable 只放一一对应关系（build_plan / derive_stats）；注册中心放多对多关系（规则 / 代价函数）
