@@ -289,6 +289,16 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
 
     *output = best->output;
 
+    /* vtable dispatch: module-registered build functions */
+    {
+        PgOperatorVtable *vt = pg_registry_get_vtable(expr->op);
+        if (vt && vt->build_plan_fn)
+        {
+            Plan *p = vt->build_plan_fn(ctx, group, expr, best, required, output);
+            if (p) return p;
+        }
+    }
+
     switch (expr->op)
     {
         /*

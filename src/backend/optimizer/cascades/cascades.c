@@ -30,6 +30,16 @@ int  cascades_planner_timeout_ms = 0;
 int  cascades_planner_max_groups = 10000;
 int  cascades_planner_max_tasks = 100000;
 
+/* Module init forward declarations */
+extern void pg_module_scan_init(void);
+extern void pg_module_filter_init(void);
+extern void pg_module_project_init(void);
+extern void pg_module_join_init(void);
+extern void pg_module_agg_init(void);
+extern void pg_module_sort_init(void);
+extern void pg_module_limit_init(void);
+extern void pg_module_distinct_init(void);
+
 /* Forward declarations for pre-memo rule functions */
 static void pg_pre_memo_init_flags(PlannerInfo *root);
 static void pg_pre_memo_flatten_union(PlannerInfo *root);
@@ -288,6 +298,30 @@ pg_pre_memo_pullup_subqueries(PlannerInfo *root)
  * Phase 2: planner_hook — new entry point
  * ======================================================================== */
 
+static bool g_registry_initialized = false;
+
+/*
+ * pg_cascades_ensure_init:
+ *   Lazy-init all modules into the registry. Called once on first
+ *   Cascades query. Each module registers its operator vtables + rules.
+ */
+static void
+pg_cascades_ensure_init(void)
+{
+    if (g_registry_initialized) return;
+    g_registry_initialized = true;
+
+    pg_registry_init();
+    pg_module_scan_init();
+    pg_module_filter_init();
+    pg_module_project_init();
+    pg_module_join_init();
+    pg_module_agg_init();
+    pg_module_sort_init();
+    pg_module_limit_init();
+    pg_module_distinct_init();
+}
+
 static bool g_hook_registered = false;
 
 /*
@@ -355,7 +389,10 @@ pg_cascades_planner_hook(Query *parse, int cursorOptions,
     root->non_recursive_plan = NULL;
     root->hasJoinRTEs = false;
 
-    /* ---- 3. Pre-Memo rewrite rules (Phase 0-4) ---- */
+    /* ---- 3. Ensure registry initialized (once) ---- */
+    pg_cascades_ensure_init();
+
+    /* ---- 4. Pre-Memo rewrite rules (Phase 0-4) ---- */
     pg_cascades_run_pre_memo_rules(root);
 
     /* ---- 4. Expression normalization (linear pass, must run once) ---- */

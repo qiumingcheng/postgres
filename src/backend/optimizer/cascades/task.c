@@ -1132,16 +1132,20 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
             if (input_width <= 0) input_width = 10;
 
             /*
-             * Compute local cost using PG cost functions.
-             *
-             * For most PG cost functions (cost_agg, cost_sort),
-             * the result ALREADY includes child costs — the function
-             * takes input_total_cost as a parameter and returns the
-             * total including both local and input.
-             *
-             * For Project and Limit, we compute local cost and
-             * add it to child costs.
+             * Compute local cost using vtable dispatch (module-registered)
+             * with fallback to PG cost functions via switch.
              */
+            {
+                PgOperatorVtable *vt = pg_registry_get_vtable(expr->op);
+                if (vt && vt->cost_fn)
+                {
+                    vt->cost_fn(ctx, expr->owner_group, expr,
+                                input_rows, input_width,
+                                child_startup, child_total,
+                                &task->startup_cost, &task->total_cost);
+                    /* cost computed via vtable — skip switch */;
+                }
+                else
             switch (expr->op)
             {
                 case PG_CASCADES_PHYSICAL_HASHAGG:
@@ -1230,6 +1234,7 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
                     break;
             }
             (void) 0;
+        cost_computed:
 
             /* Per-expression pruning (above) via expr->best_cost
              * already prevents redundant ENFORCE_AND_COST runs. */
