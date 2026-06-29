@@ -556,13 +556,11 @@ pg_cascades_supported_query_precheck(PlannerInfo *root,
         return PG_CASCADES_UNSUPPORTED;
     if (root->minmax_aggs != NIL)
         return PG_CASCADES_UNSUPPORTED;
-    if (pg_cascades_contains_correlated_subplan((Node *) parse->targetList) ||
-        pg_cascades_contains_correlated_subplan((Node *) parse->jointree) ||
-        pg_cascades_contains_correlated_subplan(parse->havingQual) ||
-        pg_cascades_contains_correlated_subplan(parse->limitOffset) ||
-        pg_cascades_contains_correlated_subplan(parse->limitCount))
-        return PG_CASCADES_UNSUPPORTED_SUBPLAN;
-
+    /*
+     * Correlated SubPlans are opaque expression nodes handled by PG's
+     * create_plan() natively.  Cascades processes the rest of the query
+     * (joins, filters, aggregates) and delegates SubPlan extraction to PG.
+     */
     return PG_CASCADES_OK;
 }
 
