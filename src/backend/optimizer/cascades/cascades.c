@@ -171,25 +171,148 @@ static bool g_hook_registered = false;
 
 /*
  * pg_cascades_planner_hook:
- *   planner() hook — Cascades boundary.
+ *   planner() hook — Cascades independent entry point.
  *
- *   Delegates to standard_planner() for all remaining setup (PlannerInfo
- *   init, tlist preprocessing, pathkey derivation).  Inside
- *   standard_planner(), subquery_planner() runs pre-memo rewrite rules
- *   (via pg_cascades_run_pre_memo_rules) and grouping_planner() dispatches
- *   to pg_cascades_optimize() when enable_cascades_planner is on.
+ *   Owns the full planning flow: init → semantic prep → pre-memo rules
+ *   → grouping_planner (Cascades or PG) → post-processing.
  *
- *   This is architecturally identical to StarRocks: the hook is the
- *   extension point at the planner() level, while PG's parser/analyzer
- *   and planner infrastructure (standard_planner/subquery_planner) handle
- *   setup — just as StarRocks uses MySQL's parser before taking over
- *   in Optimizer.optimizeByCost().
+ *   Does NOT delegate to standard_planner().  Fallback calls
+ *   standard_planner() as a black box.
  */
 static PlannedStmt *
 pg_cascades_planner_hook(Query *parse, int cursorOptions,
                          ParamListInfo boundParams)
 {
-    return standard_planner(parse, cursorOptions, boundParams);
+    double       tuple_fraction;
+
+    /* When Cascades is off, full PG path */
+    if (!enable_cascades_planner)
+        return standard_planner(parse, cursorOptions, boundParams);
+
+    /* ---- 1. PlannerGlobal init (from standard_planner) ---- */
+    PlannerGlobal *glob = makeNode(PlannerGlobal);
+    glob->boundParams = boundParams;
+    glob->subplans = NIL;
+    glob->subroots = NIL;
+    glob->rewindPlanIDs = NULL;
+    glob->finalrtable = NIL;
+    glob->finalrowmarks = NIL;
+    glob->resultRelations = NIL;
+    glob->relationOids = NIL;
+    glob->invalItems = NIL;
+    glob->nParamExec = 0;
+    glob->lastPHId = 0;
+    glob->lastRowMarkId = 0;
+    glob->transientPlan = false;
+
+    /* tuple_fraction */
+    if (cursorOptions & CURSOR_OPT_FAST_PLAN)
+    {
+        tuple_fraction = cursor_tuple_fraction;
+        if (tuple_fraction >= 1.0)      tuple_fraction = 0.0;
+        else if (tuple_fraction <= 0.0) tuple_fraction = 1e-10;
+    }
+    else
+        tuple_fraction = 0.0;
+
+    /* ---- 2. PlannerInfo init (from subquery_planner) ---- */
+    PlannerInfo *root = makeNode(PlannerInfo);
+    root->parse = parse;
+    root->glob = glob;
+    root->query_level = 1;
+    root->parent_root = NULL;
+    root->plan_params = NIL;
+    root->planner_cxt = CurrentMemoryContext;
+    root->init_plans = NIL;
+    root->cte_plan_ids = NIL;
+    root->eq_classes = NIL;
+    root->append_rel_list = NIL;
+    root->rowMarks = NIL;
+    root->hasInheritedTarget = false;
+    root->hasRecursion = false;
+    root->wt_param_id = -1;
+    root->non_recursive_plan = NULL;
+    root->hasJoinRTEs = false;
+
+    /* ---- 3. Pre-Memo rewrite rules (BEFORE semantic preprocessing,
+     *        since CTE inline needs raw parse tree) ---- */
+    pg_cascades_run_pre_memo_rules(root);
+
+    /* ---- 4. Semantic preprocessing (from subquery_planner) ---- */
+    parse->targetList = (List *)
+        preprocess_expression(root, (Node *) parse->targetList, EXPRKIND_TARGET);
+    parse->returningList = (List *)
+        preprocess_expression(root, (Node *) parse->returningList, EXPRKIND_TARGET);
+    preprocess_qual_conditions(root, (Node *) parse->jointree);
+    parse->havingQual = preprocess_expression(root, parse->havingQual, EXPRKIND_QUAL);
+
+    /* Expand inheritance, outer join simplification */
+    expand_inherited_tables(root);
+    {
+        bool hasOuterJoins = false;
+        ListCell *l;
+        foreach(l, parse->rtable)
+        {
+            RangeTblEntry *rte = (RangeTblEntry *) lfirst(l);
+            if (rte->rtekind == RTE_JOIN && IS_OUTER_JOIN(rte->jointype))
+            { hasOuterJoins = true; break; }
+        }
+        if (hasOuterJoins)
+            reduce_outer_joins(root);
+    }
+
+    /* ---- 5. Dispatch to grouping_planner ---- */
+    {
+        Plan *top_plan;
+        PlannedStmt *result;
+
+        CASCADES_DEBUG(cascades_planner_debug,
+            "CASCADES: ====== planner_hook: entering grouping_planner ======");
+
+        top_plan = grouping_planner(root, tuple_fraction);
+
+        /* If Cascades failed (returned NULL from NO_PLAN etc), fallback */
+        if (top_plan == NULL)
+        {
+            CASCADES_DEBUG(cascades_planner_debug,
+                "CASCADES: grouping_planner returned NULL, falling back");
+            return standard_planner(parse, cursorOptions, boundParams);
+        }
+
+        /* Post-processing */
+        top_plan = set_plan_references(root, top_plan);
+        /* ... subplans ... */
+        {
+            ListCell *lp, *lr;
+            if (list_length(glob->subplans) != list_length(glob->subroots))
+                elog(ERROR, "subplan/subroot list length mismatch");
+            forboth(lp, glob->subplans, lr, glob->subroots)
+            {
+                Plan *subplan = (Plan *) lfirst(lp);
+                PlannerInfo *subroot = (PlannerInfo *) lfirst(lr);
+                lfirst(lp) = set_plan_references(subroot, subplan);
+            }
+        }
+
+        result = makeNode(PlannedStmt);
+        result->commandType = parse->commandType;
+        result->queryId = parse->queryId;
+        result->hasReturning = (parse->returningList != NIL);
+        result->hasModifyingCTE = parse->hasModifyingCTE;
+        result->canSetTag = parse->canSetTag;
+        result->transientPlan = glob->transientPlan;
+        result->planTree = top_plan;
+        result->rtable = glob->finalrtable;
+        result->resultRelations = glob->resultRelations;
+        result->utilityStmt = parse->utilityStmt;
+        result->subplans = glob->subplans;
+        result->rewindPlanIDs = glob->rewindPlanIDs;
+        result->rowMarks = glob->finalrowmarks;
+        result->relationOids = glob->relationOids;
+        result->invalItems = glob->invalItems;
+        result->nParamExec = glob->nParamExec;
+        return result;
+    }
 }
 
 /*

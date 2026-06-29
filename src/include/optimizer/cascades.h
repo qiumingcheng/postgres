@@ -619,6 +619,13 @@ extern PgCascadesStatus pg_cascades_try_grouping_planner(
 extern void pg_cascades_ensure_hook(void);
 extern void pg_cascades_register_hook(void);
 extern void pg_cascades_run_pre_memo_rules(PlannerInfo *root);
+
+/* PG functions exposed for Cascades hook (were static in planner.c) */
+#define EXPRKIND_TARGET     1
+#define EXPRKIND_QUAL        5
+extern Node *preprocess_expression(PlannerInfo *root, Node *expr, int kind);
+extern void preprocess_qual_conditions(PlannerInfo *root, Node *jtnode);
+extern Plan *grouping_planner(PlannerInfo *root, double tuple_fraction);
 extern PgCascadesStatus pg_cascades_supported_query_precheck(
     PlannerInfo *root, PgCascadesUpperInfo *upper);
 extern PgCascadesStatus pg_cascades_supported_query(

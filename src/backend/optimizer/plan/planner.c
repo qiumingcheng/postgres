@@ -57,15 +57,15 @@ planner_hook_type planner_hook = NULL;
 #define EXPRKIND_APPINFO	5
 
 
-static Node *preprocess_expression(PlannerInfo *root, Node *expr, int kind);
-static void preprocess_qual_conditions(PlannerInfo *root, Node *jtnode);
+Node *preprocess_expression(PlannerInfo *root, Node *expr, int kind);
+void preprocess_qual_conditions(PlannerInfo *root, Node *jtnode);
 static Plan *inheritance_planner(PlannerInfo *root);
-static Plan *grouping_planner(PlannerInfo *root, double tuple_fraction);
+Plan *grouping_planner(PlannerInfo *root, double tuple_fraction);
 static void preprocess_rowmarks(PlannerInfo *root);
 static double preprocess_limit(PlannerInfo *root,
 				 double tuple_fraction,
 				 int64 *offset_est, int64 *count_est);
-static void preprocess_groupclause(PlannerInfo *root);
+void preprocess_groupclause(PlannerInfo *root);
 static bool choose_hashed_grouping(PlannerInfo *root,
 					   double tuple_fraction, double limit_tuples,
 					   double path_rows, int path_width,
@@ -78,7 +78,7 @@ static bool choose_hashed_distinct(PlannerInfo *root,
 					   Cost sorted_startup_cost, Cost sorted_total_cost,
 					   List *sorted_pathkeys,
 					   double dNumDistinctRows);
-static List *make_subplanTargetList(PlannerInfo *root, List *tlist,
+List *make_subplanTargetList(PlannerInfo *root, List *tlist,
 					   AttrNumber **groupColIdx, bool *need_tlist_eval);
 static int	get_grouping_column_index(Query *parse, TargetEntry *tle);
 static void locate_grouping_columns(PlannerInfo *root,
@@ -589,7 +589,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
  *		which can be a targetlist, a WHERE clause (including JOIN/ON
  *		conditions), or a HAVING clause.
  */
-static Node *
+Node *
 preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 {
 	/*
@@ -670,7 +670,7 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
  *		Recursively scan the query's jointree and do subquery_planner's
  *		preprocessing work on each qual condition found therein.
  */
-static void
+void
 preprocess_qual_conditions(PlannerInfo *root, Node *jtnode)
 {
 	if (jtnode == NULL)
@@ -959,7 +959,7 @@ inheritance_planner(PlannerInfo *root)
  * actual output ordering of the plan (in pathkey format).
  *--------------------
  */
-static Plan *
+Plan *
 grouping_planner(PlannerInfo *root, double tuple_fraction)
 {
 	Query	   *parse = root->parse;
@@ -2338,7 +2338,7 @@ preprocess_limit(PlannerInfo *root, double tuple_fraction,
  * Note: we need no comparable processing of the distinctClause because
  * the parser already enforced that that matches ORDER BY.
  */
-static void
+void
 preprocess_groupclause(PlannerInfo *root)
 {
 	Query	   *parse = root->parse;
@@ -2755,7 +2755,7 @@ choose_hashed_distinct(PlannerInfo *root,
  *
  * The result is the targetlist to be passed to query_planner.
  */
-static List *
+List *
 make_subplanTargetList(PlannerInfo *root,
 					   List *tlist,
 					   AttrNumber **groupColIdx,
