@@ -42,3 +42,13 @@ SELECT 'DT2', count(*) FROM (SELECT DISTINCT a, b FROM cascades_test_t) s;
 SELECT 'DT3', count(*) FROM (SELECT DISTINCT a FROM cascades_test_t WHERE a > 10 ORDER BY a) s;
 SELECT 'DT4', a, count(*) FROM (SELECT DISTINCT a, b FROM cascades_test_t) s GROUP BY a;
 SELECT 'DT5', count(*) FROM (SELECT DISTINCT ON (a) a, b FROM cascades_test_t) s;
+
+\echo '=== Multi-table joins (bug fix verification) ==='
+-- Test 3-table join with 2 instances of same table
+SELECT 'MJ1', count(*) FROM cascades_test_j1 a JOIN cascades_test_j2 b ON a.id = b.j1_id JOIN cascades_test_j1 c ON c.id = a.id;
+-- Test 4-table join with 3 instances of same table
+SELECT 'MJ2', count(*) FROM cascades_test_j1 a JOIN cascades_test_j2 b ON a.id = b.j1_id JOIN cascades_test_j1 c ON c.id = a.id JOIN cascades_test_j1 d ON d.id = a.id;
+-- Test 4-table join with 2+2 instances
+SELECT 'MJ3', count(*) FROM cascades_test_j1 a JOIN cascades_test_j2 b ON a.id = b.j1_id JOIN cascades_test_j1 c ON c.id = a.id JOIN cascades_test_j2 d ON d.j1_id = a.id;
+-- Test 5-table join
+SELECT 'MJ4', count(*) FROM cascades_test_j1 a JOIN cascades_test_j2 b ON a.id = b.j1_id JOIN cascades_test_j1 c ON c.id = a.id JOIN cascades_test_j2 d ON d.j1_id = a.id JOIN cascades_test_j1 e ON e.id = a.id;

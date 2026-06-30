@@ -74,6 +74,15 @@ pg_memo_build_hash_key(PgExprHashKey *key, PgGroupExpr *expr)
     /* Pad with -1 so unused slots don't match by accident */
     while (i < PG_MEMO_HASH_MAX_INPUTS)
         key->group_ids[i++] = -1;
+
+    /* Debug: log hash key for Join */
+    if (expr->op == PG_CASCADES_LOGICAL_JOIN)
+    {
+        elog(NOTICE, "CASCADES: Hash key for Join: op=%d num_inputs=%d ids=[%d,%d,%d,%d]",
+             key->op, key->num_inputs,
+             key->group_ids[0], key->group_ids[1], key->group_ids[2], key->group_ids[3]);
+    }
+
     /* Update expr hash for quick comparison */
     expr->expr_hash = pg_memo_hash_key(key, sizeof(PgExprHashKey));
 }
@@ -160,6 +169,27 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
      */
     pg_memo_build_hash_key(&key, expr);
 
+    /* Debug: log expression insertion attempt */
+    if (expr->op == PG_CASCADES_LOGICAL_JOIN)
+    {
+        StringInfoData buf;
+        ListCell *lc;
+        initStringInfo(&buf);
+        appendStringInfo(&buf, "Join(");
+        foreach(lc, expr->inputs)
+        {
+            PgMemoGroup *g = (PgMemoGroup *) lfirst(lc);
+            if (lc != list_head(expr->inputs))
+                appendStringInfo(&buf, ", ");
+            appendStringInfo(&buf, "G%d", g->id);
+        }
+        appendStringInfo(&buf, ")");
+
+        CASCADES_DEBUG(ctx->debug, "CASCADES: Inserting expression: %s into parent_group=%d (parent_group=%p)",
+                     buf.data, parent_group ? parent_group->id : -1, parent_group);
+        pfree(buf.data);
+    }
+
     /*
      * Phase 4 + Phase 6: Global hash table dedup for logical expressions.
      *
@@ -182,6 +212,13 @@ pg_memo_insert_expression(PgPlannerCascadesContext *ctx,
 
         entry = (PgExprHashEntry *)
             hash_search(memo->group_expr_table, &key, HASH_ENTER, &found);
+
+        /* Debug: log hash search result for Join */
+        if (expr->op == PG_CASCADES_LOGICAL_JOIN)
+        {
+            elog(NOTICE, "CASCADES: Hash search result: found=%d owner_group_id=%d",
+                 found, found ? entry->owner_group_id : -1);
+        }
 
         if (found)
         {
@@ -337,6 +374,27 @@ pg_memo_insert_expression_tree(PgPlannerCascadesContext *ctx,
     /* Step 3: Insert this expression into Memo */
     group = pg_memo_insert_expression(ctx, memo, tree_root, NULL);
 
+    /* Debug: log the result for Join expressions */
+    if (tree_root->op == PG_CASCADES_LOGICAL_JOIN)
+    {
+        StringInfoData buf;
+        ListCell *lc;
+        initStringInfo(&buf);
+        appendStringInfo(&buf, "Join(");
+        foreach(lc, tree_root->inputs)
+        {
+            PgMemoGroup *g = (PgMemoGroup *) lfirst(lc);
+            if (lc != list_head(tree_root->inputs))
+                appendStringInfo(&buf, ", ");
+            appendStringInfo(&buf, "G%d", g->id);
+        }
+        appendStringInfo(&buf, ")");
+
+        CASCADES_DEBUG(ctx->debug, "CASCADES: Insert result: %s → returned group=%d",
+                     buf.data, group ? group->id : -1);
+        pfree(buf.data);
+    }
+
     /*
      * Phase 6: If this is a LogicalScan whose op_private points to a
      * valid PG RelOptInfo, bridge the standalone OptExpression tree
@@ -452,10 +510,12 @@ pg_memo_init_from_tree(PgPlannerCascadesContext *ctx)
     MemSet(&hash_ctl, 0, sizeof(hash_ctl));
     hash_ctl.keysize = sizeof(PgExprHashKey);
     hash_ctl.entrysize = sizeof(PgExprHashEntry);
+    hash_ctl.hash = pg_memo_hash_key;
+    hash_ctl.match = pg_memo_match_key;
     hash_ctl.hcxt = ctx->memo_cxt;
     memo->group_expr_table = hash_create("Memo GroupExpr Table", 256,
                                           &hash_ctl,
-                                          HASH_ELEM | HASH_CONTEXT);
+                                          HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
 
     ctx->memo = memo;
     MemoryContextSwitchTo(old_cxt);
@@ -1090,10 +1150,14 @@ pg_cascades_group_relids(PgPlannerCascadesContext *ctx, PgMemoGroup *group)
     Relids   result = NULL;
     ListCell *lc;
 
+    /* For groups with RelOptInfo, directly return its relids.
+     * Note: Both base scan groups and join groups can have group->rel set.
+     * Base scans have relids with 1 member, join groups have multiple members.
+     * Either way, group->rel->relids correctly represents the tables involved. */
     if (group->rel != NULL)
         return bms_copy(group->rel->relids);
 
-    /* join/upper group：从 children 合并 */
+    /* join/upper group without RelOptInfo：从 children 合并 */
     foreach(lc, group->logical_exprs)
     {
         PgGroupExpr *expr = (PgGroupExpr *) lfirst(lc);

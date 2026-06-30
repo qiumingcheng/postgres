@@ -435,6 +435,30 @@ pg_rule_join_associativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     if (A_grp == B_grp || A_grp == C_grp || B_grp == C_grp)
         return NIL;
 
+    /* Critical fix: Check relids overlap to prevent invalid join combinations. */
+    {
+        Relids B_relids = pg_cascades_group_relids(ctx, B_grp);
+        Relids C_relids = pg_cascades_group_relids(ctx, C_grp);
+        bool overlap = false;
+
+        if (B_relids == NULL || C_relids == NULL)
+        {
+            if (B_relids != NULL)
+                bms_free(B_relids);
+            if (C_relids != NULL)
+                bms_free(C_relids);
+            return NIL;
+        }
+
+        overlap = bms_overlap(B_relids, C_relids);
+
+        bms_free(B_relids);
+        bms_free(C_relids);
+
+        if (overlap)
+            return NIL;  /* B and C contain overlapping tables — invalid join */
+    }
+
     /*
      * Step 1: Create (B⋈C), insert into Memo to get its group.
      * StarRocks copyIn pattern: transform returns a tree of OptExpression,
@@ -447,6 +471,14 @@ pg_rule_join_associativity(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     bc_group = pg_memo_insert_expression(ctx, ctx->memo, bc_join, NULL);
     if (bc_group == NULL)
         return NIL;  /* (B⋈C) already exists or duplicate */
+
+    /* Critical: Check if bc_group equals A_grp (could happen due to group merge).
+     * If so, we'd create Join(A, A) which is invalid. */
+    if (bc_group == A_grp)
+    {
+        elog(NOTICE, "JoinAssociativity: SKIPPED - bc_group equals A_grp (id=%d)", A_grp->id);
+        return NIL;
+    }
 
     /*
      * Step 2: Create A⋈(B⋈C) with bc_group as input.
@@ -541,6 +573,32 @@ pg_rule_join_left_asscom(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     if (A_grp == B_grp || A_grp == C_grp || B_grp == C_grp)
         return NIL;
 
+    /* Critical fix: Check relids overlap to prevent invalid join combinations.
+     * Same as JoinAssociativity.
+     */
+    {
+        Relids A_relids = pg_cascades_group_relids(ctx, A_grp);
+        Relids B_relids = pg_cascades_group_relids(ctx, B_grp);
+        bool overlap = false;
+
+        if (A_relids == NULL || B_relids == NULL)
+        {
+            if (A_relids != NULL)
+                bms_free(A_relids);
+            if (B_relids != NULL)
+                bms_free(B_relids);
+            return NIL;
+        }
+
+        overlap = bms_overlap(A_relids, B_relids);
+
+        bms_free(A_relids);
+        bms_free(B_relids);
+
+        if (overlap)
+            return NIL;  /* A and B contain overlapping tables — invalid join */
+    }
+
     /*
      * Step 1: Create (A⋈B), insert to get its group.
      */
@@ -550,6 +608,14 @@ pg_rule_join_left_asscom(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     ab_group = pg_memo_insert_expression(ctx, ctx->memo, ab_join, NULL);
     if (ab_group == NULL)
         return NIL;
+
+    /* Critical: Check if ab_group equals C_grp (could happen due to group merge).
+     * If so, we'd create Join(C, C) which is invalid. */
+    if (ab_group == C_grp)
+    {
+        elog(NOTICE, "JoinLeftAsscom: SKIPPED - ab_group equals C_grp (id=%d)", C_grp->id);
+        return NIL;
+    }
 
     /*
      * Step 2: Create (A⋈B)⋈C with ab_group as left input.
