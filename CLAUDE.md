@@ -172,50 +172,127 @@ src/backend/optimizer/cascades/
 | `src/include/optimizer/cascades.h` | All Cascades types, enums, function declarations |
 | `src/backend/optimizer/plan/planmain.c` | `prepare_query_planner_inputs()`, `finish_query_planner_after_prepare()` |
 
-## Entry Points
+## Complete Execution Flow
 
 ```
-planner() ──if enable_cascades && planner_hook==NULL──→ planner_hook = pg_cascades_planner_hook
-    │
-    ├─ planner_hook != NULL → pg_cascades_planner_hook()     [cascades.c]
-    │   ├─ pg_cascades_run_pre_memo_rules(root)               CTE→SubLink→Union→OJ
-    │   ├─ preprocess_expression / preprocess_qual            PG native
-    │   └─ grouping_planner(root, tuple_fraction)              [planner.c]
-    │       └─ pg_cascades_try_grouping_planner()             12-step pipeline
-
-subquery_planner():
-    pg_cascades_ensure_hook()     [cascades.c:442]  lazy init (once)
-      ├─ pg_registry_init()         registry.c
-      ├─ pg_cascades_init_rule_patterns()  pattern.c (14 global patterns)
-      └─ pg_module_{scan,...,union}_init()   ×9 modules register operators+rules
-```
-
-## 12-Step Pipeline
-
-Inside `pg_cascades_try_grouping_planner()`:
-
-```
-[1/12] AllocSetContextCreate("PgCascadesMemo")        cascades.c
-[2/12] ctx.impl_rules = pg_registry_get_rules_array(PG_RULE_MEMO_IMPL)
-       ctx.trans_rules = pg_registry_get_rules_array(PG_RULE_MEMO_TRANSFORM)
-[3/12] make_one_rel(root, prep->joinlist)              PG DP/GEQO → prep->final_rel
-[4/12] pg_memo_init_from_tree(&ctx)                    core/memo.c
-         └─ pg_cascades_build_initial_tree()            adapters/pg_adapter.c
-            LogicalLimit→LogicalSort→LogicalDistinct→LogicalAgg
-            →LogicalProject→LogicalJoin(s)→LogicalScan(s)
-[5/12] pg_memo_derive_logical_property()               core/memo.c
-[6/12] pg_cascades_logical_rewrite(&ctx)               core/rewrite.c
-       8 stages: PredicatePush→ColumnPrune→JoinReorder→LimitPush
-       →AggPush→SemiJoin→Cleanup→CombinationRules
-[6b]   pg_memo_derive_logical_property_v2()            root group fixup
-[7/12] pg_cascades_run_tasks(&ctx)                     core/task.c
-       LIFO: OPTIMIZE_GROUP→OPTIMIZE_EXPR→APPLY_RULE→ENFORCE_AND_COST
-[8/12] pg_cascades_extract_best_plan(&ctx)             core/planbuild.c
-       2-pass: COMPOSABLE_OP→IMPORTED_PATH
-[9/12] pg_cascades_validate_plan()                     postopt.c
-[10/12]pg_cascades_physical_rewrite()                  postopt.c (Material insert)
-[11/12]copyObject(plan) + MemoryContextDelete           escape memo context
-[12/12]timing + debug log
+SQL 查询
+  ↓
+PG Parser / Analyzer / Rewriter
+  ↓
+planner(parse)                                  planner.c:119
+  │
+  ├─ planner_hook != NULL?
+  │   ├─ NO  → standard_planner()             [完整 PG 路径]
+  │   └─ YES → pg_cascades_planner_hook(parse) cascades.c
+  │             │
+  │             ├─ ↓ 当 Cascades OFF:
+  │             │     return standard_planner()
+  │             │
+  │             ├─ ① PlannerGlobal init       [makeNode, glob 字段]
+  │             ├─ ② PlannerInfo init         [makeNode, root 字段]
+  │             ├─ ③ pg_cascades_ensure_hook()
+  │             │     ├─ 首次: planner_hook 注册
+  │             │     └─ 首次: registry init + 9 模块 init
+  │             │              ├─ pg_registry_init()
+  │             │              ├─ pg_cascades_init_rule_patterns()
+  │             │              └─ pg_module_{scan,filter,project,join,
+  │             │                   agg,sort,limit,distinct,union}_init()
+  │             │                   → 注册 vtable (cost/build/stats)
+  │             │                   → 注册规则 (pg_registry_register_rule)
+  │             │
+  │             ├─ ④ pg_cascades_run_pre_memo_rules(root)  ★ Pre-Memo
+  │             │     Phase 0: PlannerInfoInit     — flags
+  │             │     Phase 1: CTEInline           — RTE_CTE→RTE_SUBQUERY
+  │             │     Phase 2: SubLinkToJoin       — pull_up_sublinks→SEMI fix
+  │             │              SubqueryPullUp      — pull_up_subqueries
+  │             │              UnionAllFlatten     — UNION ALL
+  │             │     Phase 3: RowMarkInit         — preprocess_rowmarks
+  │             │              InheritTableExpand  — expand_inherited_tables
+  │             │     Phase 4: OuterJoinReduce     — reduce_outer_joins
+  │             │
+  │             ├─ ⑤ ExpressionNormalize (线性调用, 执行一次)
+  │             │     preprocess_expression(targetList/returningList)
+  │             │     preprocess_qual_conditions(jointree)
+  │             │     preprocess_expression(havingQual)
+  │             │
+  │             └─ ⑥ grouping_planner(root, tuple_fraction)
+  │                  │
+  │                  ├─ Upper Setup: tlist / pathkeys / agg costs
+  │                  │
+  │                  ├─ if (enable_cascades_planner)   planner.c:1233
+  │                  │    │
+  │                  │    ├─ ① supported_query_precheck()
+  │                  │    │     · 仅SELECT · 无Window · UNION ALL 放行
+  │                  │    │     · 相关SubPlan→标量子查询放行(create_plan处理)
+  │                  │    │
+  │                  │    ├─ ② prepare_query_planner_inputs()
+  │                  │    │     · setup_simple_rel_arrays()
+  │                  │    │     · add_base_rels_to_query()
+  │                  │    │     · deconstruct_jointree()
+  │                  │    │
+  │                  │    ├─ ③ supported_query()
+  │                  │    │     · rtekind/relkind/FDW 结构检查
+  │                  │    │
+  │                  │    └─ ④ pg_cascades_try_grouping_planner()
+  │                  │         │
+  │                  │         ├─ [1/8] MemoryContext (PgCascadesMemo)
+  │                  │         │
+  │                  │         ├─ [2/8] Rules from registry
+  │                  │         │    ctx.impl_rules  = pg_registry_get_rules_array(IMPL)
+  │                  │         │    ctx.trans_rules = pg_registry_get_rules_array(TRANSFORM)
+  │                  │         │    ★ 模块注册的规则, 已按 promise 降序
+  │                  │         │
+  │                  │         ├─ [3/8] make_one_rel(root, joinlist)
+  │                  │         │    → IMPORTED_PATH scan/join entries
+  │                  │         │
+  │                  │         ├─ [4/8] pg_memo_init_from_tree()
+  │                  │         │    Query→OptExpression tree→Memo insert→hash dedup
+  │                  │         │
+  │                  │         ├─ [5/8] pg_memo_derive_logical_property()
+  │                  │         │    ┌─ vtable: vt->derive_stats_fn (agg 有)
+  │                  │         │    └─ switch: 其余 logical op
+  │                  │         │
+  │                  │         ├─ [6/8] pg_cascades_logical_rewrite()
+  │                  │         │    8 阶段改写流水线 (predicate pushdown,
+  │                  │         │    column prune, join reorder, etc.)
+  │                  │         │
+  │                  │         ├─ [7/8] pg_cascades_run_tasks()
+  │                  │         │    │
+  │                  │         │    ├─ OptimizeGroupTask (LIFO 自底向上)
+  │                  │         │    ├─ OptimizeExpressionTask
+  │                  │         │    │    ├─ ApplyRuleTask → 模式匹配→transform
+  │                  │         │    │    │     · 实现规则: IMPL → 物理表达式
+  │                  │         │    │    │     · 变换规则: TRANSFORM → 逻辑改写
+  │                  │         │    │    └─ ExploreGroupTask(child)
+  │                  │         │    │
+  │                  │         │    └─ EnforceAndCostTask (4 状态机)
+  │                  │         │         ├─ ENFORCE_INIT
+  │                  │         │         ├─ ENFORCE_OPTIMIZE_CHILDREN
+  │                  │         │         │    └─ Clone+Resume (子组未就绪)
+  │                  │         │         ├─ ENFORCE_COMPUTE_COST
+  │                  │         │         │    ┌─ vtable: vt->cost_fn (Upper Op)  task.c:1149
+  │                  │         │         │    └─ switch: 其余 op
+  │                  │         │         │    → pg_group_update_best()
+  │                  │         │         │    → upper_bound_cost pruning
+  │                  │         │         └─ ENFORCE_COMPLETE
+  │                  │         │
+  │                  │         ├─ [8/8] pg_cascades_extract_best_plan()
+  │                  │         │    2-pass:
+  │                  │         │      Pass 0: COMPOSABLE_OP 优先
+  │                  │         │      Pass 1: IMPORTED_PATH 回退
+  │                  │         │    └─ pg_cascades_build_plan_recurse()
+  │                  │         │         ┌─ vtable: vt->build_plan_fn    planbuild.c:316
+  │                  │         │         └─ switch: IMPORTED_PATH scan/join
+  │                  │         │
+  │                  │         ├─ pg_cascades_validate_plan()
+  │                  │         ├─ pg_cascades_physical_rewrite()
+  │                  │         └─ copyObject(plan)+MemoryContextDelete
+  │                  │
+  │                  └─ [fallback] handle_status_or_error()
+  │                       → finish_query_planner_after_prepare()
+  │                       → PG 原生路径
+  │
+  └─ set_plan_references() → PlannedStmt → Executor
 ```
 
 ## Module System (vtable dispatch)
