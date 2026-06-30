@@ -314,6 +314,8 @@ pg_pre_memo_pullup_subqueries(PlannerInfo *root)
  * Phase 2: planner_hook — new entry point
  * ======================================================================== */
 
+static bool g_registry_initialized = false;
+
 /*
  * pg_cascades_planner_hook:
  *   planner() hook — Cascades independent entry point.
