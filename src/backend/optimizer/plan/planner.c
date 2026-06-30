@@ -324,7 +324,9 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * When Cascades is on, run pre-Memo rewrite rules instead of
 	 * PG SS_process_ctes/pull_up_sublinks/pull_up_subqueries.
 	 */
-	/* When Cascades is on, pre-memo rules+init handled by planner_hook */
+	/* Bootstrap: set planner_hook once so planner() routes to Cascades */
+	if (enable_cascades_planner && !planner_hook)
+		planner_hook = pg_cascades_planner_hook;
 
 	/*
 	 * Scan the rangetable for set-returning functions, and inline them if
