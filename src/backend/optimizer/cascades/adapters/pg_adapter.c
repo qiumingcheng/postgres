@@ -103,12 +103,23 @@ pg_determine_join_type(PlannerInfo *root, Relids left_relids, Relids right_relid
         /* Check if this SpecialJoinInfo exactly covers our children */
         if (bms_equal(sj->syn_lefthand, left_relids) &&
             bms_equal(sj->syn_righthand, right_relids))
+        {
+            /* Map SEMI/ANTI back to INNER: PG's make_one_rel
+             * doesn't generate paths for these, and Cascades
+             * handles them via InnerToSemi transform rules. */
+            if (sj->jointype == JOIN_SEMI || sj->jointype == JOIN_ANTI)
+                return JOIN_INNER;
             return sj->jointype;
+        }
 
         /* Also check swapped (RIGHT JOIN normalized to LEFT) */
         if (bms_equal(sj->syn_lefthand, right_relids) &&
             bms_equal(sj->syn_righthand, left_relids))
+        {
+            if (sj->jointype == JOIN_SEMI || sj->jointype == JOIN_ANTI)
+                return JOIN_INNER;
             return sj->jointype;
+        }
     }
 
     return JOIN_INNER;

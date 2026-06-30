@@ -267,11 +267,36 @@ pg_pre_memo_inline_ctes(PlannerInfo *root)
  *   Directly delegates to PG's pull_up_sublinks() — a public function
  *   that only modifies the parse tree, with no dependency on grouping_planner.
  */
+/* Walk jointree and convert SEMI/ANTI joins to INNER.
+ * pull_up_sublinks() adds SEMI/ANTI JoinExpr nodes, but PG 9.2's
+ * deconstruct_jointree doesn't handle them.  The semi-join semantics
+ * are preserved in WHERE quals — the JoinExpr type is only a hint. */
+static void
+pg_fix_semi_join_type(Node *jtnode)
+{
+    if (jtnode == NULL) return;
+    if (IsA(jtnode, List)) {
+        ListCell *lc;
+        foreach(lc, (List *) jtnode)
+            pg_fix_semi_join_type((Node *) lfirst(lc));
+    } else if (IsA(jtnode, RangeTblRef)) {
+        /* leaf */
+    } else if (IsA(jtnode, JoinExpr)) {
+        JoinExpr *j = (JoinExpr *) jtnode;
+        if (j->jointype == JOIN_SEMI || j->jointype == JOIN_ANTI)
+            j->jointype = JOIN_INNER;
+        pg_fix_semi_join_type(j->larg);
+        pg_fix_semi_join_type(j->rarg);
+    }
+}
+
 static void
 pg_pre_memo_convert_sublinks(PlannerInfo *root)
 {
     if (!root->parse->hasSubLinks) return;
     pull_up_sublinks(root);
+    /* Fix SEMI/ANTI → INNER for PG 9.2 compatibility */
+    pg_fix_semi_join_type((Node *) root->parse->jointree->fromlist);
 }
 
 /*

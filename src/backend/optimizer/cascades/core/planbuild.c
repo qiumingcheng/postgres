@@ -356,10 +356,11 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
             }
             break;
 
-        /* Upper ops (HASHAGG+) handled by vtable dispatch above */
+        /* Upper ops (HASHAGG+) handled by vtable dispatch above.
+         * If vtable returned NULL, return NULL to trigger fallback. */
 
         default:
-            elog(ERROR, "unexpected physical op kind in planbuild: %d", expr->op);
+            return NULL;
             break;
     }
 

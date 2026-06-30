@@ -783,3 +783,85 @@ extern Plan *pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
  * cascades internal files include it directly. */
 
 #endif /* CASCADES_H */
+
+/* ========================================================================
+ * Module transform function declarations (moved from rule.c)
+ * ======================================================================== */
+
+/* modules/scan.c */
+extern List *pg_rule_scan_to_seqscan(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_scan_to_indexscan(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_scan_to_bitmapheapscan(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_prune_empty_scan(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_pushdown_predicate_scan(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_prune_scan_columns(PgPlannerCascadesContext *, PgGroupExpr *);
+
+/* modules/filter.c */
+extern List *pg_rule_pushdown_predicate_project(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_pushdown_predicate_agg(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_pushdown_predicate_join(PgPlannerCascadesContext *, PgGroupExpr *);
+
+/* modules/join.c */
+extern List *pg_rule_join_to_nestloop(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_join_to_hashjoin(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_join_to_mergejoin(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_join_commutativity(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_merge_filter_with_join(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_merge_join_with_child_project(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_prune_empty_join(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_prune_join_columns(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_eliminate_join_with_constant(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_outer_join_elimination(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_join_associativity(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_join_left_asscom(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_inner_to_semi(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_join_to_hashjoin_phase4(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_join_to_nestloop_phase4(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_join_to_mergejoin_phase4(PgPlannerCascadesContext *, PgGroupExpr *);
+extern RelOptInfo *pg_rule_join_get_child_rel(PgPlannerCascadesContext *, PgMemoGroup *);
+
+/* modules/agg.c */
+extern List *pg_rule_agg_to_hashagg(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_agg_to_groupagg(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_merge_two_agg(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_prune_agg_columns(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_pushdown_agg_limit(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_eliminate_agg(PgPlannerCascadesContext *, PgGroupExpr *);
+extern bool pg_collect_var_attnos_walker(Node *, void *);
+extern void pg_collect_all_var_attnos(Node *, Bitmapset **);
+
+/* modules/sort.c */
+extern List *pg_rule_sort_to_physical_sort(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_eliminate_sort_with_constant_key(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_prune_sort_columns(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_enforce_sort(PgPlannerCascadesContext *, PgGroupExpr *);
+
+/* modules/limit.c */
+extern List *pg_rule_limit_to_physical_limit(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_merge_limit_with_sort(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_pushdown_limit_join(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_eliminate_limit(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_merge_limit_with_child_limit(PgPlannerCascadesContext *, PgGroupExpr *);
+
+/* modules/distinct.c */
+extern List *pg_rule_distinct_to_unique(PgPlannerCascadesContext *, PgGroupExpr *);
+
+/* modules/project.c */
+extern List *pg_rule_project_to_physical_project(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_merge_project_with_child(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_eliminate_project(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_prune_empty_union(PgPlannerCascadesContext *, PgGroupExpr *);
+extern List *pg_rule_prune_project_columns(PgPlannerCascadesContext *, PgGroupExpr *);
+
+/* ========================================================================
+ * Core internal function declarations
+ * ======================================================================== */
+extern void pg_cascades_validate_plan_recurse(Plan *, int);
+extern Plan *pg_cascades_physical_rewrite_recurse(PgPlannerCascadesContext *, Plan *);
+extern uint32 pg_memo_hash_key(const void *, Size);
+extern int pg_memo_match_key(const void *, const void *, Size);
+extern PgOptimizerTask *pg_task_clone(PgOptimizerTask *);
+extern PgBinder *pg_pattern_match_to_expr(PgPattern *, PgGroupExpr *);
+extern PgRuleTransformFn pg_rewrite_lookup_transform(const char *, PgCascadesOpKind *);
+extern bool pg_rewrite_apply_rules_to_expr(PgPlannerCascadesContext *, PgMemoGroup *, PgGroupExpr *, PgRewriteRule *, int);
+extern bool pg_rewrite_apply_rules_recursive(PgPlannerCascadesContext *, PgMemoGroup *, PgRewriteRule *, int);

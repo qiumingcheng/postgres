@@ -19,7 +19,7 @@ pg_build_limit_fn(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
     /* Pass 1: prefer COMPOSABLE_OP */
     foreach(lc,child_group->best_entries){PgGroupBestEntry*e=(PgGroupBestEntry*)lfirst(lc);if(best->child_required_props!=NIL&&e->expr->mode==PG_PHYS_EXPR_COMPOSABLE_OP&&pg_required_property_equal(e->required,pg_safe_linitial_child_req(best))){child_best=e;break;}}
     if(child_best==NULL){foreach(lc,child_group->best_entries){PgGroupBestEntry*e=(PgGroupBestEntry*)lfirst(lc);if(best->child_required_props!=NIL&&pg_required_property_equal(e->required,pg_safe_linitial_child_req(best))){child_best=e;break;}}}
-    if(child_best==NULL)return NULL;
+    if(child_best==NULL)child_best=(PgGroupBestEntry*)linitial(child_group->best_entries);
     child=pg_cascades_build_plan_recurse(ctx,child_group,pg_safe_linitial_child_req(best),child_best,&child_out);
     if(child==NULL)return NULL;
     *output=best->output;
