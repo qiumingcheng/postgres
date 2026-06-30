@@ -470,19 +470,7 @@ pg_cascades_planner_hook(Query *parse, int cursorOptions,
  * pg_cascades_ensure_hook:
  *   Lazy-init: register the planner_hook on first Cascades query.
  *   Called from subquery_planner when enable_cascades_planner is on.
- *   Safe to call multiple times (static guard).
- */
-
-/*
- * pg_cascades_register_hook:
- *   Explicit registration (for use in _PG_init when available).
- */
-void
-pg_cascades_register_hook(void)
-{
-    planner_hook = pg_cascades_planner_hook;
-    g_hook_registered = true;
-}
+/* Hook registration is now inline in pg_cascades_planner_hook(). */
 
 /*
  * pg_cascades_optimize:
