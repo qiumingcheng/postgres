@@ -176,20 +176,23 @@ pg_rule_prune_scan_columns(PgPlannerCascadesContext *ctx, PgGroupExpr *expr)
     }
 
     /*
-     * Safety check for multi-table joins with ORDER BY + LIMIT:
-     * Disable column pruning entirely to avoid missing intermediate join keys.
-     * This is a conservative approach for the edge case of 3+ table joins.
+     * Safety check for multi-table joins (3+ tables):
+     * Disable column pruning entirely to avoid missing tables/columns.
+     *
+     * Root cause: In multi-table joins, PostgreSQL's attr_needed bitmaps may not
+     * be fully populated for all base relations, especially the third+ tables.
+     * This can cause PruneScanColumns to incorrectly determine that a table's
+     * columns are not needed, leading to missing tables in the final plan.
+     *
+     * Conservative approach: disable pruning for any query with 3+ base relations.
      */
-    if (rel->has_eclass_joins &&
-        ctx->root->parse->sortClause != NIL &&
-        ctx->root->parse->limitCount != NULL)
     {
         int num_rels = bms_num_members(ctx->root->all_baserels);
 
         if (num_rels >= 3)
         {
             CASCADES_DEBUG(ctx->debug, "Cascades: PruneScanColumns disabled for "
-                     "multi-table join (n=%d) with ORDER+LIMIT to preserve join keys",
+                     "multi-table join (n=%d) to preserve all tables and columns",
                      num_rels);
 
             bms_free(needed);

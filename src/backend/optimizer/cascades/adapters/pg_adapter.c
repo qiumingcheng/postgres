@@ -176,14 +176,21 @@ pg_cascades_build_join_tree(PgPlannerCascadesContext *ctx, List *joinlist)
         Node       *jlnode = (Node *) lfirst(lc);
         PgGroupExpr *child;
 
+        CASCADES_DEBUG(ctx->debug, "CASCADES: build_join_tree processing element (result=%s)",
+                     result == NULL ? "NULL" : "exists");
+
         if (IsA(jlnode, RangeTblRef))
         {
             RangeTblRef *rtr = (RangeTblRef *) jlnode;
             RelOptInfo  *rel = ctx->root->simple_rel_array[rtr->rtindex];
 
             if (rel == NULL)
+            {
+                CASCADES_DEBUG(ctx->debug, "  - RangeTblRef rtindex=%d: rel is NULL, skipping", rtr->rtindex);
                 continue;
+            }
 
+            CASCADES_DEBUG(ctx->debug, "  - RangeTblRef rtindex=%d: creating Scan", rtr->rtindex);
             child = pg_memo_new_group_expr(ctx, PG_CASCADES_LOGICAL_SCAN);
             child->inputs = NIL;
             child->op_private = rel;
@@ -198,10 +205,14 @@ pg_cascades_build_join_tree(PgPlannerCascadesContext *ctx, List *joinlist)
         }
 
         if (child == NULL)
+        {
+            CASCADES_DEBUG(ctx->debug, "  - child is NULL, skipping");
             continue;
+        }
 
         if (result == NULL)
         {
+            CASCADES_DEBUG(ctx->debug, "  - result is NULL, setting result = child");
             result = child;
         }
         else
@@ -211,6 +222,8 @@ pg_cascades_build_join_tree(PgPlannerCascadesContext *ctx, List *joinlist)
             PgJoinPrivate *jp;
             Relids left_relids;
             Relids right_relids;
+
+            CASCADES_DEBUG(ctx->debug, "  - result exists, creating Join(result, child)");
 
             /* Determine actual join type from PG's SpecialJoinInfo */
             left_relids = pg_get_tree_relids(result);
@@ -255,6 +268,33 @@ pg_cascades_build_initial_tree(PgPlannerCascadesContext *ctx)
 {
     PgCascadesUpperInfo *upper = ctx->upper;
     PgGroupExpr *current = NULL;
+    ListCell *lc;
+    int joinlist_len = 0;
+
+    /* Debug: log joinlist structure */
+    if (ctx->prep->joinlist != NIL)
+    {
+        joinlist_len = list_length(ctx->prep->joinlist);
+        CASCADES_DEBUG(ctx->debug, "CASCADES: joinlist has %d elements", joinlist_len);
+
+        foreach(lc, ctx->prep->joinlist)
+        {
+            Node *jlnode = (Node *) lfirst(lc);
+            if (IsA(jlnode, RangeTblRef))
+            {
+                RangeTblRef *rtr = (RangeTblRef *) jlnode;
+                CASCADES_DEBUG(ctx->debug, "  - RangeTblRef rtindex=%d", rtr->rtindex);
+            }
+            else if (IsA(jlnode, List))
+            {
+                CASCADES_DEBUG(ctx->debug, "  - Nested List (length=%d)", list_length((List *)jlnode));
+            }
+            else
+            {
+                CASCADES_DEBUG(ctx->debug, "  - Unknown node type=%d", (int)nodeTag(jlnode));
+            }
+        }
+    }
 
     /* Phase 7: Build join tree from joinlist */
     current = pg_cascades_build_join_tree(ctx, ctx->prep->joinlist);
@@ -302,13 +342,20 @@ pg_cascades_build_initial_tree(PgPlannerCascadesContext *ctx)
         current = sort;
     }
 
-    /* LogicalLimit (always present — D3 may eliminate it) */
+    /* LogicalLimit (only if query has LIMIT clause) */
+    if (ctx->root->parse->limitCount != NULL || ctx->root->parse->limitOffset != NULL)
     {
         PgGroupExpr *limit = pg_memo_new_group_expr(ctx,
                                 PG_CASCADES_LOGICAL_LIMIT);
         limit->inputs = list_make1(current);
         limit->op_private = upper;
         current = limit;
+
+        CASCADES_DEBUG(ctx->debug, "CASCADES: LogicalLimit created (has LIMIT clause)");
+    }
+    else
+    {
+        CASCADES_DEBUG(ctx->debug, "CASCADES: LogicalLimit skipped (no LIMIT clause)");
     }
 
     return current;

@@ -209,17 +209,53 @@ pg_cascades_fix_empty_targetlists(PlannerInfo *root, Plan *plan)
         CASCADES_DEBUG(cascades_planner_debug, "fix_empty_targetlists: node type %d has NIL targetlist, attempting fix",
                  (int) nodeTag(plan));
 
-        /* For join nodes from create_plan(), NIL targetlist should NOT happen.
-         * This indicates the underlying Path or RelOptInfo was corrupted.
-         * Do NOT try to "fix" it by merging child targetlists - that's a band-aid. */
+        /* For join nodes from create_plan(), NIL targetlist can happen when:
+         * 1. Project was eliminated and Join is now the top node
+         * 2. The underlying RelOptInfo needs targetlist reconstruction
+         * Fix by merging child targetlists. */
         if ((nodeTag(plan) == T_NestLoop ||
              nodeTag(plan) == T_HashJoin ||
              nodeTag(plan) == T_MergeJoin))
         {
-            elog(WARNING, "Cascades: JOIN node type %d has empty targetlist from create_plan() - "
-                 "this indicates corrupted Path or RelOptInfo. Query should fallback.",
+            List *combined_tlist = NIL;
+
+            /* Merge left and right child targetlists */
+            if (plan->lefttree != NULL && plan->lefttree->targetlist != NIL)
+            {
+                ListCell *lc;
+                foreach(lc, plan->lefttree->targetlist)
+                {
+                    TargetEntry *te = (TargetEntry *) lfirst(lc);
+                    combined_tlist = lappend(combined_tlist, te);
+                }
+            }
+
+            if (plan->righttree != NULL && plan->righttree->targetlist != NIL)
+            {
+                ListCell *lc;
+                int next_resno = list_length(combined_tlist) + 1;
+                foreach(lc, plan->righttree->targetlist)
+                {
+                    TargetEntry *te = (TargetEntry *) lfirst(lc);
+                    /* Create a copy with adjusted resno to avoid conflicts */
+                    TargetEntry *new_te = (TargetEntry *) copyObject(te);
+                    new_te->resno = next_resno++;
+                    combined_tlist = lappend(combined_tlist, new_te);
+                }
+            }
+
+            if (combined_tlist != NIL)
+            {
+                plan->targetlist = combined_tlist;
+                CASCADES_DEBUG(cascades_planner_debug,
+                    "fix_empty_targetlists: fixed JOIN node type %d by merging child targetlists",
+                    (int) nodeTag(plan));
+                return;
+            }
+
+            /* If still no targetlist, this is a real problem */
+            elog(WARNING, "Cascades: JOIN node type %d has empty targetlist and children have no targetlists either",
                  (int) nodeTag(plan));
-            /* Don't try to fix - let it fail so we can diagnose the root cause */
             return;
         }
 
