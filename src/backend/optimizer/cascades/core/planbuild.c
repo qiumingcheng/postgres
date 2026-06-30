@@ -8,6 +8,7 @@
 #include "optimizer/cascades.h"
 #include "optimizer/planmain.h"
 #include "core/registry.h"
+#include "core/registry.h"
 #include "optimizer/planner.h"
 #include "optimizer/tlist.h"
 #include "optimizer/paths.h"
