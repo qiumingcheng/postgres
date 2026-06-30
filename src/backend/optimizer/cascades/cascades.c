@@ -396,6 +396,15 @@ pg_cascades_planner_hook(Query *parse, int cursorOptions,
     root->non_recursive_plan = NULL;
     root->hasJoinRTEs = false;
 
+    /* ---- 2.5. Early check for unsupported features (before pre-memo rules) ---- */
+    if (parse->hasSubLinks)
+    {
+        /* Subqueries not yet supported - fallback to standard planner */
+        CASCADES_DEBUG(cascades_planner_debug,
+                      "CASCADES: Fallback - query contains subqueries (hasSubLinks=true)");
+        return standard_planner(parse, cursorOptions, boundParams);
+    }
+
     /* ---- 3. Pre-Memo rewrite rules (Phase 0-4) ---- */
     pg_cascades_run_pre_memo_rules(root);
 
@@ -482,64 +491,46 @@ pg_cascades_optimize(PlannerInfo *root,
 }
 
 /* ========================================================================
- * SubPlan 检测 (Phase 6b: 区分 correlated vs uncorrelated)
+ * SubPlan 检测
  * ======================================================================== */
 
 /*
- * pg_cascades_contains_correlated_subplan:
- *   Walk expression tree looking for SubPlan nodes that are CORRELATED
- *   (parParam != NIL, meaning they reference outer query variables).
+ * pg_cascades_contains_subplan_walker:
+ *   Walk expression tree looking for ANY SubPlan nodes.
  *
- *   Uncorrelated SubPlans (initPlans, setParam != NIL, parParam == NIL)
- *   are safe — they execute once and return a constant.  The Cascades
- *   planner can treat them as opaque constants in the expression tree.
+ *   Current limitation: Cascades optimizer does not properly handle SubPlans
+ *   in the execution plan, causing crashes when the plan is executed.
  *
- *   Only correlated SubPlans cause fallback, since they would need
- *   decorrelation to be properly optimized in the Memo.
+ *   Solution: Detect any SubPlan and trigger fallback to standard planner.
+ *
+ *   Future work: Properly support SubPlans by handling them in plan building.
  */
 static bool
-pg_cascades_contains_correlated_subplan_walker(Node *node, void *context)
+pg_cascades_contains_subplan_walker(Node *node, void *context)
 {
     if (node == NULL)
         return false;
 
     if (IsA(node, SubPlan))
     {
-        SubPlan *sp = (SubPlan *) node;
-
-        /* Correlated: parParam is non-empty (references outer vars) */
-        if (sp->parParam != NIL)
-            return true;
-
-        /* Uncorrelated initPlan — safe, continue walking */
-        return expression_tree_walker(node,
-                                       pg_cascades_contains_correlated_subplan_walker,
-                                       context);
+        /* Any SubPlan causes fallback for now */
+        return true;
     }
     else if (IsA(node, AlternativeSubPlan))
     {
-        /* AlternativeSubPlan wraps two SubPlans; check both */
-        AlternativeSubPlan *asp = (AlternativeSubPlan *) node;
-        ListCell *lc;
-
-        foreach(lc, asp->subplans)
-        {
-            SubPlan *sp = (SubPlan *) lfirst(lc);
-            if (sp->parParam != NIL)
-                return true;
-        }
-        return false;
+        /* AlternativeSubPlan wraps SubPlans - also causes fallback */
+        return true;
     }
 
     return expression_tree_walker(node,
-                                   pg_cascades_contains_correlated_subplan_walker,
+                                   pg_cascades_contains_subplan_walker,
                                    context);
 }
 
 static bool
-pg_cascades_contains_correlated_subplan(Node *node)
+pg_cascades_contains_subplan(Node *node)
 {
-    return pg_cascades_contains_correlated_subplan_walker(node, NULL);
+    return pg_cascades_contains_subplan_walker(node, NULL);
 }
 
 /* ========================================================================
@@ -576,11 +567,24 @@ pg_cascades_supported_query_precheck(PlannerInfo *root,
         return PG_CASCADES_UNSUPPORTED;
     if (root->minmax_aggs != NIL)
         return PG_CASCADES_UNSUPPORTED;
+
     /*
-     * Correlated SubPlans are opaque expression nodes handled by PG's
-     * create_plan() natively.  Cascades processes the rest of the query
-     * (joins, filters, aggregates) and delegates SubPlan extraction to PG.
+     * SubPlan detection: Cascades optimizer currently does not properly handle
+     * SubPlans (subqueries converted to execution nodes), causing crashes.
+     *
+     * Check for SubPlans in WHERE clause and HAVING clause.
+     * If found, fallback to standard planner.
+     *
+     * Note: At this precheck stage, SubLinks have not been converted to SubPlans yet,
+     * so we check parse->hasSubLinks flag.
      */
+    if (parse->hasSubLinks)
+    {
+        CASCADES_DEBUG(cascades_planner_debug,
+                      "CASCADES: Fallback - query contains subqueries (hasSubLinks=true)");
+        return PG_CASCADES_UNSUPPORTED_SUBPLAN;
+    }
+
     return PG_CASCADES_OK;
 }
 
