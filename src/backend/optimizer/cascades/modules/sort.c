@@ -77,13 +77,15 @@ pg_build_sort_fn(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
 
     *output = best->output;
     {
-        PgSortPrivate *sp = (PgSortPrivate *) expr->op_private;
-        double lt = (sp && sp->limit_tuples > 0) ? sp->limit_tuples
+        double lt = (ctx->upper->limit_tuples > 0) ? ctx->upper->limit_tuples
                     : required->limit_tuples;
         child = (Plan *) make_sort_from_pathkeys(ctx->root, child,
                     required->pathkeys, lt);
         if (lt > 0)
-            child = (Plan *) make_limit(child, NULL, NULL, 0, lt);
+            child = (Plan *) make_limit(child,
+                ctx->root->parse->limitOffset,
+                ctx->root->parse->limitCount,
+                ctx->upper->offset_est, lt);
     }
     return child;
 }
