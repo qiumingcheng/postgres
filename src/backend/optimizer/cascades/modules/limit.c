@@ -29,7 +29,41 @@ pg_build_limit_fn(PgPlannerCascadesContext *ctx, PgMemoGroup *group,
 List *pg_rule_limit_to_physical_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr){PgGroupExpr *r=pg_memo_new_group_expr(ctx,PG_CASCADES_PHYSICAL_LIMIT);r->mode=PG_PHYS_EXPR_COMPOSABLE_OP;r->inputs=expr->inputs;r->op_private=ctx->upper;return list_make1(r);}
 List *pg_rule_merge_limit_with_sort(PgPlannerCascadesContext *ctx, PgGroupExpr *expr){PgGroupExpr *se=pg_memo_group_first_logical((PgMemoGroup*)linitial(expr->inputs),PG_CASCADES_LOGICAL_SORT);if(se==NULL||ctx->upper->limit_tuples<=0)return NIL;PgSortPrivate *sp=(PgSortPrivate*)palloc(sizeof(PgSortPrivate));sp->pathkeys=(List*)se->op_private;sp->limit_tuples=ctx->upper->limit_tuples;PgGroupExpr *r=pg_memo_new_group_expr(ctx,PG_CASCADES_LOGICAL_SORT);r->inputs=se->inputs;r->op_private=sp;return list_make1(r);}
 List *pg_rule_pushdown_limit_join(PgPlannerCascadesContext *ctx, PgGroupExpr *expr){PgGroupExpr *je=pg_memo_group_first_logical((PgMemoGroup*)linitial(expr->inputs),PG_CASCADES_LOGICAL_JOIN);if(je==NULL)return NIL;PgJoinPrivate *jp=(PgJoinPrivate*)je->op_private;if(jp==NULL||jp->jointype!=JOIN_INNER||ctx->upper->limit_tuples<=0)return NIL;PgGroupExpr *lo=pg_memo_new_group_expr(ctx,PG_CASCADES_LOGICAL_LIMIT);lo->inputs=list_make1(linitial(je->inputs));lo->op_private=ctx->upper;PgGroupExpr *li=pg_memo_new_group_expr(ctx,PG_CASCADES_LOGICAL_LIMIT);li->inputs=list_make1(lsecond(je->inputs));li->op_private=ctx->upper;PgGroupExpr *nj=pg_memo_new_group_expr(ctx,PG_CASCADES_LOGICAL_JOIN);nj->inputs=list_make2(linitial(je->inputs),lsecond(je->inputs));nj->op_private=jp;return list_make3(lo,li,nj);}
-List *pg_rule_eliminate_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr){Query *p=ctx->root->parse;if(p->limitCount!=NULL||p->limitOffset!=NULL)return NIL;PgMemoGroup *cg=(PgMemoGroup*)linitial(expr->inputs);if(cg==NULL||cg==expr->owner_group)return NIL;pg_memo_merge_group(ctx,expr->owner_group,cg);expr->owner_group->logical_exprs=list_delete_ptr(expr->owner_group->logical_exprs,expr);return NIL;}
+List *pg_rule_eliminate_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr){
+    Query *p=ctx->root->parse;
+    PgMemoGroup *child_group;
+    PgGroupExpr *child_expr;
+    PgGroupExpr *new_expr;
+    ListCell *lc;
+
+    if(p->limitCount!=NULL||p->limitOffset!=NULL)
+        return NIL;
+
+    child_group = (PgMemoGroup*)linitial(expr->inputs);
+    if(child_group == NULL || child_group == expr->owner_group)
+        return NIL;
+
+    /* Instead of merging groups (which breaks references in complex join trees),
+     * create a new expression that bypasses the Limit by directly referencing
+     * the child's child.
+     *
+     * For example: Limit(Project(Join)) → return Project's expression
+     * This allows the rewrite framework to naturally replace Limit with Project.
+     */
+    if (child_group->logical_exprs == NIL)
+        return NIL;
+
+    /* Get the first logical expression from the child group */
+    child_expr = (PgGroupExpr *) linitial(child_group->logical_exprs);
+
+    /* Create a copy of the child expression to insert into the Limit's group */
+    new_expr = pg_memo_new_group_expr(ctx, child_expr->op);
+    new_expr->inputs = list_copy(child_expr->inputs);
+    new_expr->op_private = child_expr->op_private;
+    new_expr->mode = child_expr->mode;
+
+    return list_make1(new_expr);
+}
 List *pg_rule_merge_limit_with_child_limit(PgPlannerCascadesContext *ctx, PgGroupExpr *expr){PgMemoGroup *cg=(PgMemoGroup*)linitial(expr->inputs);PgGroupExpr *il=NULL;ListCell *lc;foreach(lc,cg->logical_exprs){PgGroupExpr *e=(PgGroupExpr*)lfirst(lc);if(e->op==PG_CASCADES_LOGICAL_LIMIT){il=e;break;}}if(il==NULL)return NIL;PgGroupExpr *r=pg_memo_new_group_expr(ctx,PG_CASCADES_LOGICAL_LIMIT);r->inputs=il->inputs;r->op_private=expr->op_private;return list_make1(r);}
 
 void pg_module_limit_init(void){pg_registry_register_operator(&(PgOperatorVtable){.op=PG_CASCADES_PHYSICAL_LIMIT,.name="Limit",.cost_fn=pg_cost_limit_fn,.build_plan_fn=pg_build_limit_fn});pg_registry_register_rule(PG_RULE_MEMO_IMPL,"LogicalLimit→PhysicalLimit",PG_CASCADES_LOGICAL_LIMIT,PG_CASCADES_PHYSICAL_LIMIT,g_pat_leaf1,pg_rule_limit_to_physical_limit,1.0,PG_RULE_BIT_LIMIT_TO_LIMIT);pg_registry_register_rule(PG_RULE_MEMO_TRANSFORM,"MergeLimitWithSort",PG_CASCADES_LOGICAL_LIMIT,0,g_pat_limit_sort_leaf,pg_rule_merge_limit_with_sort,0.7,PG_RULE_BIT_MERGE_LIMIT_SORT);pg_registry_register_rule(PG_RULE_MEMO_TRANSFORM,"PushDownLimitJoin",PG_CASCADES_LOGICAL_LIMIT,0,g_pat_limit_join_leaf_leaf,pg_rule_pushdown_limit_join,0.4,PG_RULE_BIT_PUSHDOWN_LIMIT_JOIN);pg_registry_register_rule(PG_RULE_MEMO_TRANSFORM,"EliminateLimit",PG_CASCADES_LOGICAL_LIMIT,0,NULL,pg_rule_eliminate_limit,0.6,PG_RULE_BIT_ELIMINATE_LIMIT);pg_registry_register_rule(PG_RULE_MEMO_TRANSFORM,"MergeLimitWithChildLimit",PG_CASCADES_LOGICAL_LIMIT,0,NULL,pg_rule_merge_limit_with_child_limit,0.45,PG_RULE_BIT_MERGE_LIMIT_CHILD_LIMIT);}
