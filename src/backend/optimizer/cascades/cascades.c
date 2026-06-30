@@ -326,7 +326,7 @@ static bool g_registry_initialized = false;
  *   Does NOT delegate to standard_planner().  Fallback calls
  *   standard_planner() as a black box.
  */
-static PlannedStmt *
+PlannedStmt *
 pg_cascades_planner_hook(Query *parse, int cursorOptions,
                          ParamListInfo boundParams)
 {

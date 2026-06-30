@@ -617,6 +617,7 @@ extern PgCascadesStatus pg_cascades_try_grouping_planner(
     PlannerInfo *root, QueryPlannerPrepResult *prep,
     PgCascadesUpperInfo *upper, Plan **plan);  /* legacy alias */
 extern void pg_cascades_ensure_hook(void);
+extern PlannedStmt *pg_cascades_planner_hook(Query *parse, int cursorOptions, ParamListInfo boundParams);
 extern void pg_cascades_run_pre_memo_rules(PlannerInfo *root);
 
 /* PG functions exposed for Cascades hook (were static in planner.c) */
