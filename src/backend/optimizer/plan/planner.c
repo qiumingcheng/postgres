@@ -120,6 +120,10 @@ planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 {
 	PlannedStmt *result;
 
+	/* Cascades bootstrap: register hook once */
+	if (enable_cascades_planner && !planner_hook)
+		planner_hook = pg_cascades_planner_hook;
+
 	if (planner_hook)
 		result = (*planner_hook) (parse, cursorOptions, boundParams);
 	else
@@ -324,9 +328,6 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 * When Cascades is on, run pre-Memo rewrite rules instead of
 	 * PG SS_process_ctes/pull_up_sublinks/pull_up_subqueries.
 	 */
-	/* Bootstrap: set planner_hook once so planner() routes to Cascades */
-	if (enable_cascades_planner && !planner_hook)
-		planner_hook = pg_cascades_planner_hook;
 
 	/*
 	 * Scan the rangetable for set-returning functions, and inline them if
