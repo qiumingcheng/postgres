@@ -270,15 +270,17 @@ generate_partitions(Bitmapset *tables)
 	int			num_tables = bms_num_members(tables);
 	int		   *table_ids;
 	int			idx = 0;
-	int			table_id = -1;
 	long		max_mask;
 	long		mask;
+	Bitmapset  *tmpset;
 
 	/* 提取所有表ID */
 	table_ids = (int *) palloc(num_tables * sizeof(int));
-	while ((table_id = bms_next_member(tables, table_id)) >= 0)
+	tmpset = bms_copy(tables);
+	while (!bms_is_empty(tmpset))
 	{
-		table_ids[idx++] = table_id;
+		int x = bms_first_member(tmpset);
+		table_ids[idx++] = x;
 	}
 
 	/* 枚举所有非空真子集 */
@@ -402,14 +404,15 @@ static uint32
 bitmapset_hash_func(const void *key, Size keysize)
 {
 	const MemoHashKey *mkey = (const MemoHashKey *) key;
-	Bitmapset  *bms = mkey->tables;
+	Bitmapset  *bms = bms_copy(mkey->tables);
 	uint32		hash = 0;
-	int			x = -1;
 
-	while ((x = bms_next_member(bms, x)) >= 0)
+	while (!bms_is_empty(bms))
 	{
+		int x = bms_first_member(bms);
 		hash = hash * 31 + x;
 	}
+	bms_free(bms);
 
 	return hash;
 }
