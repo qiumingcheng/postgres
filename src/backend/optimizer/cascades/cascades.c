@@ -809,6 +809,16 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [3/12] make_one_rel OK (final_rel rows=%.0f width=%d)",
              prep->final_rel->rows, prep->final_rel->width);
 
+    /* Initialize upper_bound_cost from make_one_rel's cheapest path
+     * This provides a baseline for cost-based pruning in Cascades */
+    if (prep->final_rel->cheapest_total_path != NULL)
+    {
+        ctx.upper_bound_cost = prep->final_rel->cheapest_total_path->total_cost;
+        CASCADES_DEBUG(cascades_planner_debug,
+                 "CASCADES: Initialized upper_bound_cost = %.2f from make_one_rel",
+                 ctx.upper_bound_cost);
+    }
+
     /* 6. Build Memo from Query tree (StarRocks: Memo.init) */
     pg_memo_init_from_tree(&ctx);
 

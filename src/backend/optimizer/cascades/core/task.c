@@ -823,14 +823,13 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
 
         /* Phase 4: upper-bound pruning
          *
-         * Fix for 3-table JOIN issue: Use relaxed bound (10x) to prevent
-         * intermediate JOIN groups from being pruned too aggressively.
-         * This allows plans with temporarily high costs to still be considered.
+         * MODIFIED: Removed 10x relaxation for strict pruning (StarRocks style)
+         * Direct use of upper_bound_cost for better pruning efficiency
          */
         double effective_bound = ctx->upper_bound_cost;
 
-        if (ctx->upper_bound_cost > 0)
-            effective_bound = ctx->upper_bound_cost * 10.0;
+        /* Removed: if (ctx->upper_bound_cost > 0)
+         *     effective_bound = ctx->upper_bound_cost * 10.0; */
 
         if (effective_bound > 0 && path->total_cost > effective_bound)
             return PG_CASCADES_OK;
@@ -932,11 +931,11 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         entry->child_required_props = NIL;
         entry->output = output;
 
-        /* Upper-bound pruning (relaxed 10x for all groups) */
+        /* Upper-bound pruning - MODIFIED: strict pruning without relaxation */
         double effective_bound = ctx->upper_bound_cost;
 
-        if (ctx->upper_bound_cost > 0)
-            effective_bound = ctx->upper_bound_cost * 10.0;
+        /* Removed: if (ctx->upper_bound_cost > 0)
+         *     effective_bound = ctx->upper_bound_cost * 10.0; */
 
         if (effective_bound > 0 && entry->total_cost > effective_bound)
             return PG_CASCADES_OK;
