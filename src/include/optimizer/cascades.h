@@ -574,6 +574,10 @@ extern int  cascades_planner_timeout_ms;
 extern int  cascades_planner_max_groups;
 extern int  cascades_planner_max_tasks;
 
+/* DP join reorder GUC parameters */
+extern bool cascades_enable_dp_join_reorder;
+extern int  cascades_max_reorder_node_use_dp;
+
 /*
  * CASCADES_DEBUG — Cascades trace macro, gated by a debug flag.
  *

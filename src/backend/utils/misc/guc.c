@@ -794,6 +794,15 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
+		{"cascades_enable_dp_join_reorder", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Enable Cascades DP join reorder with 4-layer pruning."),
+			NULL
+		},
+		&cascades_enable_dp_join_reorder,
+		false,
+		NULL, NULL, NULL
+	},
+	{
 		{"geqo", PGC_USERSET, QUERY_TUNING_GEQO,
 			gettext_noop("Enables genetic query optimization."),
 			gettext_noop("This algorithm attempts to do planning without "
@@ -2433,6 +2442,15 @@ static struct config_int ConfigureNamesInt[] =
 		},
 		&cascades_planner_max_tasks,
 		100000, 0, INT_MAX,
+		NULL, NULL, NULL
+	},
+	{
+		{"cascades_max_reorder_node_use_dp", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Maximum number of tables for DP join reorder."),
+			NULL
+		},
+		&cascades_max_reorder_node_use_dp,
+		10, 2, 15,
 		NULL, NULL, NULL
 	},
 

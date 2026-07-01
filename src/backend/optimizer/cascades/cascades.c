@@ -20,6 +20,10 @@
 #include "catalog/pg_class.h"
 #include "miscadmin.h"
 
+/* DP join reorder modules */
+#include "optimizer/cascades/reorder/multijoin.h"
+#include "optimizer/cascades/reorder/dp_enum.h"
+
 /* ========================================================================
  * GUC 变量定义
  * ======================================================================== */
@@ -30,6 +34,10 @@ bool cascades_planner_fallback_on_error = false;
 int  cascades_planner_timeout_ms = 0;
 int  cascades_planner_max_groups = 10000;
 int  cascades_planner_max_tasks = 100000;
+
+/* DP join reorder GUC variables */
+bool cascades_enable_dp_join_reorder = false;
+int  cascades_max_reorder_node_use_dp = 10;
 
 /* Forward declarations for pre-memo rule functions */
 static void pg_pre_memo_init_flags(PlannerInfo *root);
@@ -42,6 +50,9 @@ static void pg_pre_memo_reduce_oj(PlannerInfo *root);
 static void pg_pre_memo_inline_ctes(PlannerInfo *root);
 static void pg_pre_memo_convert_sublinks(PlannerInfo *root);
 static void pg_pre_memo_pullup_subqueries(PlannerInfo *root);
+
+/* Forward declaration for DP join reorder */
+static bool has_inner_join_tree(PlannerInfo *root, List *joinlist);
 
 /* ========================================================================
  * Phase 2: Pre-Memo Rewrite Rules
@@ -779,6 +790,57 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
         {
             MemoryContext save_cxt = MemoryContextSwitchTo(old_cxt);
 
+            /* Try Cascades DP join reorder before make_one_rel */
+            if (cascades_enable_dp_join_reorder &&
+                has_inner_join_tree(root, prep->joinlist))
+            {
+                PgMultiJoinNode *mjn = NULL;
+                PgGroupInfo *best_group = NULL;
+
+                PG_TRY();
+                {
+                    /* Extract MultiJoinNode from jointree */
+                    if (root->parse->jointree != NULL)
+                    {
+                        mjn = pg_multijoin_extract(root, (Node *) root->parse->jointree);
+
+                        if (mjn != NULL &&
+                            pg_multijoin_can_reorder(mjn) &&
+                            mjn->num_tables >= 2 &&
+                            mjn->num_tables <= cascades_max_reorder_node_use_dp)
+                        {
+                            elog(DEBUG1, "CASCADES: Attempting DP join reorder for %d tables",
+                                 mjn->num_tables);
+
+                            /* Execute DP enumeration */
+                            best_group = pg_join_reorder_dp(root, mjn);
+
+                            if (best_group != NULL)
+                            {
+                                elog(NOTICE, "CASCADES: DP join reorder succeeded: "
+                                     "cost=%.2f, rows=%.0f for %d tables",
+                                     best_group->cost, best_group->rows, mjn->num_tables);
+
+                                /* TODO: Convert best_group to actual execution plan */
+                                /* For now, we still fallback to make_one_rel */
+                            }
+                        }
+
+                        if (mjn != NULL)
+                            pg_multijoin_free(mjn);
+                    }
+                }
+                PG_CATCH();
+                {
+                    /* DP failed, cleanup and fallback to make_one_rel */
+                    elog(WARNING, "CASCADES: DP join reorder failed, falling back to standard planner");
+                    if (mjn != NULL)
+                        pg_multijoin_free(mjn);
+                    FlushErrorState();  /* Clear error, continue with make_one_rel */
+                }
+                PG_END_TRY();
+            }
+
             PG_TRY();
             {
                 final_rel = make_one_rel(root, prep->joinlist);
@@ -949,4 +1011,24 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
     CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [12/12] ====== END optimization (status=%d) ======", status);
 
     return status;
+}
+
+/* ========================================================================
+ * DP Join Reorder Helper Functions
+ * ======================================================================== */
+
+/*
+ * has_inner_join_tree - 检测是否有inner join树
+ */
+static bool
+has_inner_join_tree(PlannerInfo *root, List *joinlist)
+{
+	if (joinlist == NULL)
+		return false;
+	
+	/* 简单检查：至少2个join项 */
+	if (list_length(joinlist) < 2)
+		return false;
+	
+	return true;
 }

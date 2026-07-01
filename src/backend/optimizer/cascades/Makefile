@@ -10,7 +10,8 @@ OBJS = cascades.o debug.o postopt.o \
        adapters/pg_adapter.o adapters/pg_plan.o adapters/pg_stats.o \
        modules/scan.o modules/filter.o modules/join.o \
        modules/agg.o modules/sort.o modules/limit.o \
-       modules/distinct.o modules/project.o modules/union.o
+       modules/distinct.o modules/project.o modules/union.o \
+       reorder/multijoin.o reorder/joinorder.o reorder/dp_enum.o
 
 # Add cascades/ to include path so .c files can #include "core/registry.h"
 override CPPFLAGS += -I$(srcdir)
