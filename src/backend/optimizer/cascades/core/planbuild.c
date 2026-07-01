@@ -117,6 +117,54 @@ pg_cascades_extract_best_plan(PgPlannerCascadesContext *ctx)
     }
 
     /*
+     * Pass 2: Emergency fallback - if both passes failed, try ANY IMPORTED_PATH
+     * in physical_exprs, regardless of cost or best_entries.
+     * This handles cases where Task Scheduler chose a COMPOSABLE_OP that can't
+     * be built (e.g., MergeJoin when DP didn't generate MergeJoin path).
+     */
+    if (result == NULL)
+    {
+        ListCell *pe;
+        elog(NOTICE, "PLANBUILD_TRACE: Both passes failed, trying emergency fallback to any IMPORTED_PATH");
+
+        foreach(pe, root_group->physical_exprs)
+        {
+            PgGroupExpr *expr = (PgGroupExpr *) lfirst(pe);
+
+            if (expr->mode != PG_PHYS_EXPR_IMPORTED_PATH)
+                continue;
+
+            /* Skip scan-only paths if upper operations exist */
+            if (expr->op <= PG_CASCADES_PHYSICAL_BITMAP_HEAPSCAN)
+            {
+                bool has_upper = false;
+                ListCell *elc;
+                foreach(elc, root_group->logical_exprs)
+                {
+                    PgGroupExpr *e = (PgGroupExpr *) lfirst(elc);
+                    if (e->op >= PG_CASCADES_LOGICAL_PROJECT &&
+                        e->op <= PG_CASCADES_LOGICAL_LIMIT)
+                    { has_upper = true; break; }
+                }
+                if (has_upper) continue;
+            }
+
+            /* Try to build plan from this IMPORTED_PATH */
+            elog(NOTICE, "PLANBUILD_TRACE: Emergency fallback trying IMPORTED_PATH op=%d", expr->op);
+
+            result = create_plan(ctx->root, (Path *) expr->op_private);
+            if (result != NULL)
+            {
+                pg_cascades_fix_empty_targetlists(ctx->root, result);
+                elog(NOTICE, "PLANBUILD_TRACE: Emergency fallback succeeded with IMPORTED_PATH op=%d", expr->op);
+                return result;
+            }
+        }
+
+        elog(NOTICE, "PLANBUILD_TRACE: Emergency fallback failed, no usable IMPORTED_PATH found");
+    }
+
+    /*
      * Phase 1 Critical Path: If no best entry was found, this is a bug
      * in the task scheduler or path import logic. In Phase 1 Path-import
      * mode, we should ALWAYS have valid best_entries from PG's make_one_rel().
@@ -369,9 +417,23 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
             /* COMPOSABLE_OP: delegate to IMPORTED_PATH in same group */
             {
                 ListCell *pe;
+                int imported_count = 0;
+                int total_physical = list_length(group->physical_exprs);
+
+                elog(NOTICE, "PLANBUILD_JOIN: Looking for IMPORTED_PATH in group, physical_exprs=%d, looking for op=%d",
+                     total_physical, expr->op);
+
                 foreach(pe, group->physical_exprs)
                 {
                     PgGroupExpr *e = (PgGroupExpr *) lfirst(pe);
+
+                    if (e->mode == PG_PHYS_EXPR_IMPORTED_PATH)
+                    {
+                        imported_count++;
+                        elog(NOTICE, "PLANBUILD_JOIN: Found IMPORTED_PATH with op=%d (looking for op=%d)",
+                             e->op, expr->op);
+                    }
+
                     if (e->mode == PG_PHYS_EXPR_IMPORTED_PATH &&
                         e->op == expr->op)
                     {
@@ -385,10 +447,12 @@ pg_cascades_build_plan_recurse(PgPlannerCascadesContext *ctx,
                         }
                     }
                 }
-                /* If no IMPORTED_PATH found, this group has no PG paths
-                 * (e.g., a Phase 2 join from JoinAssociativity).
-                 * Future work: implement full COMPOSABLE_OP join extraction
-                 * via recursive child plan building. */
+
+                if (result == NULL)
+                {
+                    elog(NOTICE, "PLANBUILD_JOIN: No matching IMPORTED_PATH found (total_physical=%d, imported=%d, needed_op=%d)",
+                         total_physical, imported_count, expr->op);
+                }
             }
             break;
 

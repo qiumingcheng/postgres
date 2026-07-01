@@ -29,6 +29,7 @@
 static void extract_join_tree_recursive(PlannerInfo *root, Node *jtnode,
 										PgMultiJoinNode *mjn);
 static List *extract_predicates_from_node(Node *node);
+static List *extract_predicates_from_qual_node(Node *node);
 static bool has_equijoin_condition(PgMultiJoinNode *mjn);
 
 /*
@@ -43,6 +44,7 @@ pg_multijoin_extract(PlannerInfo *root, Node *jtnode)
 	MemoryContext mcxt;
 	MemoryContext oldcxt;
 	ListCell   *lc;
+	int			rti;
 
 	/* 创建独立的内存上下文 */
 	mcxt = AllocSetContextCreate(CurrentMemoryContext,
@@ -60,20 +62,58 @@ pg_multijoin_extract(PlannerInfo *root, Node *jtnode)
 	mjn->num_tables = 0;
 	mjn->mcxt = mcxt;
 
-	/* 递归提取join树 */
-	extract_join_tree_recursive(root, jtnode, mjn);
-
-	/* 构建table_ids位图 */
-	foreach(lc, mjn->atoms)
+	/* 方法1: 从root->simple_rel_array收集所有基表 */
+	for (rti = 1; rti < root->simple_rel_array_size; rti++)
 	{
-		RelOptInfo *rel = (RelOptInfo *) lfirst(lc);
-		mjn->table_ids = bms_add_member(mjn->table_ids, rel->relid);
+		RelOptInfo *rel = root->simple_rel_array[rti];
+		if (rel != NULL && rel->reloptkind == RELOPT_BASEREL)
+		{
+			mjn->atoms = lappend(mjn->atoms, rel);
+			mjn->table_ids = bms_add_member(mjn->table_ids, rel->relid);
+		}
 	}
 	mjn->num_tables = list_length(mjn->atoms);
 
+	elog(NOTICE, "DP_TRACE: Collected %d base tables from root", mjn->num_tables);
+
+	/* 方法2: 从root的qual_clauses收集WHERE条件 */
+	if (root->parse->jointree && root->parse->jointree->quals)
+	{
+		List *all_clauses = NIL;
+		Node *quals = root->parse->jointree->quals;
+
+		elog(NOTICE, "DP_TRACE: Processing WHERE quals, node_type=%d", nodeTag(quals));
+
+		/* 检查是否是List类型 */
+		if (IsA(quals, List))
+		{
+			ListCell *lc;
+			List *qual_list = (List *) quals;
+
+			elog(NOTICE, "DP_TRACE:   quals is List with %d items", list_length(qual_list));
+
+			/* 处理List中的每个元素 */
+			foreach(lc, qual_list)
+			{
+				Node *qual_item = (Node *) lfirst(lc);
+				List *sub = extract_predicates_from_qual_node(qual_item);
+				all_clauses = list_concat(all_clauses, sub);
+			}
+		}
+		else
+		{
+			/* 单个节点，直接处理 */
+			all_clauses = extract_predicates_from_qual_node(quals);
+		}
+
+		elog(NOTICE, "DP_TRACE: Extracted %d clauses from WHERE", list_length(all_clauses));
+
+		mjn->predicates = all_clauses;
+	}
+
 	MemoryContextSwitchTo(oldcxt);
 
-	elog(DEBUG1, "MultiJoinNode extracted: %d tables, %d predicates",
+	elog(NOTICE, "DP_TRACE: MultiJoinNode final: %d tables, %d predicates",
 		 mjn->num_tables, list_length(mjn->predicates));
 
 	return mjn;
@@ -142,7 +182,84 @@ extract_join_tree_recursive(PlannerInfo *root, Node *jtnode,
 }
 
 /*
+ * extract_predicates_from_qual_node - 从WHERE quals直接提取谓词
+ *
+ * 这个函数专门处理root->parse->jointree->quals
+ * 会递归展开所有AND子句
+ */
+static List *
+extract_predicates_from_qual_node(Node *node)
+{
+	List	   *result = NIL;
+
+	if (node == NULL)
+		return NIL;
+
+	elog(NOTICE, "DP_TRACE: extract_qual node_type=%d", nodeTag(node));
+
+	/* 处理BoolExpr (AND/OR/NOT) */
+	if (IsA(node, BoolExpr))
+	{
+		BoolExpr *bexpr = (BoolExpr *) node;
+
+		if (bexpr->boolop == AND_EXPR)
+		{
+			ListCell *lc;
+
+			elog(NOTICE, "DP_TRACE:   AND_EXPR with %d args", list_length(bexpr->args));
+
+			/* 递归处理每个AND子项 */
+			foreach(lc, bexpr->args)
+			{
+				Node *arg = (Node *) lfirst(lc);
+				List *sub = extract_predicates_from_qual_node(arg);
+				result = list_concat(result, sub);
+			}
+			return result;
+		}
+		else
+		{
+			elog(NOTICE, "DP_TRACE:   Non-AND BoolExpr, wrapping");
+			/* OR或NOT：作为单个条件 */
+		}
+	}
+
+	/* 处理OpExpr (比较操作符，如 =, <, > 等) */
+	if (IsA(node, OpExpr))
+	{
+		elog(NOTICE, "DP_TRACE:   OpExpr, creating RestrictInfo");
+
+		RestrictInfo *rinfo = make_restrictinfo((Expr *) node,
+												true,	/* is_pushed_down */
+												false,	/* outerjoin_delayed */
+												false,	/* pseudoconstant */
+												NULL,	/* required_relids */
+												NULL,	/* outer_relids */
+												NULL);	/* nullable_relids */
+		result = lappend(result, rinfo);
+		return result;
+	}
+
+	/* 其他节点类型：尝试包装为RestrictInfo */
+	elog(NOTICE, "DP_TRACE:   Other node type, trying to wrap");
+	if (IsA(node, Expr))
+	{
+		RestrictInfo *rinfo = make_restrictinfo((Expr *) node,
+												true,
+												false,
+												false,
+												NULL,
+												NULL,
+												NULL);
+		result = lappend(result, rinfo);
+	}
+
+	return result;
+}
+
+/*
  * extract_predicates_from_node - 从表达式节点提取谓词
+ * (保留用于JoinExpr的quals处理)
  */
 static List *
 extract_predicates_from_node(Node *node)
@@ -152,9 +269,28 @@ extract_predicates_from_node(Node *node)
 	if (node == NULL)
 		return NIL;
 
+	elog(NOTICE, "DP_TRACE: extract_pred node_type=%d (%s)",
+		 nodeTag(node),
+		 IsA(node, RestrictInfo) ? "RestrictInfo" :
+		 and_clause(node) ? "AND" :
+		 IsA(node, OpExpr) ? "OpExpr" : "Other");
+
 	if (IsA(node, RestrictInfo))
 	{
-		/* 已经是RestrictInfo，直接添加 */
+		RestrictInfo *rinfo = (RestrictInfo *) node;
+
+		elog(NOTICE, "DP_TRACE:   RestrictInfo->clause type=%d", nodeTag(rinfo->clause));
+
+		/* 检查RestrictInfo内部的clause是否是AND子句 */
+		if (and_clause((Node *) rinfo->clause))
+		{
+			/* 递归展开AND子句 */
+			elog(NOTICE, "DP_TRACE:   Expanding AND inside RestrictInfo");
+			return extract_predicates_from_node((Node *) rinfo->clause);
+		}
+
+		/* 否则直接添加RestrictInfo */
+		elog(NOTICE, "DP_TRACE:   Adding RestrictInfo as-is");
 		result = lappend(result, node);
 	}
 	else if (and_clause(node))
@@ -162,6 +298,8 @@ extract_predicates_from_node(Node *node)
 		/* AND子句：递归处理每个子项 */
 		List	   *args = ((BoolExpr *) node)->args;
 		ListCell   *lc;
+
+		elog(NOTICE, "DP_TRACE:   AND clause with %d args, expanding", list_length(args));
 
 		foreach(lc, args)
 		{
@@ -172,6 +310,7 @@ extract_predicates_from_node(Node *node)
 	else
 	{
 		/* 其他表达式：包装为RestrictInfo */
+		elog(NOTICE, "DP_TRACE:   Wrapping as RestrictInfo");
 		RestrictInfo *rinfo = make_restrictinfo((Expr *) node,
 												true,	/* is_pushed_down */
 												false,	/* outerjoin_delayed */
@@ -182,6 +321,7 @@ extract_predicates_from_node(Node *node)
 		result = lappend(result, rinfo);
 	}
 
+	elog(NOTICE, "DP_TRACE:   Returning %d predicates", list_length(result));
 	return result;
 }
 
@@ -201,7 +341,8 @@ pg_multijoin_can_reorder(PgMultiJoinNode *mjn)
 	/* 必须有join条件 */
 	if (list_length(mjn->predicates) < mjn->num_tables - 1)
 	{
-		elog(DEBUG2, "Cannot reorder: insufficient join predicates");
+		elog(NOTICE, "DP_TRACE: can_reorder=false: predicates=%d, need=%d",
+			 list_length(mjn->predicates), mjn->num_tables - 1);
 		return false;
 	}
 

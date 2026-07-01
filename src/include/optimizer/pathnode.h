@@ -138,6 +138,11 @@ extern RelOptInfo *build_join_rel(PlannerInfo *root,
 			   RelOptInfo *inner_rel,
 			   SpecialJoinInfo *sjinfo,
 			   List **restrictlist_ptr);
+extern void build_join_rel_hash(PlannerInfo *root);
+extern void set_rel_size(PlannerInfo *root, RelOptInfo *rel,
+			  Index rti, RangeTblEntry *rte);
+extern void set_base_rel_sizes(PlannerInfo *root);
+extern void set_base_rel_pathlists(PlannerInfo *root);
 extern AppendRelInfo *find_childrel_appendrelinfo(PlannerInfo *root,
 							RelOptInfo *rel);
 extern ParamPathInfo *get_baserel_parampathinfo(PlannerInfo *root,

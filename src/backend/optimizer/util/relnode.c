@@ -210,7 +210,7 @@ find_base_rel(PlannerInfo *root, int relid)
  * build_join_rel_hash
  *	  Construct the auxiliary hash table for join relations.
  */
-static void
+void
 build_join_rel_hash(PlannerInfo *root)
 {
 	HTAB	   *hashtab;
@@ -463,7 +463,7 @@ build_join_rel(PlannerInfo *root,
  * We also compute the expected width of the join's output, making use
  * of data that was cached at the baserel level by set_rel_width().
  */
-static void
+void
 build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 					RelOptInfo *input_rel)
 {
@@ -584,7 +584,7 @@ build_joinrel_restrictlist(PlannerInfo *root,
 	return result;
 }
 
-static void
+void
 build_joinrel_joinlist(RelOptInfo *joinrel,
 					   RelOptInfo *outer_rel,
 					   RelOptInfo *inner_rel)

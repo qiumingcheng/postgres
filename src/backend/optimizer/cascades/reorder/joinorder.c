@@ -43,6 +43,7 @@ pg_group_info_create(Bitmapset *tables,
 	group->cost = cost;
 	group->rows = rows;
 	group->best_expr = best_expr;
+	group->rel_info = (best_expr != NULL) ? best_expr->rel_info : NULL;
 
 	return group;
 }
@@ -68,6 +69,7 @@ pg_get_base_table_group(PlannerInfo *root,
 	group->cost = rel->rows;		/* 基表成本 = 行数 */
 	group->rows = rel->rows;
 	group->best_expr = NULL;		/* 基表无表达式 */
+	group->rel_info = rel;			/* 关键：保存base RelOptInfo */
 
 	return group;
 }
@@ -82,6 +84,8 @@ pg_build_join_expr(PlannerInfo *root,
 				   PgGroupInfo *right)
 {
 	PgExpressionInfo *expr;
+	RelOptInfo *left_rel;
+	RelOptInfo *right_rel;
 
 	expr = (PgExpressionInfo *) palloc(sizeof(PgExpressionInfo));
 	expr->left = left;
@@ -95,6 +99,133 @@ pg_build_join_expr(PlannerInfo *root,
 
 	/* 计算成本和行数 */
 	pg_compute_cost(root, expr, mjn);
+
+	/*
+	 * 关键新增：构建真正的PostgreSQL RelOptInfo
+	 * 这样Cascades就能获得完整的join信息（restrictinfo等）
+	 */
+	left_rel = left->rel_info;
+	right_rel = right->rel_info;
+
+	if (left_rel != NULL && right_rel != NULL)
+	{
+		Bitmapset *joinrelids;
+		List *restrictlist = NIL;
+		SpecialJoinInfo sjinfo_data;
+		SpecialJoinInfo *sjinfo;
+
+		elog(DEBUG1, "DP: Building join RelOptInfo, left has %d rels, right has %d rels",
+			 bms_num_members(left_rel->relids), bms_num_members(right_rel->relids));
+
+		joinrelids = bms_union(left_rel->relids, right_rel->relids);
+
+		/* 为inner join创建SpecialJoinInfo */
+		memset(&sjinfo_data, 0, sizeof(SpecialJoinInfo));
+		sjinfo = &sjinfo_data;
+		sjinfo->type = T_SpecialJoinInfo;
+		sjinfo->min_lefthand = left_rel->relids;
+		sjinfo->min_righthand = right_rel->relids;
+		sjinfo->syn_lefthand = left_rel->relids;
+		sjinfo->syn_righthand = right_rel->relids;
+		sjinfo->jointype = JOIN_INNER;
+		sjinfo->lhs_strict = false;
+		sjinfo->delay_upper_joins = false;
+		sjinfo->join_quals = NIL;
+
+		elog(DEBUG1, "DP: Calling build_join_rel...");
+
+		/* 调用PostgreSQL的标准API构建join RelOptInfo */
+		PG_TRY();
+		{
+			expr->rel_info = build_join_rel(root,
+											 joinrelids,
+											 left_rel,
+											 right_rel,
+											 sjinfo,
+											 &restrictlist);
+
+			if (expr->rel_info != NULL)
+			{
+				elog(DEBUG1, "DP: build_join_rel succeeded, rows=%.0f, pathlist_len=%d",
+					 expr->rel_info->rows,
+					 list_length(expr->rel_info->pathlist));
+
+				/*
+				 * 关键修复：参考PostgreSQL的make_join_rel，在build_join_rel之后
+				 * 需要调用add_paths_to_joinrel来生成访问路径（HashJoin、NestLoop、MergeJoin等）。
+				 *
+				 * 重要：需要临时开启所有join类型，确保生成完整的paths。
+				 * Cascades的Task Scheduler可能选择任何类型的join，我们必须为所有类型
+				 * 提供IMPORTED_PATH，否则Plan Building会失败。
+				 *
+				 * 注意：需要考虑两个方向（left+right 和 right+left），
+				 * 就像PostgreSQL标准实现一样。
+				 */
+				if (list_length(expr->rel_info->pathlist) == 0)
+				{
+					bool save_enable_mergejoin = enable_mergejoin;
+					bool save_enable_hashjoin = enable_hashjoin;
+					bool save_enable_nestloop = enable_nestloop;
+
+					elog(DEBUG1, "DP: Generating paths for join rel (both directions)...");
+
+					/* 临时开启所有join类型，确保生成完整的paths */
+					enable_mergejoin = true;
+					enable_hashjoin = true;
+					enable_nestloop = true;
+
+					/* 方向1: left join right */
+					add_paths_to_joinrel(root,
+										 expr->rel_info,
+										 left_rel,
+										 right_rel,
+										 JOIN_INNER,
+										 sjinfo,
+										 restrictlist);
+
+					/* 方向2: right join left (考虑commutative joins) */
+					add_paths_to_joinrel(root,
+										 expr->rel_info,
+										 right_rel,
+										 left_rel,
+										 JOIN_INNER,
+										 sjinfo,
+										 restrictlist);
+
+					/* 恢复原始配置 */
+					enable_mergejoin = save_enable_mergejoin;
+					enable_hashjoin = save_enable_hashjoin;
+					enable_nestloop = save_enable_nestloop;
+
+					/* 选择最便宜的路径 */
+					set_cheapest(expr->rel_info);
+
+					elog(DEBUG1, "DP: After add_paths_to_joinrel, pathlist_len=%d, cheapest_total_cost=%.2f",
+						 list_length(expr->rel_info->pathlist),
+						 expr->rel_info->cheapest_total_path ? expr->rel_info->cheapest_total_path->total_cost : 0.0);
+				}
+			}
+			else
+			{
+				elog(WARNING, "DP: build_join_rel returned NULL");
+			}
+		}
+		PG_CATCH();
+		{
+			elog(WARNING, "DP: build_join_rel threw an exception!");
+			FlushErrorState();
+			expr->rel_info = NULL;
+		}
+		PG_END_TRY();
+
+		bms_free(joinrelids);
+	}
+	else
+	{
+		expr->rel_info = NULL;
+		elog(DEBUG2, "Cannot build join RelOptInfo: left_rel=%p, right_rel=%p",
+			 left_rel, right_rel);
+	}
 
 	return expr;
 }

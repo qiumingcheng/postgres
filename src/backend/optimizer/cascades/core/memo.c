@@ -500,6 +500,8 @@ pg_memo_init_from_tree(PgPlannerCascadesContext *ctx)
     PgGroupExpr *opt_tree;
     MemoryContext old_cxt;
 
+    elog(NOTICE, "MEMO: Step 1 - Creating Memo shell...");
+
     /* Step 1: Create Memo shell with hash table */
     old_cxt = MemoryContextSwitchTo(ctx->memo_cxt);
 
@@ -520,11 +522,35 @@ pg_memo_init_from_tree(PgPlannerCascadesContext *ctx)
     ctx->memo = memo;
     MemoryContextSwitchTo(old_cxt);
 
+    elog(NOTICE, "MEMO: Step 2 - Building initial tree from query...");
+
     /* Step 2: Build standalone OptExpression tree from PG Query + paths */
-    opt_tree = pg_cascades_build_initial_tree(ctx);
+    PG_TRY();
+    {
+        opt_tree = pg_cascades_build_initial_tree(ctx);
+        elog(NOTICE, "MEMO: Initial tree built successfully");
+    }
+    PG_CATCH();
+    {
+        elog(WARNING, "MEMO: build_initial_tree FAILED!");
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    elog(NOTICE, "MEMO: Step 3 - Inserting expression tree into Memo...");
 
     /* Step 3: Recursively insert tree into Memo */
-    pg_memo_insert_expression_tree(ctx, opt_tree);
+    PG_TRY();
+    {
+        pg_memo_insert_expression_tree(ctx, opt_tree);
+        elog(NOTICE, "MEMO: Expression tree inserted, total groups=%d", list_length(memo->groups));
+    }
+    PG_CATCH();
+    {
+        elog(WARNING, "MEMO: insert_expression_tree FAILED!");
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
 }
 
 /* ========================================================================

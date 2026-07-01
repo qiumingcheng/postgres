@@ -796,6 +796,36 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
             {
                 PgMultiJoinNode *mjn = NULL;
                 PgGroupInfo *best_group = NULL;
+                bool dp_succeeded = false;
+
+                /*
+                 * 关键：在DP之前必须先初始化base rel
+                 * 否则DP无法获取正确的rows和cost信息
+                 */
+                if (root->all_baserels == NULL)
+                {
+                    Index rti;
+
+                    elog(DEBUG1, "CASCADES: Initializing base rels before DP");
+
+                    /* Construct the all_baserels Relids set */
+                    root->all_baserels = NULL;
+                    for (rti = 1; rti < root->simple_rel_array_size; rti++)
+                    {
+                        RelOptInfo *brel = root->simple_rel_array[rti];
+                        if (brel == NULL)
+                            continue;
+                        if (brel->reloptkind != RELOPT_BASEREL)
+                            continue;
+                        root->all_baserels = bms_add_member(root->all_baserels, brel->relid);
+                    }
+
+                    /* Generate access paths for the base rels */
+                    set_base_rel_sizes(root);
+                    set_base_rel_pathlists(root);
+
+                    elog(DEBUG1, "CASCADES: Base rels initialized");
+                }
 
                 PG_TRY();
                 {
@@ -821,8 +851,49 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
                                      "cost=%.2f, rows=%.0f for %d tables",
                                      best_group->cost, best_group->rows, mjn->num_tables);
 
-                                /* TODO: Convert best_group to actual execution plan */
-                                /* For now, we still fallback to make_one_rel */
+                                dp_succeeded = true;
+
+                                /*
+                                 * DP成功：跳过make_one_rel的join枚举
+                                 *
+                                 * 关键：只初始化base rel，不做join枚举（避免两个DP冲突）
+                                 * 使用DP的成本作为upper_bound_cost
+                                 */
+                                elog(NOTICE, "CASCADES: DP succeeded, will skip make_one_rel join enumeration");
+
+                                /*
+                                 * DP成功：使用DP构建的完整RelOptInfo
+                                 * 不再需要创建minimal final_rel
+                                 */
+                                elog(NOTICE, "CASCADES: DP succeeded, using DP-built RelOptInfo");
+
+                                /* 使用DP构建的final RelOptInfo */
+                                final_rel = best_group->rel_info;
+
+                                if (final_rel != NULL)
+                                {
+                                    elog(NOTICE, "CASCADES: DP-built final_rel check: relids=%d members, rows=%.0f, pathlist_len=%d",
+                                         bms_num_members(final_rel->relids),
+                                         final_rel->rows,
+                                         list_length(final_rel->pathlist));
+
+                                    prep->final_rel = final_rel;
+                                    prep->lower_paths_built = true;
+
+                                    /* 直接设置upper_bound_cost为DP的成本 */
+                                    ctx.upper_bound_cost = best_group->cost;
+
+                                    elog(NOTICE, "CASCADES: Using DP-built final_rel, rows=%.0f, upper_bound_cost=%.2f",
+                                         final_rel->rows, ctx.upper_bound_cost);
+
+                                    /* 记录DP结果 */
+                                    root->join_search_private = (void *) best_group;
+                                }
+                                else
+                                {
+                                    elog(WARNING, "CASCADES: DP succeeded but rel_info is NULL, falling back to make_one_rel");
+                                    dp_succeeded = false;
+                                }
                             }
                         }
 
@@ -839,8 +910,13 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
                     FlushErrorState();  /* Clear error, continue with make_one_rel */
                 }
                 PG_END_TRY();
+
+                /* 如果DP成功，跳过make_one_rel */
+                if (dp_succeeded)
+                    goto skip_make_one_rel;
             }
 
+            /* 只有DP未成功时才调用完整的make_one_rel */
             PG_TRY();
             {
                 final_rel = make_one_rel(root, prep->joinlist);
@@ -855,34 +931,53 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
             }
             PG_END_TRY();
 
+skip_make_one_rel:
             MemoryContextSwitchTo(save_cxt);
         }
     }
 
-    if (prep->final_rel == NULL ||
-        prep->final_rel->cheapest_total_path == NULL)
+    /* 检查final_rel（DP成功时可能没有cheapest_total_path） */
+    if (prep->final_rel == NULL)
     {
         MemoryContextSwitchTo(old_cxt);
         MemoryContextDelete(ctx.memo_cxt);
-        CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [3/12] make_one_rel FAILED — no valid paths");
+        CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [3/12] No final_rel");
         return PG_CASCADES_INTERNAL_NO_PLAN;
     }
 
-    CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [3/12] make_one_rel OK (final_rel rows=%.0f width=%d)",
-             prep->final_rel->rows, prep->final_rel->width);
-
-    /* Initialize upper_bound_cost from make_one_rel's cheapest path
-     * This provides a baseline for cost-based pruning in Cascades */
+    /* 如果有cheapest_total_path（make_one_rel的情况），使用它设置upper_bound_cost */
     if (prep->final_rel->cheapest_total_path != NULL)
     {
         ctx.upper_bound_cost = prep->final_rel->cheapest_total_path->total_cost;
         CASCADES_DEBUG(cascades_planner_debug,
-                 "CASCADES: Initialized upper_bound_cost = %.2f from make_one_rel",
+                 "CASCADES: [3/12] make_one_rel OK, upper_bound_cost = %.2f",
+                 ctx.upper_bound_cost);
+    }
+    else
+    {
+        /* DP成功的情况，upper_bound_cost已经在上面设置了 */
+        CASCADES_DEBUG(cascades_planner_debug,
+                 "CASCADES: [3/12] DP succeeded, upper_bound_cost = %.2f (from DP)",
                  ctx.upper_bound_cost);
     }
 
     /* 6. Build Memo from Query tree (StarRocks: Memo.init) */
-    pg_memo_init_from_tree(&ctx);
+    elog(NOTICE, "CASCADES: [4/12] Starting Memo init from tree...");
+
+    PG_TRY();
+    {
+        pg_memo_init_from_tree(&ctx);
+        elog(NOTICE, "CASCADES: [4/12] Memo init completed successfully");
+    }
+    PG_CATCH();
+    {
+        elog(WARNING, "CASCADES: [4/12] Memo init FAILED with exception!");
+        MemoryContextSwitchTo(old_cxt);
+        MemoryContextDelete(ctx.memo_cxt);
+        FlushErrorState();
+        return PG_CASCADES_INTERNAL_NO_PLAN;
+    }
+    PG_END_TRY();
 
     if (ctx.memo->root_group == NULL)
     {
@@ -896,23 +991,68 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
              list_length(ctx.memo->groups), ctx.memo->root_group->id);
 
     /* 7. Derive logical property */
-    pg_memo_derive_logical_property(ctx.memo, ctx.memo->root_group, &ctx);
-    CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [5/12] Logical property derived");
+    elog(NOTICE, "CASCADES: [5/12] Starting logical property derivation...");
+
+    PG_TRY();
+    {
+        pg_memo_derive_logical_property(ctx.memo, ctx.memo->root_group, &ctx);
+        elog(NOTICE, "CASCADES: [5/12] Logical property derived successfully");
+    }
+    PG_CATCH();
+    {
+        elog(WARNING, "CASCADES: [5/12] Logical property derivation FAILED!");
+        MemoryContextSwitchTo(old_cxt);
+        MemoryContextDelete(ctx.memo_cxt);
+        FlushErrorState();
+        return PG_CASCADES_INTERNAL_NO_PLAN;
+    }
+    PG_END_TRY();
 
     /*
      * 7c. Phase 4: Run staged + combination-rule rewrite on Memo groups.
      * Operates on ctx->memo->root_group.
      */
-    pg_cascades_logical_rewrite(&ctx);
+    elog(NOTICE, "CASCADES: [6/12] Starting logical rewrite...");
+
+    PG_TRY();
+    {
+        pg_cascades_logical_rewrite(&ctx);
+        elog(NOTICE, "CASCADES: [6/12] Logical rewrite completed");
+    }
+    PG_CATCH();
+    {
+        elog(WARNING, "CASCADES: [6/12] Logical rewrite FAILED!");
+        MemoryContextSwitchTo(old_cxt);
+        MemoryContextDelete(ctx.memo_cxt);
+        FlushErrorState();
+        return PG_CASCADES_INTERNAL_NO_PLAN;
+    }
+    PG_END_TRY();
 
     /* Re-derive logical properties after rewrite */
-    pg_memo_derive_logical_property_v2(ctx.memo, &ctx);
+    elog(NOTICE, "CASCADES: [7/12] Re-deriving logical properties...");
+
+    PG_TRY();
+    {
+        pg_memo_derive_logical_property_v2(ctx.memo, &ctx);
+        elog(NOTICE, "CASCADES: [7/12] Logical properties re-derived successfully");
+    }
+    PG_CATCH();
+    {
+        elog(WARNING, "CASCADES: [7/12] Logical property re-derivation FAILED!");
+        MemoryContextSwitchTo(old_cxt);
+        MemoryContextDelete(ctx.memo_cxt);
+        FlushErrorState();
+        return PG_CASCADES_INTERNAL_NO_PLAN;
+    }
+    PG_END_TRY();
 
     /*
      * Phase 6: After rewrite, root_group may point to an empty group
      * (merged away by EliminateLimit/EliminateProject).  Find the
      * first non-empty group and make it the new root.
      */
+    elog(NOTICE, "CASCADES: [8/12] Checking root group...");
     {
         PgMemoGroup *root_g = ctx.memo->root_group;
         if (root_g != NULL &&
@@ -942,6 +1082,7 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
              list_length(ctx.memo->groups));
 
     /* 8. Run task scheduler */
+    elog(NOTICE, "CASCADES: [9/12] Starting task scheduler...");
     {
         PgOptimizerTask *root_task;
         ListCell       *lc_go;
@@ -953,7 +1094,20 @@ pg_cascades_try_grouping_planner(PlannerInfo *root,
         task_stack_push(&ctx, root_task);
     }
 
-    status = pg_cascades_run_tasks(&ctx);
+    PG_TRY();
+    {
+        status = pg_cascades_run_tasks(&ctx);
+        elog(NOTICE, "CASCADES: [9/12] Task scheduler completed, status=%d", status);
+    }
+    PG_CATCH();
+    {
+        elog(WARNING, "CASCADES: [9/12] Task scheduler FAILED!");
+        MemoryContextSwitchTo(old_cxt);
+        MemoryContextDelete(ctx.memo_cxt);
+        FlushErrorState();
+        return PG_CASCADES_INTERNAL_NO_PLAN;
+    }
+    PG_END_TRY();
 
     CASCADES_DEBUG(cascades_planner_debug, "CASCADES: [7/12] Task scheduler done (tasks=%d, upper_bound=%.2f, status=%d)",
              ctx.num_tasks_executed, ctx.upper_bound_cost, status);

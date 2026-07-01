@@ -24,6 +24,7 @@ typedef struct PgGroupInfo
 	double		cost;			/* 最优成本 */
 	double		rows;			/* 输出行数 */
 	struct PgExpressionInfo *best_expr;	/* 最优表达式 */
+	struct RelOptInfo *rel_info;	/* PostgreSQL RelOptInfo（用于Cascades）*/
 } PgGroupInfo;
 
 /*
@@ -37,6 +38,7 @@ typedef struct PgExpressionInfo
 	JoinType	join_type;		/* JOIN类型 */
 	double		cost;			/* 总成本 */
 	double		rows;			/* 输出行数 */
+	struct RelOptInfo *rel_info;	/* PostgreSQL RelOptInfo（用于Cascades）*/
 } PgExpressionInfo;
 
 /* GroupInfo创建和管理 */
