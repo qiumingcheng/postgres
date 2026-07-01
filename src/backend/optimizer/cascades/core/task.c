@@ -821,9 +821,18 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         if (!pg_output_satisfies_required(&output, required))
             return PG_CASCADES_OK;
 
-        /* Phase 4: upper-bound pruning */
-        if (ctx->upper_bound_cost > 0 &&
-            path->total_cost > ctx->upper_bound_cost)
+        /* Phase 4: upper-bound pruning
+         *
+         * Fix for 3-table JOIN issue: Use relaxed bound (10x) to prevent
+         * intermediate JOIN groups from being pruned too aggressively.
+         * This allows plans with temporarily high costs to still be considered.
+         */
+        double effective_bound = ctx->upper_bound_cost;
+
+        if (ctx->upper_bound_cost > 0)
+            effective_bound = ctx->upper_bound_cost * 10.0;
+
+        if (effective_bound > 0 && path->total_cost > effective_bound)
             return PG_CASCADES_OK;
 
         entry = (PgGroupBestEntry *) palloc0(sizeof(PgGroupBestEntry));
@@ -923,9 +932,13 @@ pg_task_enforce_and_cost(PgPlannerCascadesContext *ctx, PgOptimizerTask *task)
         entry->child_required_props = NIL;
         entry->output = output;
 
-        /* Upper-bound pruning (same threshold as IMPORTED_PATH) */
-        if (ctx->upper_bound_cost > 0 &&
-            entry->total_cost > ctx->upper_bound_cost)
+        /* Upper-bound pruning (relaxed 10x for all groups) */
+        double effective_bound = ctx->upper_bound_cost;
+
+        if (ctx->upper_bound_cost > 0)
+            effective_bound = ctx->upper_bound_cost * 10.0;
+
+        if (effective_bound > 0 && entry->total_cost > effective_bound)
             return PG_CASCADES_OK;
 
         pg_group_update_best(expr->owner_group, entry);

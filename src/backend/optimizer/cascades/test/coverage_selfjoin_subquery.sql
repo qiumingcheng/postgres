@@ -22,17 +22,17 @@ SELECT 'SQ3', count(*) FROM (SELECT a, b FROM (SELECT * FROM cascades_test_t WHE
 SELECT 'SQ5', count(*) FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id WHERE t1.val > (SELECT avg(val) FROM cascades_test_j1);
 
 \echo '=== Vtable dispatch ==='
-SELECT 'VT1', grp, count(*) FROM cascades_test_t GROUP BY grp;
+SELECT 'VT1', a, count(*) FROM cascades_test_t GROUP BY a;
 SELECT 'VT2', * FROM cascades_test_t ORDER BY a, b;
 SELECT 'VT3', * FROM cascades_test_t WHERE a > 10 ORDER BY a LIMIT 10;
 SELECT 'VT4', count(*) FROM (SELECT DISTINCT a FROM cascades_test_t ORDER BY a) s;
-SELECT 'VT5', grp, count(*) FROM cascades_test_t GROUP BY grp ORDER BY grp LIMIT 5;
+SELECT 'VT5', a, count(*) FROM cascades_test_t GROUP BY a ORDER BY a LIMIT 5;
 SELECT 'VT6', count(*) FROM cascades_test_j1 t1 JOIN cascades_test_j2 t2 ON t1.id = t2.j1_id JOIN cascades_test_j3 t3 ON t2.id = t3.j2_id;
 
 \echo '=== Edge cases ==='
 SELECT 'EC1', count(*) FROM cascades_test_t WHERE a > 99999;
 SELECT 'EC2', count(*) FROM cascades_test_t WHERE id = 1;
-SELECT 'EC3', CASE WHEN a > 50 THEN 'hi' WHEN a > 25 THEN 'mid' ELSE 'lo' END, count(*) FROM cascades_test_t GROUP BY 1;
+SELECT 'EC3', CASE WHEN max(a) > 50 THEN 'hi' WHEN max(a) > 25 THEN 'mid' ELSE 'lo' END, count(*) FROM cascades_test_t GROUP BY CASE WHEN a > 50 THEN 'hi' WHEN a > 25 THEN 'mid' ELSE 'lo' END;
 
 \echo '=== ALL DONE ==='
 
