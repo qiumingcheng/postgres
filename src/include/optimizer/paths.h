@@ -104,6 +104,12 @@ extern void add_paths_to_joinrel(PlannerInfo *root, RelOptInfo *joinrel,
 								 RelOptInfo *outerrel, RelOptInfo *innerrel,
 								 JoinType jointype, SpecialJoinInfo *sjinfo,
 								 List *restrictlist);
+extern Path *get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
+								RelOptInfo *outerrel, Path *inner_path,
+								Path *outer_path, JoinType jointype,
+								JoinPathExtraData *extra);
+extern Path *get_materialize_path(RelOptInfo *innerrel, Path *inner_path,
+									uint64 pgs_mask);
 
 /*
  * joinrels.c

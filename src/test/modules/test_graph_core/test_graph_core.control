@@ -1,0 +1,4 @@
+comment = 'Test common graph nodes and provider ABI'
+default_version = '1.0'
+module_pathname = '$libdir/test_graph_core'
+relocatable = true

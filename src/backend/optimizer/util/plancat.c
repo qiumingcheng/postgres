@@ -37,6 +37,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/supportnodes.h"
 #include "optimizer/cost.h"
+#include "optimizer/graphpath.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/plancat.h"
 #include "parser/parse_relation.h"
@@ -239,6 +240,16 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			 */
 			indexRelation = index_open(indexoid, lmode);
 			index = indexRelation->rd_index;
+
+			/* A strict graph route must constrain candidates before any of
+			 * them can dominate and discard an allowed ordinary index path. */
+			if (ggc_graph_index_allowed_hook &&
+				!ggc_graph_index_allowed_hook(relationObjectId, indexoid,
+											 indexRelation->rd_rel->relam))
+			{
+				index_close(indexRelation, NoLock);
+				continue;
+			}
 
 			/*
 			 * Ignore invalid indexes, since they can't safely be used for

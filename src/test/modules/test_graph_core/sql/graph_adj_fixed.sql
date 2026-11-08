@@ -1,0 +1,107 @@
+\pset format unaligned
+\pset tuples_only on
+
+CREATE TABLE ggc_solo_edge(
+ id bigint PRIMARY KEY,
+ src bigint NOT NULL,
+ dst bigint NOT NULL,
+ payload text
+) WITH (fillfactor=40);
+CREATE INDEX ggc_solo_out ON ggc_solo_edge USING graph_adj(src,dst);
+INSERT INTO ggc_solo_edge VALUES
+ (1,1,2,repeat('p1-',1700)),
+ (2,1,2,repeat('p2-',1700)),
+ (3,1,1,repeat('p3-',1700)),
+ (4,2,3,repeat('p4-',1700)),
+ (5,2,1,repeat('p5-',1700)),
+ (6,3,4,repeat('p6-',1700)),
+ (7,3,2,repeat('p7-',1700)),
+ (8,4,5,repeat('p8-',1700)),
+ (9,2,4,repeat('p9-',1700));
+INSERT INTO ggc_solo_edge
+SELECT 100+i,99+i,100+i,repeat('chain-'||i||'-',700)
+FROM generate_series(1,9) AS i;
+
+CREATE TABLE ggc_solo_request(
+ anchor bigint NOT NULL,
+ vertices bigint[],
+ edges bigint[],
+ payloads text[]
+);
+INSERT INTO ggc_solo_request(anchor) VALUES (1);
+
+SELECT test_graph_fixed_config(
+ 'ggc_solo_request',
+ array_fill('ggc_solo_edge'::regclass,ARRAY[2]),
+ array_fill('ggc_solo_out'::regclass,ARRAY[2]),
+ ARRAY[1,1],0,4,64,100000);
+SELECT test_graph_lifecycle_config('graph_adj',ARRAY[]::regclass[],1,0,0,0);
+SELECT count(*),sum(anchor),
+ array_agg(vertices::text ORDER BY edges::text),
+ array_agg(edges::text ORDER BY edges::text),
+ min(length(payloads[1])),min(length(payloads[2]))
+FROM ggc_solo_request;
+EXPLAIN (COSTS OFF)
+SELECT anchor,vertices,edges,payloads FROM ggc_solo_request;
+
+TRUNCATE ggc_solo_request;
+INSERT INTO ggc_solo_request(anchor) VALUES (100);
+SELECT test_graph_fixed_config(
+ 'ggc_solo_request',
+ array_fill('ggc_solo_edge'::regclass,ARRAY[9]),
+ array_fill('ggc_solo_out'::regclass,ARRAY[9]),
+ array_fill(1,ARRAY[9]),0,4,64,100000);
+SELECT test_graph_lifecycle_config('graph_adj',ARRAY[]::regclass[],1,0,0,0);
+SELECT anchor,cardinality(vertices),cardinality(edges),vertices[10],edges[9],
+ cardinality(payloads),length(payloads[9])
+FROM ggc_solo_request;
+EXPLAIN (COSTS OFF)
+SELECT anchor,vertices,edges,payloads FROM ggc_solo_request;
+
+-- IN traversal uses the same standalone adjacency AM, with no fallback.
+TRUNCATE ggc_solo_request;
+INSERT INTO ggc_solo_request(anchor) VALUES (4);
+SELECT test_graph_fixed_config(
+ 'ggc_solo_request',array_fill('ggc_solo_edge'::regclass,ARRAY[2]),
+ array_fill('ggc_solo_out'::regclass,ARRAY[2]),ARRAY[2,2],0,4,64,100000);
+SELECT test_graph_lifecycle_config('graph_adj',ARRAY[]::regclass[],1,0,0,0);
+WITH got AS MATERIALIZED
+(
+ SELECT anchor,vertices,edges,payloads FROM ggc_solo_request
+), wanted AS
+(
+ SELECT 4::bigint anchor,ARRAY[4::bigint,e1.src,e2.src] vertices,
+        ARRAY[e1.id,e2.id] edges,ARRAY[e1.payload,e2.payload] payloads
+ FROM ggc_solo_edge e1 JOIN ggc_solo_edge e2 ON e2.dst=e1.src
+ WHERE e1.dst=4
+)
+SELECT (SELECT count(*) FROM got)=4 AND NOT EXISTS
+ ((SELECT * FROM got EXCEPT ALL SELECT * FROM wanted)
+  UNION ALL
+  (SELECT * FROM wanted EXCEPT ALL SELECT * FROM got));
+
+CREATE FUNCTION pg_temp.ggc_solo_plan() RETURNS jsonb LANGUAGE plpgsql AS $body$
+DECLARE p jsonb;
+BEGIN
+ EXECUTE 'EXPLAIN (ANALYZE,FORMAT JSON,TIMING OFF)
+ SELECT anchor,vertices,edges,payloads FROM ggc_solo_request' INTO p;
+ RETURN p->0->'Plan';
+END
+$body$;
+WITH p AS (SELECT pg_temp.ggc_solo_plan() j)
+SELECT j->>'Custom Plan Provider'='GraphExpandFixed'
+   AND (j->>'Graph Startup Fallbacks')::int=0
+   AND j->>'Stage 2 Batch Summary' ~ 'direct_refs=[1-9]'
+   AND j->>'Stage 2 Batch Summary' ~ 'directory=0'
+FROM p;
+
+-- A bad generation is rejected before the anchor produces side effects.
+CREATE SEQUENCE ggc_solo_effect;
+SELECT test_graph_lifecycle_config('graph_adj',ARRAY[]::regclass[],999,0,0,0);
+SELECT anchor,vertices,edges,payloads
+FROM ggc_solo_request WHERE nextval('ggc_solo_effect')>0;
+SELECT NOT is_called FROM ggc_solo_effect;
+DROP SEQUENCE ggc_solo_effect;
+
+DROP TABLE ggc_solo_request;
+DROP TABLE ggc_solo_edge;

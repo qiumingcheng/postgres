@@ -40,6 +40,8 @@ extern void preprocess_minmax_aggregates(PlannerInfo *root);
  * prototypes for plan/createplan.c
  */
 extern Plan *create_plan(PlannerInfo *root, Path *best_path);
+extern List *create_graph_stage_plans(PlannerInfo *root, List *paths,
+									List **stage_params);
 extern ForeignScan *make_foreignscan(List *qptlist, List *qpqual,
 									 Index scanrelid, List *fdw_exprs, List *fdw_private,
 									 List *fdw_scan_tlist, List *fdw_recheck_quals,

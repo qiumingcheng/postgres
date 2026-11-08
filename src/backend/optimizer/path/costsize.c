@@ -81,6 +81,7 @@
  */
 
 #include "postgres.h"
+#include "executor/graph_pgq.h"
 
 #include <limits.h>
 #include <math.h>
@@ -4942,6 +4943,34 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 	if (node == NULL)
 		return false;
 
+	/* These leaf nodes have zero evaluation cost and no expression children.
+	 * Avoid the generic walker for, e.g., large arrays of lookup parameters.
+	 * Recursive expression nodes still go through the normal depth checks. */
+	if (IsA(node, Var) || IsA(node, Const) || IsA(node, Param))
+		return false;
+
+	/* Array constructors have no cost beyond their elements. In particular,
+	 * a batch of lookup parameters need not dispatch a walker for every
+	 * zero-cost leaf. Preserve the order and normal handling of all other
+	 * expressions, including nested arrays and function calls. */
+	if (IsA(node, ArrayExpr))
+	{
+		ListCell   *lc;
+
+		check_stack_depth();
+		foreach(lc, ((ArrayExpr *) node)->elements)
+		{
+			Node	   *element = lfirst(lc);
+
+			if (element == NULL || IsA(element, Var) ||
+				IsA(element, Const) || IsA(element, Param))
+				continue;
+			if (cost_qual_eval_walker(element, context))
+				return true;
+		}
+		return false;
+	}
+
 	/*
 	 * RestrictInfo nodes contain an eval_cost field reserved for this
 	 * routine's use, so that it's not necessary to evaluate the qual clause's
@@ -5583,6 +5612,10 @@ set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 										   inner_rel->rows,
 										   sjinfo,
 										   restrictlist);
+	/* A matched graph profile is also cardinality evidence for native JOINs.
+	 * It must be applied before paths are costed, not after DP has pruned them. */
+	if (root->parse->graph_program && root->parse->commandType == CMD_SELECT)
+		GgcGraphJoinRows(root, rel, sjinfo);
 }
 
 /*

@@ -44,6 +44,7 @@ tests += {
   'isolation': {
     'specs': [
       'basic',
+      'graph-adj-info',
       'inplace',
       'repack',
       'repack_temporal',

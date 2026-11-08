@@ -2863,8 +2863,13 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 			{
 				CustomScan *cscan = (CustomScan *) plan;
 				ListCell   *lc;
+				Bitmapset *child_valid = bms_union(valid_params,
+												 cscan->custom_params);
+				Bitmapset *custom_child_params = NULL;
 
 				finalize_primnode((Node *) cscan->custom_exprs,
+								  &context);
+				finalize_primnode((Node *) cscan->custom_param_exprs,
 								  &context);
 				/* We assume custom_scan_tlist cannot contain Params */
 				context.paramids =
@@ -2873,14 +2878,20 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 				/* child nodes if any */
 				foreach(lc, cscan->custom_plans)
 				{
-					context.paramids =
-						bms_add_members(context.paramids,
+					custom_child_params =
+						bms_add_members(custom_child_params,
 										finalize_plan(root,
 													  (Plan *) lfirst(lc),
 													  gather_param,
-													  valid_params,
+													  child_valid,
 													  scan_params));
 				}
+				custom_child_params = bms_del_members(custom_child_params,
+													 cscan->custom_params);
+				context.paramids = bms_add_members(context.paramids,
+												  custom_child_params);
+				bms_free(child_valid);
+				bms_free(custom_child_params);
 			}
 			break;
 

@@ -18,12 +18,16 @@
 #include "access/table.h"
 #include "access/htup_details.h"
 #include "catalog/pg_operator.h"
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_propgraph_element.h"
 #include "catalog/pg_propgraph_element_label.h"
 #include "catalog/pg_propgraph_label.h"
 #include "catalog/pg_propgraph_label_property.h"
 #include "catalog/pg_propgraph_property.h"
+#include "catalog/pg_type_d.h"
+#include "commands/defrem.h"
 #include "miscadmin.h"
+#include "nodes/graphnodes.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
@@ -42,6 +46,7 @@
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/ruleutils.h"
 #include "utils/syscache.h"
 
@@ -101,6 +106,8 @@ static Query *generate_union_from_pathqueries(List **pathqueries);
 static List *get_path_elements_for_path_factor(Oid propgraphid, struct path_factor *pf);
 static bool is_property_associated_with_label(Oid labeloid, Oid propoid);
 static Node *get_element_property_expr(Oid elemoid, Oid propoid, int rtindex);
+static GgcFixedProgram *build_pgq_fixed_program(RangeTblEntry *rte,
+										 List *graph_path, Query *path_query);
 
 /*
  * Convert GRAPH_TABLE clause into a subquery using relational
@@ -553,6 +560,13 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 									  replace_property_refs(rte->relid,
 															(Node *) rte->graph_table_columns,
 															graph_path));
+	/*
+	 * COLUMNS expressions were transformed in the enclosing ParseState, but
+	 * now belong to this query level.  In particular, a retained graph region
+	 * must get its own ProjectSet instead of evaluating an SRF as a scalar
+	 * CustomScan projection.  Do not rely on subquery pull-up to repair this.
+	 */
+	path_query->hasTargetSRFs = expression_returns_set((Node *) path_query->targetList);
 
 	/*
 	 * Mark the columns being accessed in the path query as requiring SELECT
@@ -570,7 +584,328 @@ generate_query_for_graph_path(RangeTblEntry *rte, List *graph_path)
 												var->varattno - FirstLowInvalidHeapAttributeNumber);
 	}
 
+	/*
+	 * Preserve a fixed, pointer-free PGQ provenance before rewriteGraphTable()
+	 * clears the parser-only GraphPattern.  Failure to prove a complete mapping
+	 * leaves the relational query untouched and simply omits the alternative.
+	 */
+	path_query->graph_program = build_pgq_fixed_program(rte, graph_path,
+												 path_query);
+	path_query->graph_program_disabled = path_query->graph_program == NULL;
+
 	return path_query;
+}
+
+static GgcProviderIdentity *
+make_pgq_provider_identity(uint32 kind, const char *name)
+{
+	GgcProviderIdentity *identity = makeNode(GgcProviderIdentity);
+
+	identity->struct_size = sizeof(GgcProviderIdentity);
+	identity->abi_version = 1;
+	identity->owner_extension_oid = InvalidOid;
+	identity->kind = kind;
+	identity->name = pstrdup(name);
+	return identity;
+}
+
+static List *
+mapping_attnums(HeapTuple tuple, AttrNumber catalog_attnum)
+{
+	bool		isnull;
+	Datum		encoded;
+	ArrayType  *array;
+	Datum	   *values;
+	bool	   *nulls;
+	int			count;
+	List *result = NIL;
+
+	encoded = SysCacheGetAttr(PROPGRAPHELOID, tuple, catalog_attnum, &isnull);
+	if (isnull)
+		return NIL;
+	array = DatumGetArrayTypeP(encoded);
+	deconstruct_array(array, INT2OID, sizeof(int16), true, TYPALIGN_SHORT,
+					  &values, &nulls, &count);
+	for (int i = 0; i < count; i++)
+	{
+		if (nulls[i] || DatumGetInt16(values[i]) <= 0)
+			return NIL;
+		result = lappend_int(result, DatumGetInt16(values[i]));
+	}
+	return result;
+}
+
+static Bitmapset *
+program_expression_variables(Node *expression, List *variables, bool *valid)
+{
+	Bitmapset  *required = NULL;
+	List	   *vars;
+
+	/* Outer references belong to native PARAM_EXEC, not local graph bindings. */
+	vars = pull_vars_of_level(expression, 0);
+	foreach_node(Var, var, vars)
+	{
+		GgcVariable *mapped = NULL;
+
+		foreach_node(GgcVariable, variable, variables)
+			if (variable->fallback_rti == var->varno)
+			{
+				mapped = variable;
+				break;
+			}
+		if (!mapped)
+		{
+			*valid = false;
+			return NULL;
+		}
+		required = bms_add_member(required, mapped->variable_id);
+	}
+	return required;
+}
+
+static GgcFixedProgram *
+build_pgq_fixed_program(RangeTblEntry *rte, List *graph_path,
+						Query *path_query)
+{
+	GgcFixedProgram *program = makeNode(GgcFixedProgram);
+	GgcPathConstraint *constraint = makeNode(GgcPathConstraint);
+	bool		valid = true;
+	int			stage_id = 1;
+	uint64		fingerprint = UINT64CONST(1469598103934665603);
+
+	if (graph_path == NIL || list_length(graph_path) != list_length(path_query->rtable))
+		return NULL;
+	program->native_access =
+		contain_vars_of_level((Node *) path_query->jointree, 1) ||
+		contain_vars_of_level((Node *) path_query->targetList, 1);
+
+	program->semantic_version = GGC_GRAPH_SEMANTIC_VERSION;
+	program->frontend_kind = 1;
+	program->frontend_provider = make_pgq_provider_identity(1, "pgq_frontend");
+	program->catalog_provider = make_pgq_provider_identity(2, "pgq_catalog");
+	program->result_provider = make_pgq_provider_identity(3, "pgq_result");
+	program->graph_oid = rte->relid;
+	program->graph_rti = 0;
+	program->catalog_generation = 0;
+
+	foreach_ptr(struct path_element, pe, graph_path)
+	{
+		struct path_factor *pf = pe->path_factor;
+		HeapTuple	tuple;
+		Form_pg_propgraph_element form;
+		RangeTblEntry *fallback_rte;
+		Relation	relation;
+		Form_pg_attribute key_attribute;
+		AttrNumber	identity_attnum;
+		List *identity_attnums;
+		Oid			opclass;
+		GgcVariable *variable;
+
+		tuple = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(pe->elemoid));
+		if (!HeapTupleIsValid(tuple))
+			return NULL;
+		form = (Form_pg_propgraph_element) GETSTRUCT(tuple);
+		identity_attnums = mapping_attnums(tuple,
+											 Anum_pg_propgraph_element_pgekey);
+		identity_attnum = list_length(identity_attnums) == 1 ?
+			linitial_int(identity_attnums) : InvalidAttrNumber;
+		fallback_rte = rt_fetch(pf->factorpos + 1, path_query->rtable);
+		if (identity_attnums == NIL || fallback_rte->rtekind != RTE_RELATION ||
+			fallback_rte->relid != pe->reloid || form->pgerelid != pe->reloid)
+		{
+			ReleaseSysCache(tuple);
+			return NULL;
+		}
+		relation = table_open(pe->reloid, AccessShareLock);
+		if (linitial_int(identity_attnums) > RelationGetDescr(relation)->natts)
+		{
+			table_close(relation, AccessShareLock);
+			ReleaseSysCache(tuple);
+			return NULL;
+		}
+		key_attribute = TupleDescAttr(RelationGetDescr(relation),
+										 linitial_int(identity_attnums) - 1);
+		opclass = GetDefaultOpClass(key_attribute->atttypid, BTREE_AM_OID);
+		if (key_attribute->attisdropped)
+		{
+			table_close(relation, AccessShareLock);
+			ReleaseSysCache(tuple);
+			return NULL;
+		}
+
+		variable = makeNode(GgcVariable);
+		variable->variable_id = pf->factorpos + 1;
+		variable->entity_kind = form->pgekind == PGEKIND_VERTEX ?
+			GGC_VERTEX : GGC_EDGE;
+		variable->relation_oid = pe->reloid;
+		variable->element_oid = pe->elemoid;
+		variable->fallback_rti = pf->factorpos + 1;
+		variable->identity_attnum = identity_attnum;
+		variable->identity_attnums = identity_attnums;
+		variable->key_type = key_attribute->atttypid;
+		variable->key_opfamily = OidIsValid(opclass) ? get_opclass_family(opclass) : InvalidOid;
+		variable->key_collation = key_attribute->attcollation;
+		if (identity_attnum <= 0 || !key_attribute->attnotnull ||
+			!OidIsValid(opclass) ||
+			(key_attribute->atttypid != INT2OID && key_attribute->atttypid != INT4OID &&
+			 key_attribute->atttypid != INT8OID) ||
+			relation->rd_rel->relkind != RELKIND_RELATION ||
+			relation->rd_rel->relhassubclass || relation->rd_rel->relrowsecurity)
+			program->native_access = true;
+		/* Aliases can give one heap different graph roles/mappings. Preserve
+		 * existing unaliased profiles, but do not borrow them for aliases. */
+		if (strcmp(NameStr(form->pgealias), RelationGetRelationName(relation)) != 0 ||
+			variable->key_type != INT8OID)
+		{
+			fingerprint ^= ((uint64) variable->element_oid << 32) | variable->key_type;
+			fingerprint *= UINT64CONST(1099511628211);
+		}
+		if (form->pgekind == PGEKIND_EDGE)
+		{
+			variable->source_attnums = mapping_attnums(tuple,
+											 Anum_pg_propgraph_element_pgesrckey);
+			variable->destination_attnums = mapping_attnums(tuple,
+											 Anum_pg_propgraph_element_pgedestkey);
+			if (variable->source_attnums == NIL || variable->destination_attnums == NIL)
+			{
+				table_close(relation, AccessShareLock);
+				ReleaseSysCache(tuple);
+				return NULL;
+			}
+			variable->source_attnum = list_length(variable->source_attnums) == 1 ?
+				linitial_int(variable->source_attnums) : InvalidAttrNumber;
+			variable->destination_attnum = list_length(variable->destination_attnums) == 1 ?
+				linitial_int(variable->destination_attnums) : InvalidAttrNumber;
+			if (variable->source_attnum <= 0 || variable->destination_attnum <= 0 ||
+				!TupleDescAttr(RelationGetDescr(relation), linitial_int(variable->source_attnums)-1)->attnotnull ||
+				!TupleDescAttr(RelationGetDescr(relation), linitial_int(variable->destination_attnums)-1)->attnotnull)
+				program->native_access = true;
+		}
+		table_close(relation, AccessShareLock);
+		ReleaseSysCache(tuple);
+		program->variables = lappend(program->variables, variable);
+		fingerprint ^= (uint64) variable->relation_oid << 32 |
+			(uint32) variable->fallback_rti;
+		fingerprint *= UINT64CONST(1099511628211);
+		/* Preserve the established canonical-layout statistics namespace.
+		 * Other key/endpoint mappings must not borrow its path profiles. */
+		if (variable->identity_attnum != 1 ||
+			(variable->entity_kind == GGC_EDGE &&
+			 (variable->source_attnum != 2 || variable->destination_attnum != 3)))
+		{
+			fingerprint ^= ((uint64) variable->identity_attnum << 32) |
+				((uint32) variable->source_attnum << 16) | variable->destination_attnum;
+			fingerprint *= UINT64CONST(1099511628211);
+		}
+	}
+
+	constraint->constraint_id = 1;
+	constraint->mode = GGC_WALK;
+	constraint->scope_kind = GGC_SCOPE_PATH;
+	constraint->first_vertex = -1;
+	constraint->last_vertex = -1;
+	foreach_node(GgcVariable, variable, program->variables)
+	{
+		if (variable->entity_kind == GGC_EDGE)
+			constraint->edge_variables = bms_add_member(
+				constraint->edge_variables, variable->variable_id);
+		else
+		{
+			constraint->vertex_variables = bms_add_member(
+				constraint->vertex_variables, variable->variable_id);
+			if (constraint->first_vertex < 0)
+				constraint->first_vertex = variable->variable_id;
+			constraint->last_vertex = variable->variable_id;
+		}
+	}
+	program->path_constraints = list_make1(constraint);
+
+	foreach_ptr(struct path_element, pe, graph_path)
+	{
+		struct path_factor *pf = pe->path_factor;
+		GgcFixedHop *hop;
+
+		if (!IS_EDGE_PATTERN(pf->kind))
+			continue;
+		hop = makeNode(GgcFixedHop);
+		hop->stage_id = stage_id++;
+		hop->edge_variable = pf->factorpos + 1;
+		if (pf->kind == EDGE_PATTERN_RIGHT || pf->kind == EDGE_PATTERN_ANY)
+		{
+			hop->input_variable = pf->src_pf->factorpos + 1;
+			hop->output_variable = pf->dest_pf->factorpos + 1;
+			hop->direction = pf->kind == EDGE_PATTERN_ANY ? GGC_UNDIRECTED : GGC_OUT;
+			/* Match native lowering: between different vertex elements an
+			 * undirected pattern has only the catalog-compatible orientation.
+			 * Equal numeric keys in different vertex tables are not aliases. */
+			if (pf->kind == EDGE_PATTERN_ANY && pe->srcvertexid != pe->destvertexid)
+			{
+				struct path_element *input = list_nth(graph_path, pf->src_pf->factorpos);
+
+				hop->direction = input->elemoid == pe->srcvertexid ? GGC_OUT : GGC_IN;
+			}
+		}
+		else
+		{
+			hop->input_variable = pf->dest_pf->factorpos + 1;
+			hop->output_variable = pf->src_pf->factorpos + 1;
+			hop->direction = GGC_IN;
+		}
+		hop->required_variables = bms_make_singleton(hop->input_variable);
+		hop->constraint_ids = list_make1_int(constraint->constraint_id);
+		program->hops = lappend(program->hops, hop);
+		program->stage_order = lappend_int(program->stage_order, hop->stage_id);
+	}
+
+	foreach_node(TargetEntry, target, path_query->targetList)
+	{
+		GgcOutput  *output;
+		Bitmapset  *required;
+
+		if (target->resjunk)
+			continue;
+		required = program_expression_variables((Node *) target->expr,
+												program->variables, &valid);
+		if (!valid)
+			return NULL;
+		output = makeNode(GgcOutput);
+		output->result_attnum = target->resno;
+		output->fallback_expression = copyObject(target->expr);
+		output->result_type = exprType((Node *) target->expr);
+		output->result_typmod = exprTypmod((Node *) target->expr);
+		output->result_collation = exprCollation((Node *) target->expr);
+		output->required_variables = required;
+		program->outputs = lappend(program->outputs, output);
+		foreach_node(GgcVariable, variable, program->variables)
+			if (bms_is_member(variable->variable_id, required))
+				variable->user_visible = true;
+	}
+
+	if (program->hops == NIL || program->outputs == NIL)
+		return NULL;
+	constraint->first_vertex = linitial_node(GgcFixedHop, program->hops)->input_variable;
+	constraint->last_vertex = llast_node(GgcFixedHop, program->hops)->output_variable;
+	/* A repeated vertex closes a binding; it is not a fresh path endpoint. */
+	if (list_length(program->variables) != 2 * list_length(program->hops) + 1)
+		foreach_node(GgcFixedHop, hop, program->hops)
+		{
+			fingerprint ^= ((uint64) hop->input_variable << 32) | (uint32) hop->output_variable;
+			fingerprint *= UINT64CONST(1099511628211);
+		}
+	/* Preserve existing all-OUT fingerprints, but never reuse their path
+	 * statistics for an IN/mixed/undirected program with the same tables. */
+	foreach_node(GgcFixedHop, hop, program->hops)
+		if (hop->direction != GGC_OUT)
+		{
+			foreach_node(GgcFixedHop, directional, program->hops)
+			{
+				fingerprint ^= directional->direction;
+				fingerprint *= UINT64CONST(1099511628211);
+			}
+			break;
+		}
+	program->semantic_fingerprint = fingerprint;
+	return program;
 }
 
 /*
@@ -584,6 +919,7 @@ generate_query_for_empty_path_pattern(RangeTblEntry *rte)
 	Query	   *query = makeNode(Query);
 
 	query->commandType = CMD_SELECT;
+	query->graph_program_disabled = true;
 	query->rtable = NIL;
 	query->rteperminfos = NIL;
 	query->jointree = makeFromExpr(NIL, (Node *) makeBoolConst(false, false));
@@ -644,6 +980,7 @@ generate_union_from_pathqueries(List **pathqueries)
 	/* Encapsulate the set operation statement into a Query. */
 	union_query = makeNode(Query);
 	union_query->commandType = CMD_SELECT;
+	/* Each leaf retains its own program. UNION ALL is not itself a region. */
 	union_query->rtable = rtable;
 	union_query->setOperations = (Node *) sostmt;
 	union_query->rteperminfos = NIL;

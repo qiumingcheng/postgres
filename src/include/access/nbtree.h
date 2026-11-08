@@ -799,6 +799,7 @@ typedef struct BTScanInsertData
 	bool		anynullkeys;
 	bool		nextkey;
 	bool		backward;		/* backward index scan? */
+	bool		graphint8;		/* proven graph-only single bigint comparator */
 	ItemPointer scantid;		/* tiebreaker for scankeys */
 	int			keysz;			/* Size of scankeys array */
 	ScanKeyData scankeys[INDEX_MAX_KEYS];	/* Must appear last */
@@ -1050,6 +1051,36 @@ typedef struct BTArrayKeyInfo
 	ScanKey		high_compare;	/* array's < or <= upper bound */
 } BTArrayKeyInfo;
 
+/* Optional graph scan-local positioning hints. No tuple data, pins or
+ * visibility results are cached. Every use compares the freshly locked page. */
+#define BT_GRAPH_HINT_LEVELS 16
+typedef struct BTGraphSeekHint
+{
+	BlockNumber block;
+	OffsetNumber offset;
+	bool valid;
+} BTGraphSeekHint;
+
+typedef struct BTGraphSeekHints
+{
+	BTGraphSeekHint levels[BT_GRAPH_HINT_LEVELS];
+} BTGraphSeekHints;
+
+/* Routes belong to one rescan/snapshot. No page image or visibility cache. */
+#define BT_GRAPH_ROUTE_KEYS 128
+typedef struct BTGraphRoute
+{
+	int64 key;
+	BlockNumber child;
+} BTGraphRoute;
+
+typedef struct BTGraphRoutes
+{
+	int count;
+	int cursor;
+	BTGraphRoute routes[BT_GRAPH_ROUTE_KEYS];
+} BTGraphRoutes;
+
 typedef struct BTScanOpaqueData
 {
 	/* these fields are set by _bt_preprocess_keys(): */
@@ -1079,6 +1110,7 @@ typedef struct BTScanOpaqueData
 	 */
 	char	   *currTuples;		/* tuple storage for currPos */
 	char	   *markTuples;		/* tuple storage for markPos */
+	char	   *tupleWorkspace; /* reusable allocation; inactive for heap scans */
 
 	/*
 	 * If the marked position is on the same page as current position, we
@@ -1092,6 +1124,11 @@ typedef struct BTScanOpaqueData
 	/* keep these last in struct for efficiency */
 	BTScanPosData currPos;		/* current position data */
 	BTScanPosData markPos;		/* marked position, if any */
+	/* Preserve the offsets of ordinary scan fields when hints are unused. */
+	BTGraphSeekHints *graph_seek_hints; /* NULL for ordinary/range scans */
+	BTGraphRoutes *graph_routes;
+	bool graph_route_enabled;
+	bool graph_int8_enabled;
 } BTScanOpaqueData;
 
 typedef BTScanOpaqueData *BTScanOpaque;
@@ -1285,6 +1322,8 @@ extern int	_bt_binsrch_array_skey(FmgrInfo *orderproc,
  */
 extern BTStack _bt_search(Relation rel, Relation heaprel, BTScanInsert key,
 						  Buffer *bufP, int access, bool returnstack);
+extern void btgraphseekhint(IndexScanDesc scan);
+extern void btgraphbatchopts(IndexScanDesc scan, bool routes, bool int8cmp);
 extern OffsetNumber _bt_binsrch_insert(Relation rel, BTInsertState insertstate);
 extern int32 _bt_compare(Relation rel, BTScanInsert key, Page page, OffsetNumber offnum);
 extern bool _bt_first(IndexScanDesc scan, ScanDirection dir);

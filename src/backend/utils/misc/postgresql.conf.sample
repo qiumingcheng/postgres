@@ -433,6 +433,9 @@
 #enable_indexonlyscan = on
 #enable_material = on
 #enable_memoize = on
+#enable_graph_age_adjacency = off # opt-in, requires explicitly loaded AGE
+#enable_graph_btree = off # opt-in, cost-based SQL/PGQ graph candidates
+#graph_btree_max_candidates = 8 # 1 retains the written graph order
 #enable_mergejoin = on
 #enable_nestloop = on
 #enable_parallel_append = on

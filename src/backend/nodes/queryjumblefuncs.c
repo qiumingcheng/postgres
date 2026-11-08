@@ -79,6 +79,26 @@ static void _jumbleVariableSetStmt(JumbleState *jstate, Node *node);
 static void _jumbleRangeTblEntry_eref(JumbleState *jstate,
 									  RangeTblEntry *rte,
 									  Alias *expr);
+static void _jumbleGraphBitmapset(JumbleState *jstate,
+								  const Bitmapset *members);
+static void _jumbleGgcQual_required_variables(JumbleState *jstate,
+										  GgcQual *qual,
+										  Bitmapset *members);
+static void _jumbleGgcPathConstraint_edge_variables(JumbleState *jstate,
+													 GgcPathConstraint *constraint,
+													 Bitmapset *members);
+static void _jumbleGgcPathConstraint_vertex_variables(JumbleState *jstate,
+													   GgcPathConstraint *constraint,
+													   Bitmapset *members);
+static void _jumbleGgcFixedHop_required_variables(JumbleState *jstate,
+											  GgcFixedHop *hop,
+											  Bitmapset *members);
+static void _jumbleGgcOutput_required_variables(JumbleState *jstate,
+											GgcOutput *output,
+											Bitmapset *members);
+static void _jumbleGgcFixedProgram_required_outer(JumbleState *jstate,
+											  GgcFixedProgram *program,
+											  Bitmapset *members);
 
 /*
  * Given a possibly multi-statement source string, confine our attention to the
@@ -556,6 +576,52 @@ do { \
 /* Function name used for the node field attribute custom_query_jumble. */
 #define JUMBLE_CUSTOM(nodetype, item) \
 	_jumble##nodetype##_##item(jstate, expr, expr->item)
+
+/*
+ * Bitmapsets are Nodes for copy/equal/out/read purposes, but the generic
+ * query-jumble walker intentionally has no T_Bitmapset case.  Graph-program
+ * dependency sets are semantic, so serialize their sorted member numbers
+ * explicitly instead of either ignoring them or jumbling their pointer value.
+ */
+static void
+_jumbleGraphBitmapset(JumbleState *jstate, const Bitmapset *members)
+{
+	int			member = -1;
+	int32		count;
+
+	if (members == NULL)
+	{
+		AppendJumbleNull(jstate);
+		return;
+	}
+
+	count = bms_num_members(members);
+	AppendJumble32(jstate, (const unsigned char *) &count);
+	while ((member = bms_next_member(members, member)) >= 0)
+	{
+		int32		value = member;
+
+		AppendJumble32(jstate, (const unsigned char *) &value);
+	}
+}
+
+#define DEFINE_GRAPH_BITMAPSET_JUMBLER(nodetype, field) \
+static void \
+_jumble##nodetype##_##field(JumbleState *jstate, nodetype *node, \
+							 Bitmapset *members) \
+{ \
+	(void) node; \
+	_jumbleGraphBitmapset(jstate, members); \
+}
+
+DEFINE_GRAPH_BITMAPSET_JUMBLER(GgcQual, required_variables)
+DEFINE_GRAPH_BITMAPSET_JUMBLER(GgcPathConstraint, edge_variables)
+DEFINE_GRAPH_BITMAPSET_JUMBLER(GgcPathConstraint, vertex_variables)
+DEFINE_GRAPH_BITMAPSET_JUMBLER(GgcFixedHop, required_variables)
+DEFINE_GRAPH_BITMAPSET_JUMBLER(GgcOutput, required_variables)
+DEFINE_GRAPH_BITMAPSET_JUMBLER(GgcFixedProgram, required_outer)
+
+#undef DEFINE_GRAPH_BITMAPSET_JUMBLER
 
 #include "queryjumblefuncs.funcs.c"
 

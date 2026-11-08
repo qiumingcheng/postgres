@@ -24,6 +24,7 @@
 
 #include "common/relpath.h"
 #include "nodes/bitmapset.h"
+#include "nodes/graphnodes.h"
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
 #include "nodes/value.h"
@@ -142,6 +143,11 @@ typedef struct Query
 	bool		canSetTag pg_node_attr(query_jumble_ignore);
 
 	Node	   *utilityStmt;	/* non-null if commandType == CMD_UTILITY */
+
+	/* Optional common graph program; never contains runtime callbacks/state. */
+	GgcFixedProgram *graph_program;
+	/* A provenance conflict failed closed; do not attach a later partial one. */
+	bool		graph_program_disabled pg_node_attr(query_jumble_ignore);
 
 	/*
 	 * rtable index of target relation for INSERT/UPDATE/DELETE/MERGE; 0 for

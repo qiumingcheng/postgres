@@ -57,6 +57,16 @@ typedef struct
 	List	   *indexclauses[INDEX_MAX_KEYS];
 } IndexClauseSet;
 
+/* Raw index ordering is independent of the parameterizing clause set.
+ * Keep it only while create_index_paths considers one index, not across
+ * relation/planner phases. Usefulness is still checked for every path. */
+typedef struct
+{
+	IndexOptInfo *index;
+	List	   *pathkeys[2];
+	bool		valid[2];
+} IndexPathOrderCache;
+
 /* Per-path data used within choose_bitmap_and() */
 typedef struct
 {
@@ -80,7 +90,8 @@ static void consider_index_join_clauses(PlannerInfo *root, RelOptInfo *rel,
 										IndexClauseSet *rclauseset,
 										IndexClauseSet *jclauseset,
 										IndexClauseSet *eclauseset,
-										List **bitindexpaths);
+										List **bitindexpaths,
+										IndexPathOrderCache *order_cache);
 static void consider_index_join_outer_rels(PlannerInfo *root, RelOptInfo *rel,
 										   IndexOptInfo *index,
 										   IndexClauseSet *rclauseset,
@@ -89,7 +100,8 @@ static void consider_index_join_outer_rels(PlannerInfo *root, RelOptInfo *rel,
 										   List **bitindexpaths,
 										   List *indexjoinclauses,
 										   int considered_clauses,
-										   List **considered_relids);
+											   List **considered_relids,
+											   IndexPathOrderCache *order_cache);
 static void get_join_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								 IndexOptInfo *index,
 								 IndexClauseSet *rclauseset,
@@ -97,17 +109,20 @@ static void get_join_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								 IndexClauseSet *eclauseset,
 								 List **bitindexpaths,
 								 Relids relids,
-								 List **considered_relids);
+								 List **considered_relids,
+								 IndexPathOrderCache *order_cache);
 static bool eclass_already_used(EquivalenceClass *parent_ec, Relids oldrelids,
 								List *indexjoinclauses);
 static void get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 							IndexOptInfo *index, IndexClauseSet *clauses,
-							List **bitindexpaths);
+							List **bitindexpaths,
+							IndexPathOrderCache *order_cache);
 static List *build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 							   IndexOptInfo *index, IndexClauseSet *clauses,
 							   bool useful_predicate,
 							   ScanTypeControl scantype,
-							   bool *skip_nonnative_saop);
+							   bool *skip_nonnative_saop,
+							   IndexPathOrderCache *order_cache);
 static List *build_paths_for_OR(PlannerInfo *root, RelOptInfo *rel,
 								List *clauses, List *other_clauses);
 static List *generate_bitmap_or_paths(PlannerInfo *root, RelOptInfo *rel,
@@ -258,6 +273,9 @@ create_index_paths(PlannerInfo *root, RelOptInfo *rel)
 	foreach(lc, rel->indexlist)
 	{
 		IndexOptInfo *index = (IndexOptInfo *) lfirst(lc);
+		IndexPathOrderCache order_cache = {0};
+
+		order_cache.index = index;
 
 		/* Protect limited-size array in IndexClauseSets */
 		Assert(index->nkeycolumns <= INDEX_MAX_KEYS);
@@ -282,7 +300,7 @@ create_index_paths(PlannerInfo *root, RelOptInfo *rel)
 		 * bitmap paths are added to bitindexpaths to be handled below.
 		 */
 		get_index_paths(root, rel, index, &rclauseset,
-						&bitindexpaths);
+						&bitindexpaths, &order_cache);
 
 		/*
 		 * Identify the join clauses that can match the index.  For the moment
@@ -311,7 +329,7 @@ create_index_paths(PlannerInfo *root, RelOptInfo *rel)
 										&rclauseset,
 										&jclauseset,
 										&eclauseset,
-										&bitjoinpaths);
+										&bitjoinpaths, &order_cache);
 	}
 
 	/*
@@ -438,7 +456,8 @@ consider_index_join_clauses(PlannerInfo *root, RelOptInfo *rel,
 							IndexClauseSet *rclauseset,
 							IndexClauseSet *jclauseset,
 							IndexClauseSet *eclauseset,
-							List **bitindexpaths)
+							List **bitindexpaths,
+							IndexPathOrderCache *order_cache)
 {
 	int			considered_clauses = 0;
 	List	   *considered_relids = NIL;
@@ -474,7 +493,7 @@ consider_index_join_clauses(PlannerInfo *root, RelOptInfo *rel,
 									   bitindexpaths,
 									   jclauseset->indexclauses[indexcol],
 									   considered_clauses,
-									   &considered_relids);
+									   &considered_relids, order_cache);
 		/* Consider each applicable eclass join clause */
 		considered_clauses += list_length(eclauseset->indexclauses[indexcol]);
 		consider_index_join_outer_rels(root, rel, index,
@@ -482,7 +501,7 @@ consider_index_join_clauses(PlannerInfo *root, RelOptInfo *rel,
 									   bitindexpaths,
 									   eclauseset->indexclauses[indexcol],
 									   considered_clauses,
-									   &considered_relids);
+									   &considered_relids, order_cache);
 	}
 }
 
@@ -507,7 +526,8 @@ consider_index_join_outer_rels(PlannerInfo *root, RelOptInfo *rel,
 							   List **bitindexpaths,
 							   List *indexjoinclauses,
 							   int considered_clauses,
-							   List **considered_relids)
+							   List **considered_relids,
+							   IndexPathOrderCache *order_cache)
 {
 	ListCell   *lc;
 
@@ -576,7 +596,7 @@ consider_index_join_outer_rels(PlannerInfo *root, RelOptInfo *rel,
 								 rclauseset, jclauseset, eclauseset,
 								 bitindexpaths,
 								 bms_union(clause_relids, oldrelids),
-								 considered_relids);
+								 considered_relids, order_cache);
 		}
 
 		/* Also try this set of relids by itself */
@@ -584,7 +604,7 @@ consider_index_join_outer_rels(PlannerInfo *root, RelOptInfo *rel,
 							 rclauseset, jclauseset, eclauseset,
 							 bitindexpaths,
 							 clause_relids,
-							 considered_relids);
+							 considered_relids, order_cache);
 	}
 }
 
@@ -609,7 +629,8 @@ get_join_index_paths(PlannerInfo *root, RelOptInfo *rel,
 					 IndexClauseSet *eclauseset,
 					 List **bitindexpaths,
 					 Relids relids,
-					 List **considered_relids)
+					 List **considered_relids,
+					 IndexPathOrderCache *order_cache)
 {
 	IndexClauseSet clauseset;
 	int			indexcol;
@@ -666,7 +687,7 @@ get_join_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	Assert(clauseset.nonempty);
 
 	/* Build index path(s) using the collected set of clauses */
-	get_index_paths(root, rel, index, &clauseset, bitindexpaths);
+	get_index_paths(root, rel, index, &clauseset, bitindexpaths, order_cache);
 
 	/*
 	 * Remember we considered paths for this set of relids.
@@ -714,7 +735,8 @@ eclass_already_used(EquivalenceClass *parent_ec, Relids oldrelids,
 static void
 get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 				IndexOptInfo *index, IndexClauseSet *clauses,
-				List **bitindexpaths)
+				List **bitindexpaths,
+				IndexPathOrderCache *order_cache)
 {
 	List	   *indexpaths;
 	bool		skip_nonnative_saop = false;
@@ -728,7 +750,7 @@ get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								   index, clauses,
 								   index->predOK,
 								   ST_ANYSCAN,
-								   &skip_nonnative_saop);
+								   &skip_nonnative_saop, order_cache);
 
 	/*
 	 * Submit all the ones that can form plain IndexScan plans to add_path. (A
@@ -766,9 +788,36 @@ get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									   index, clauses,
 									   false,
 									   ST_BITMAPSCAN,
-									   NULL);
+									   NULL, order_cache);
 		*bitindexpaths = list_concat(*bitindexpaths, indexpaths);
 	}
+}
+
+/*
+ * The index definition, base restrictions and equivalence classes do not
+ * change while enumerating this index's clause combinations. Generating
+ * implied join clauses can add EC-derived clauses, but does not merge ECs.
+ * Cache only the raw forward/backward ordering, including an empty result;
+ * truncate_useless_pathkeys() remains per-path and never changes its input.
+ */
+static List *
+cached_index_pathkeys(PlannerInfo *root, IndexOptInfo *index,
+					 ScanDirection direction, IndexPathOrderCache *cache)
+{
+	int			position = ScanDirectionIsBackward(direction) ? 1 : 0;
+
+	if (cache == NULL)
+		return build_index_pathkeys(root, index, direction);
+	Assert(cache->index == index);
+	if (!cache->valid[position])
+	{
+		cache->pathkeys[position] = build_index_pathkeys(root, index, direction);
+		cache->valid[position] = true;
+	}
+	else
+		Assert(compare_pathkeys(cache->pathkeys[position],
+			build_index_pathkeys(root, index, direction)) == PATHKEYS_EQUAL);
+	return cache->pathkeys[position];
 }
 
 /*
@@ -810,7 +859,8 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 				  IndexOptInfo *index, IndexClauseSet *clauses,
 				  bool useful_predicate,
 				  ScanTypeControl scantype,
-				  bool *skip_nonnative_saop)
+				  bool *skip_nonnative_saop,
+				  IndexPathOrderCache *order_cache)
 {
 	List	   *result = NIL;
 	IndexPath  *ipath;
@@ -917,8 +967,8 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	index_is_ordered = (index->sortopfamily != NULL);
 	if (index_is_ordered && pathkeys_possibly_useful)
 	{
-		index_pathkeys = build_index_pathkeys(root, index,
-											  ForwardScanDirection);
+		index_pathkeys = cached_index_pathkeys(root, index,
+											   ForwardScanDirection, order_cache);
 		useful_pathkeys = truncate_useless_pathkeys(root, rel,
 													index_pathkeys);
 		orderbyclauses = NIL;
@@ -1012,8 +1062,8 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	 */
 	if (index_is_ordered && pathkeys_possibly_useful)
 	{
-		index_pathkeys = build_index_pathkeys(root, index,
-											  BackwardScanDirection);
+		index_pathkeys = cached_index_pathkeys(root, index,
+											   BackwardScanDirection, order_cache);
 		useful_pathkeys = truncate_useless_pathkeys(root, rel,
 													index_pathkeys);
 		if (useful_pathkeys != NIL)
@@ -1164,7 +1214,7 @@ build_paths_for_OR(PlannerInfo *root, RelOptInfo *rel,
 									   index, &clauseset,
 									   useful_predicate,
 									   ST_BITMAPSCAN,
-									   NULL);
+									   NULL, NULL);
 		result = list_concat(result, indexpaths);
 	}
 

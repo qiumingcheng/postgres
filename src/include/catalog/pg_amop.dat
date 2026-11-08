@@ -3250,4 +3250,15 @@
   amoprighttype => 'point', amopstrategy => '7', amopopr => '@>(box,point)',
   amopmethod => 'brin' },
 
+# graph_adj fixed-width prototype equality lookup
+{ amopfamily => 'graph_adj/int8_graph_adj_ops', amoplefttype => 'int8',
+  amoprighttype => 'int8', amopstrategy => '1', amopopr => '=(int8,int8)',
+  amopmethod => 'graph_adj' },
+{ amopfamily => 'graph_adj/int8_graph_adj_ops', amoplefttype => 'int8',
+  amoprighttype => 'int4', amopstrategy => '1', amopopr => '=(int8,int4)',
+  amopmethod => 'graph_adj' },
+{ amopfamily => 'graph_adj/int8_graph_adj_ops', amoplefttype => 'int8',
+  amoprighttype => 'int2', amopstrategy => '1', amopopr => '=(int8,int2)',
+  amopmethod => 'graph_adj' },
+
 ]

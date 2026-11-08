@@ -1,0 +1,201 @@
+\pset format unaligned
+\pset tuples_only on
+SET client_min_messages=warning;
+CREATE TABLE ggc_cost_vertex(id bigint PRIMARY KEY);
+CREATE TABLE ggc_cost_edge(
+ id bigint PRIMARY KEY,src bigint NOT NULL,dst bigint NOT NULL,
+ weight bigint,payload text) WITH(fillfactor=40);
+INSERT INTO ggc_cost_vertex SELECT i FROM generate_series(1,8) i;
+INSERT INTO ggc_cost_edge VALUES
+ (101,1,2,5,'a'),(102,1,3,5,'b'),(103,2,4,5,'c'),
+ (104,3,4,5,'d'),(105,4,1,5,'cycle'),(106,4,5,50,'reject'),
+ (107,5,6,5,'e'),(108,6,7,5,'f'),(109,1,2,5,'parallel');
+CREATE INDEX ggc_cost_edge_out ON ggc_cost_edge(src);
+CREATE PROPERTY GRAPH ggc_cost_graph
+ VERTEX TABLES(ggc_cost_vertex KEY(id))
+ EDGE TABLES(ggc_cost_edge KEY(id)
+  SOURCE KEY(src) REFERENCES ggc_cost_vertex(id)
+  DESTINATION KEY(dst) REFERENCES ggc_cost_vertex(id));
+CREATE TEMP TABLE ggc_cost_state AS
+WITH ids AS
+(
+ SELECT 'ggc_cost_graph'::regclass::oid::bigint graph_oid,
+        'ggc_cost_edge_out'::regclass::oid::bigint index_oid,
+        (SELECT oid::bigint FROM pg_roles WHERE rolname=current_user) role_oid
+), mapped AS
+(
+ SELECT ids.*,p.oid::bigint edge_oid
+ FROM ids JOIN pg_propgraph_element p
+   ON p.pgepgid=ids.graph_oid AND p.pgekind='e'
+), scopes AS
+(
+ SELECT *,jsonb_build_object(
+   'catalog_provider_oid',0,'graph_oid',graph_oid,'edge_element_oid',edge_oid,
+   'index_relid',0,'effective_role',role_oid,'endpoint_domain',77,
+   'scope_kind',1,'direction',1,'path_mode',1,'result_mode',1,
+   'catalog_generation',7,'security_generation',11,'build_generation',0,
+   'semantic_fingerprint',98765) logical_scope,
+  jsonb_build_object(
+   'catalog_provider_oid',0,'graph_oid',graph_oid,'edge_element_oid',edge_oid,
+   'index_relid',index_oid,'effective_role',role_oid,'endpoint_domain',77,
+   'scope_kind',2,'direction',1,'path_mode',1,'result_mode',1,
+   'catalog_generation',7,'security_generation',11,'build_generation',1,
+   'semantic_fingerprint',98765) physical_scope,
+  jsonb_build_object(
+   'catalog_provider_oid',0,'graph_oid',0,'edge_element_oid',0,
+   'index_relid',0,'effective_role',role_oid,'endpoint_domain',0,
+   'scope_kind',3,'direction',0,'path_mode',0,'result_mode',0,
+   'catalog_generation',0,'security_generation',0,'build_generation',0,
+   'semantic_fingerprint',1) cost_scope
+ FROM mapped
+), configured AS
+(
+ SELECT *,jsonb_build_object(
+   'seed',20260921,'seed_target',8,'hops',4,
+   'predicate_attnum',4,'predicate_min',1,'predicate_max',10,
+   'predicate_clause_id',1,'max_scan_pages',1000,
+   'max_examined_entries',100000,'max_bindings',10000,
+   'max_bindings_per_seed',5000,'max_entries_per_seed',5000,
+   'max_memory_bytes',67108864,'max_payload_bytes',1048576,
+   'max_profiles',64,'max_parent_batch',8,'deadline_ms',10000,
+   'lock_timeout_ms',1000) options
+ FROM scopes
+)
+SELECT graph_oid,edge_oid,index_oid,logical_scope,physical_scope,cost_scope,options,
+       pg_graph_statistic_create(logical_scope,'{}'::jsonb) logical_oid,
+       pg_graph_statistic_create(physical_scope,'{}'::jsonb) physical_oid,
+       pg_graph_statistic_create(cost_scope,'{}'::jsonb) cost_oid
+FROM configured;
+SELECT (pg_graph_statistic_collect_path(logical_oid,physical_oid,options)->>'status')='READY'
+FROM ggc_cost_state;
+t
+WITH constants AS
+(
+ SELECT jsonb_build_object(
+  'started_at','2026-09-21 00:00:00+00','finished_at','2026-09-21 00:00:01+00',
+  'snapshot_source','offline_microbenchmark','sample_method','nonnegative_pg_unit_fit',
+  'truncation_reason','none','seed',48001,'population',7,'sample_count',100,
+  'effective_sample_size',100,'complete_depth',0,'layout_version',1,
+  'model_version',1,'change_baseline',jsonb_build_object('source','calibration_train'),
+  'resources',jsonb_build_object('scan_pages',0,'examined_entries',700,'peak_bytes',65536)) metadata
+), coefficients(metric_kind,component,value) AS
+(
+ VALUES (300,'batch_startup',1.0::float8),(301,'key_probe',10.0),
+        (302,'ref_deref',1.0),(303,'adj_item',0.5),
+        (304,'heap_fetch',0.25),(305,'heap_page_group',2.0),
+        (306,'binding_extend',0.1)
+), payload AS
+(
+ SELECT jsonb_agg(jsonb_build_object(
+  'metric_kind',metric_kind,
+  'profile_key',jsonb_build_object('cost_profile_version',1,'component',component),
+  'metadata',metadata,
+  'estimate',jsonb_build_object('kind',1,'state',1,'sample_count',100,
+    'p95_known',false,'uncertainty_known',false,'censored',false,
+    'expected',value,'workload_p95',NULL,'uncertainty_low',NULL,
+    'uncertainty_high',NULL))) profiles
+ FROM coefficients CROSS JOIN constants
+)
+SELECT pg_graph_statistic_publish(cost_oid,profiles)=1
+FROM ggc_cost_state,payload;
+t
+SELECT regexp_replace(test_graph_path_cost(graph_oid,edge_oid,index_oid,77,1,7,11,1,98765,
+       4,1,1.0,ARRAY[0,0,0,0]::float8[],64,1048576),
+       '"decoded_bytes":[0-9]+', '"decoded_bytes":0')
+FROM ggc_cost_state;
+{"logical_state":1,"physical_state":1,"cost_state":1,"calibrated":true,"uncertainty_unknown":true,"logical_generation":1,"physical_generation":1,"cost_generation":1,"cost_profile_version":1,"loaded_profiles":47,"decoded_bytes":0,"startup_cost":44,"total_cost":56.149999999999999,"stages":[{"stage":1,"F":1,"B":1,"N":1,"E":1.125,"A":1,"P":1,"X":1.125,"H":1.125,"page_groups":1,"peak_restore_bytes":4902,"K":1,"R":0,"logical_fallback":false,"physical_fallback":false,"startup_cost":11,"total_cost":13.94375},{"stage":2,"F":1,"B":1,"N":1,"E":1.25,"A":1,"P":1.125,"X":1,"H":1,"page_groups":1,"peak_restore_bytes":4723,"K":1,"R":0,"logical_fallback":false,"physical_fallback":false,"startup_cost":11,"total_cost":13.862500000000001},{"stage":3,"F":1,"B":1.125,"N":1,"E":1.25,"A":1.125,"P":1.5,"X":1,"H":1,"page_groups":1,"peak_restore_bytes":4527,"K":1,"R":0,"logical_fallback":false,"physical_fallback":false,"startup_cost":11,"total_cost":13.9},{"stage":4,"F":1,"B":1.5,"N":1,"E":1.125,"A":1,"P":2.25,"X":1.625,"H":1.625,"page_groups":1,"peak_restore_bytes":4613,"K":1,"R":0,"logical_fallback":false,"physical_fallback":false,"startup_cost":11,"total_cost":14.44375}]}
+WITH estimate AS
+(
+ SELECT test_graph_path_cost(graph_oid,edge_oid,index_oid,77,1,7,11,1,98765,
+          4,1,1.0,ARRAY[0,0,0,0]::float8[],64,1048576)::jsonb j
+ FROM ggc_cost_state
+)
+SELECT (j->>'logical_state')::int=1
+   AND (j->>'physical_state')::int=1
+   AND (j->>'cost_state')::int=1
+   AND (j->>'calibrated')::boolean
+   AND (j->>'uncertainty_unknown')::boolean
+   AND (j->>'loaded_profiles')::int=47
+   AND (j->>'decoded_bytes')::int BETWEEN 1 AND 1048576
+   AND (j->'stages'->0->>'N')::numeric=1
+   AND (j->'stages'->0->>'X')::numeric=1.125
+   AND (j->'stages'->0->>'K')::numeric=1
+   AND (j->'stages'->0->>'R')::numeric=0
+FROM estimate;
+t
+WITH costs AS
+(
+ SELECT test_graph_path_cost(graph_oid,edge_oid,index_oid,77,1,7,11,1,98765,
+          4,1,1.0,ARRAY[0,0,0,0]::float8[],64,1048576)::jsonb key_cost,
+        test_graph_path_cost(graph_oid,edge_oid,index_oid,77,1,7,11,1,98765,
+          4,1,1.0,ARRAY[0,1,1,1]::float8[],64,1048576)::jsonb ref_cost
+ FROM ggc_cost_state
+)
+SELECT (ref_cost->>'total_cost')::numeric < (key_cost->>'total_cost')::numeric
+   AND (ref_cost->'stages'->1->>'K')::numeric=0
+   AND (ref_cost->'stages'->1->>'R')::numeric=
+       (ref_cost->'stages'->1->>'N')::numeric
+FROM costs;
+t
+WITH missing AS
+(
+ SELECT test_graph_path_cost(graph_oid,edge_oid,index_oid,77,1,7,11,2,98765,
+          4,1,1.0,ARRAY[0,0,0,0]::float8[],64,1048576)::jsonb j
+ FROM ggc_cost_state
+)
+SELECT (j->>'logical_state')::int=1
+   AND (j->>'physical_state')::int=0
+   AND (j->>'cost_state')::int=1
+   AND (j->>'uncertainty_unknown')::boolean
+   AND (j->'stages'->0->>'physical_fallback')::boolean
+FROM missing;
+t
+SELECT test_graph_path_cost(graph_oid,edge_oid,index_oid,77,1,7,11,1,98765,
+       4,1,1.0,ARRAY[0,0,0,0]::float8[],46,1048576)
+FROM ggc_cost_state;
+ERROR:  bounded graph statistics planner load exceeded its selected profile budget
+SELECT test_graph_path_cost(graph_oid,edge_oid,index_oid,77,1,7,11,1,98765,
+       4,1,1.0,ARRAY[0,0,0,0]::float8[],64,1024)
+FROM ggc_cost_state;
+ERROR:  bounded graph statistics planner load exceeded its byte budget
+SELECT (pg_graph_statistic_collect_path(logical_oid,physical_oid,
+ options||'{"max_bindings_per_seed":3}'::jsonb)->>'status')='PARTIAL'
+FROM ggc_cost_state;
+t
+WITH partial AS
+(
+ SELECT test_graph_path_cost(graph_oid,edge_oid,index_oid,77,1,7,11,1,98765,
+          4,1,1.0,ARRAY[0,0,0,0]::float8[],64,1048576)::jsonb j
+ FROM ggc_cost_state
+)
+SELECT (j->>'logical_state')::int=2
+   AND (j->>'physical_state')::int=2
+   AND (j->>'uncertainty_unknown')::boolean
+   AND (j->'stages'->0->>'logical_fallback')::boolean
+   AND (j->'stages'->0->>'physical_fallback')::boolean
+FROM partial;
+t
+REINDEX INDEX ggc_cost_edge_out;
+WITH stale AS
+(
+ SELECT test_graph_path_cost(graph_oid,edge_oid,index_oid,77,1,7,11,1,98765,
+          4,1,1.0,ARRAY[0,0,0,0]::float8[],64,1048576)::jsonb j
+ FROM ggc_cost_state
+)
+SELECT (j->>'logical_state')::int=2
+   AND (j->>'physical_state')::int=3
+   AND (j->>'cost_state')::int=1
+   AND (j->>'uncertainty_unknown')::boolean
+   AND (j->'stages'->0->>'physical_fallback')::boolean
+FROM stale;
+t
+SELECT test_graph_feedback_buffer()::jsonb =
+ '{"first":true,"second":true,"third":false,"accepted":2,"dropped":1,
+   "complete_records":1,"incomplete_records":1,"cardinality_records":1,
+   "timing_records":2}'::jsonb;
+t
+SELECT test_graph_feedback_security('pg_read_all_data'::regrole::oid);
+t
+DROP PROPERTY GRAPH ggc_cost_graph;
+DROP TABLE ggc_cost_edge;
+DROP TABLE ggc_cost_vertex;

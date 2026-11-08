@@ -31,6 +31,7 @@
 #include "catalog/pg_extension.h"
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
+#include "catalog/pg_graph_statistic.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_largeobject.h"
 #include "catalog/pg_namespace.h"
@@ -57,6 +58,7 @@
 #include "commands/tablespace.h"
 #include "commands/typecmds.h"
 #include "miscadmin.h"
+#include "statistics/graph_stats.h"
 #include "storage/lmgr.h"
 #include "utils/acl.h"
 #include "utils/fmgroids.h"
@@ -1697,6 +1699,10 @@ shdepReassignOwned_Owner(Form_pg_shdepend sdepForm, Oid newrole)
 
 		case SubscriptionRelationId:
 			AlterSubscriptionOwner_oid(sdepForm->objid, newrole);
+			break;
+
+		case GraphStatisticRelationId:
+			ReassignGraphStatisticsOwner(sdepForm->objid, newrole);
 			break;
 
 			/* Generic alter owner cases */

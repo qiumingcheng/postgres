@@ -1,0 +1,105 @@
+\pset format unaligned
+\pset tuples_only on
+SET client_min_messages=warning;
+CREATE TABLE ggc_stats_vertex(id bigint PRIMARY KEY,payload text);
+CREATE TABLE ggc_stats_edge(id bigint PRIMARY KEY,src bigint NOT NULL,dst bigint NOT NULL,payload text);
+INSERT INTO ggc_stats_vertex SELECT x,'v' FROM unnest(ARRAY[10,20,30,40,50,60,70,80]::bigint[]) x;
+INSERT INTO ggc_stats_edge VALUES
+ (101,10,20,'e'),(102,10,20,'e'),(103,10,30,'e'),
+ (104,20,40,'e'),(105,30,40,'e'),(106,40,50,'e'),
+ (107,50,60,'e'),(108,40,40,'e'),(109,40,60,'e');
+CREATE PROPERTY GRAPH ggc_stats_graph
+ VERTEX TABLES(ggc_stats_vertex KEY(id))
+ EDGE TABLES(ggc_stats_edge KEY(id)
+  SOURCE KEY(src) REFERENCES ggc_stats_vertex(id)
+  DESTINATION KEY(dst) REFERENCES ggc_stats_vertex(id));
+CREATE TEMP TABLE ggc_stats_state AS
+WITH ids AS
+(
+ SELECT 'ggc_stats_graph'::regclass::oid::bigint AS graph_oid,
+        (SELECT oid::bigint FROM pg_roles WHERE rolname=current_user) AS role_oid
+), mapped AS
+(
+ SELECT ids.*,p.oid::bigint AS edge_oid
+ FROM ids JOIN pg_propgraph_element p
+   ON p.pgepgid=ids.graph_oid AND p.pgekind='e'
+), scoped AS
+(
+ SELECT jsonb_build_object(
+   'catalog_provider_oid',0,'graph_oid',graph_oid,'edge_element_oid',edge_oid,
+   'index_relid',0,'effective_role',role_oid,'endpoint_domain',77,
+   'scope_kind',1,'direction',1,'path_mode',1,'result_mode',1,
+   'catalog_generation',7,'security_generation',11,'build_generation',0,
+   'semantic_fingerprint',12346) AS scope
+ FROM mapped
+), configured AS
+(
+ SELECT scope,jsonb_build_object(
+   'mode','full','seed',20260921,'vertex_sample_target',8,'strata',3,
+   'heavy_hitter_limit',8,'max_scan_pages',1000,'max_examined_entries',100000,
+   'max_bindings',100,'max_entries_per_seed',1000,'max_memory_bytes',67108864,
+   'max_payload_bytes',1048576,'max_profiles',64,'deadline_ms',10000,
+   'lock_timeout_ms',1000,'throttle_delay_ms',0) AS options
+ FROM scoped
+)
+SELECT scope,options,pg_graph_statistic_create(scope,'{}'::jsonb) AS stat_oid
+FROM configured;
+SELECT (r->>'status')='READY' AND (r->>'published')::boolean
+       AND (r->>'population')::integer=8 AND (r->>'visible_edges')::integer=9
+FROM ggc_stats_state s,
+LATERAL (SELECT pg_graph_statistic_collect(s.stat_oid,s.options) r) q;
+WITH document AS
+(
+ SELECT pg_graph_statistic_read(stat_oid,scope) d FROM ggc_stats_state
+), profiles AS
+(
+ SELECT p FROM document,jsonb_array_elements(d->'profiles') p
+)
+SELECT max((p->'estimate'->>'expected')::numeric) FILTER (WHERE (p->>'metric_kind')::integer=100)=8
+   AND max((p->'estimate'->>'expected')::numeric) FILTER (WHERE (p->>'metric_kind')::integer=101)=9
+   AND max((p->'estimate'->>'expected')::numeric) FILTER (WHERE (p->>'metric_kind')::integer=102)=1.125
+   AND max((p->'estimate'->>'expected')::numeric) FILTER (WHERE (p->>'metric_kind')::integer=103)=0.375
+   AND max((p->'estimate'->>'expected')::numeric) FILTER (WHERE (p->>'metric_kind')::integer=105)=3
+FROM profiles;
+SELECT (r->>'status')='READY' AND (r->>'sample_count')::integer=6
+FROM ggc_stats_state s,
+LATERAL (SELECT pg_graph_statistic_collect(
+ s.stat_oid,s.options||'{"mode":"sample","vertex_sample_target":6}'::jsonb) r) q;
+WITH document AS
+(
+ SELECT pg_graph_statistic_read(stat_oid,scope) d FROM ggc_stats_state
+), weights AS
+(
+ SELECT p FROM document,jsonb_array_elements(d->'profiles') p
+ WHERE (p->>'metric_kind')::integer=110
+)
+SELECT count(*)=3 AND bool_and(
+ abs((p->'estimate'->>'expected')::numeric -
+     (p->'profile_key'->>'stratum_population')::numeric /
+     (p->'profile_key'->>'stratum_samples')::numeric) < 0.000000001)
+FROM weights;
+SELECT (r->>'status')='PARTIAL' AND NOT (r->>'published')::boolean
+       AND h.gstgeneration=2
+FROM ggc_stats_state s
+JOIN pg_graph_statistic h ON h.oid=s.stat_oid,
+LATERAL (SELECT pg_graph_statistic_collect(
+ s.stat_oid,s.options||'{"max_examined_entries":7}'::jsonb) r) q;
+SELECT (r->>'status')='READY' AND (r->>'censored')::boolean
+FROM ggc_stats_state s,
+LATERAL (SELECT pg_graph_statistic_collect(
+ s.stat_oid,s.options||'{"max_entries_per_seed":1}'::jsonb) r) q;
+WITH document AS
+(
+ SELECT pg_graph_statistic_read(stat_oid,scope) d FROM ggc_stats_state
+), bounded AS
+(
+ SELECT p FROM document,jsonb_array_elements(d->'profiles') p
+ WHERE (p->>'metric_kind')::integer IN (102,104,105,106,107)
+)
+SELECT count(*)=5 AND bool_and((p->'estimate'->>'kind')::integer=2
+                              AND (p->'estimate'->>'state')::integer=2
+                              AND (p->'estimate'->>'censored')::boolean)
+FROM bounded;
+DROP PROPERTY GRAPH ggc_stats_graph;
+DROP TABLE ggc_stats_edge;
+DROP TABLE ggc_stats_vertex;

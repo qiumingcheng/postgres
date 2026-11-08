@@ -21,6 +21,7 @@
 #include "postgres.h"
 
 #include "access/sysattr.h"
+#include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
@@ -162,6 +163,28 @@ pull_varnos_walker(Node *node, pull_varnos_context *context)
 {
 	if (node == NULL)
 		return false;
+	/* Neither leaf can contain a Var or a reference to a relation. */
+	if (IsA(node, Const) || IsA(node, Param))
+		return false;
+	/* Avoid per-element callback dispatch for arrays of constants or lookup
+	 * parameters. Vars (including their nulling rels), placeholders and
+	 * subqueries must still use the ordinary context-sensitive handling. */
+	if (IsA(node, ArrayExpr))
+	{
+		ListCell   *lc;
+
+		check_stack_depth();
+		foreach(lc, ((ArrayExpr *) node)->elements)
+		{
+			Node	   *element = lfirst(lc);
+
+			if (element == NULL || IsA(element, Const) || IsA(element, Param))
+				continue;
+			if (pull_varnos_walker(element, context))
+				return true;
+		}
+		return false;
+	}
 	if (IsA(node, Var))
 	{
 		Var		   *var = (Var *) node;

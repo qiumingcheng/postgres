@@ -41,6 +41,7 @@ include $(top_srcdir)/src/backend/common.mk
 node_headers = \
 	nodes/nodes.h \
 	nodes/primnodes.h \
+	nodes/graphnodes.h \
 	nodes/parsenodes.h \
 	nodes/pathnodes.h \
 	nodes/plannodes.h \

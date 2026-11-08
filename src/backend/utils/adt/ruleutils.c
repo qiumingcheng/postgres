@@ -9060,6 +9060,31 @@ find_param_referent(Param *param, deparse_context *context,
 			}
 
 			/*
+			 * A CustomScan can supply parameters to its declared children.
+			 * Sources use its scan-slot namespace (like custom_exprs), so the
+			 * normal push_ancestor_plan/INDEX_VAR machinery can expand them.
+			 * A sibling, initplan, or unrelated ancestor must not capture them.
+			 */
+			if (IsA(ancestor, CustomScan) &&
+				list_member_ptr(((CustomScan *) ancestor)->custom_plans, child_plan))
+			{
+				CustomScan *custom = (CustomScan *) ancestor;
+				ListCell *idcell;
+				ListCell *exprcell;
+
+				forboth(idcell, custom->custom_param_ids,
+						exprcell, custom->custom_param_exprs)
+				{
+					if (lfirst_int(idcell) == param->paramid)
+					{
+						*dpns_p = dpns;
+						*ancestor_cell_p = lc;
+						return (Node *) lfirst(exprcell);
+					}
+				}
+			}
+
+			/*
 			 * If ancestor is a SubPlan, check the arguments it provides.
 			 */
 			if (IsA(ancestor, SubPlan))

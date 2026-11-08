@@ -708,7 +708,7 @@ extract_lateral_vars_from_PHVs(PlannerInfo *root, Relids innerrelids)
  * the join is formed.  In addition, joinrels do not maintain lateral_vars.  So
  * we do not have a way to extract cache keys from joinrels.
  */
-static Path *
+Path *
 get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
 				 RelOptInfo *outerrel, Path *inner_path,
 				 Path *outer_path, JoinType jointype,
@@ -865,6 +865,28 @@ get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
 											binary_mode,
 											outer_path->rows);
 	}
+
+	return NULL;
+}
+
+/*
+ * get_materialize_path
+ *		Consider materializing a non-partial inner access path.
+ *
+ * The caller supplies the cheapest inner path that does not depend on the
+ * outer relation, or NULL if there is no such candidate.  Keep this test in
+ * one place so ordered binding executors can use the same choice as nested
+ * loops, without maintaining a second materialization policy.
+ */
+Path *
+get_materialize_path(RelOptInfo *innerrel, Path *inner_path, uint64 pgs_mask)
+{
+	if ((pgs_mask &
+		 (PGS_NESTLOOP_MATERIALIZE | PGS_CONSIDER_NONPARTIAL)) ==
+		(PGS_NESTLOOP_MATERIALIZE | PGS_CONSIDER_NONPARTIAL) &&
+		inner_path != NULL &&
+		!ExecMaterializesOutput(inner_path->pathtype))
+		return (Path *) create_material_path(innerrel, inner_path, true);
 
 	return NULL;
 }
@@ -1911,13 +1933,8 @@ match_unsorted_outer(PlannerInfo *root,
 		 * for partial paths either way, and use it for non-partial paths only
 		 * when PGS_CONSIDER_NONPARTIAL is also set.
 		 */
-		if ((extra->pgs_mask &
-			 (PGS_NESTLOOP_MATERIALIZE | PGS_CONSIDER_NONPARTIAL)) ==
-			(PGS_NESTLOOP_MATERIALIZE | PGS_CONSIDER_NONPARTIAL) &&
-			inner_cheapest_total != NULL &&
-			!ExecMaterializesOutput(inner_cheapest_total->pathtype))
-			matpath = (Path *)
-				create_material_path(innerrel, inner_cheapest_total, true);
+		matpath = get_materialize_path(innerrel, inner_cheapest_total,
+									  extra->pgs_mask);
 	}
 
 	foreach(lc1, outerrel->pathlist)

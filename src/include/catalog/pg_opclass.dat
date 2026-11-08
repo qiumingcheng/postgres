@@ -492,4 +492,9 @@
 
 # no brin opclass for the geometric types except box
 
+{ oid => '8467', oid_symbol => 'GRAPH_ADJ_INT8_OPS_OID',
+  opcmethod => 'graph_adj', opcname => 'int8_graph_adj_ops',
+  opcfamily => 'graph_adj/int8_graph_adj_ops', opcintype => 'int8',
+  opcdefault => 't' },
+
 ]

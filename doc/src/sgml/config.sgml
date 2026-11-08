@@ -5844,6 +5844,38 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-enable-graph-age-adjacency" xreflabel="enable_graph_age_adjacency">
+      <term><varname>enable_graph_age_adjacency</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>enable_graph_age_adjacency</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Enables transaction-private AGE adjacency delivery in qualified
+        <literal>GraphExpandFixed</literal> endpoint-set WALK execution.
+        The default is <literal>off</literal>. This setting does not load AGE,
+        create indexes, or enable the graph planning adapter by itself.
+        AGE must be explicitly loaded in the session. The provider currently
+        requires a superuser running a <literal>REPEATABLE READ READ ONLY</literal>
+        transaction over supported permanent heap relations without row-level
+        security or inheritance. Writes, subtransactions, and unsupported
+        path/bag requests are rejected rather than silently changing routes.
+       </para>
+       <para>
+        The first execution builds adjacency from the same MVCC snapshot as
+        the query; subsequent qualifying executions in that transaction may
+        reuse it. The cache is released at transaction end and is distinct
+        from AGE's VLE global cache. Prefer <command>SET LOCAL</command> to
+        opt in within a suitable transaction. Only superusers and roles with
+        the appropriate <literal>SET</literal> privilege can change this
+        parameter; a parameter privilege does not bypass provider security
+        checks. The current standard graph adapter remains a development
+        facility, not a declaration of production readiness.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-enable-group-by-reordering" xreflabel="enable_group_by_reordering">
       <term><varname>enable_group_by_reordering</varname> (<type>boolean</type>)
       <indexterm>

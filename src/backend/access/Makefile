@@ -11,6 +11,7 @@ include $(top_builddir)/src/Makefile.global
 SUBDIRS	    = \
 	brin \
 	common \
+	graphadj \
 	gin \
 	gist \
 	hash \

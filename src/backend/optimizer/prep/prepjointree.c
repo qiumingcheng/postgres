@@ -30,10 +30,12 @@
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "nodes/graphnodes.h"
 #include "nodes/makefuncs.h"
 #include "nodes/multibitmapset.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
+#include "optimizer/graphpath.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/placeholder.h"
 #include "optimizer/plancat.h"
@@ -146,6 +148,10 @@ static bool jointree_contains_lateral_outer_refs(PlannerInfo *root,
 static void perform_pullup_replace_vars(PlannerInfo *root,
 										pullup_replace_vars_context *rvcontext,
 										AppendRelInfo *containing_appendrel);
+static bool graph_program_mapping_valid(GgcFixedProgram *program, List *rtable);
+static void offset_graph_program(GgcFixedProgram *program, int rtoffset);
+static void merge_pulled_graph_program(Query *parent, GgcFixedProgram *program,
+									   bool rejected, List *rtable);
 static void replace_vars_in_jointree(Node *jtnode,
 									 pullup_replace_vars_context *context);
 static Node *pullup_replace_vars(Node *expr,
@@ -1393,6 +1399,164 @@ pull_up_subqueries_recurse(PlannerInfo *root, Node *jtnode,
 	return jtnode;
 }
 
+typedef struct graph_program_var_context
+{
+	List	   *variables;
+	Bitmapset  *required;
+	bool		valid;
+} graph_program_var_context;
+
+static GgcVariable *
+find_graph_variable(List *variables, int variable_id)
+{
+	foreach_node(GgcVariable, variable, variables)
+		if (variable->variable_id == variable_id)
+			return variable;
+	return NULL;
+}
+
+static bool
+graph_program_var_walker(Node *node, graph_program_var_context *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+		GgcVariable *mapped = NULL;
+
+		if (var->varlevelsup != 0)
+			return false; /* native outer parameter, not a local graph variable */
+		foreach_node(GgcVariable, variable, context->variables)
+			if (variable->fallback_rti == var->varno)
+			{
+				mapped = variable;
+				break;
+			}
+		if (!mapped)
+		{
+			context->valid = false;
+			return true;
+		}
+		context->required = bms_add_member(context->required,
+										   mapped->variable_id);
+		return false;
+	}
+	return expression_tree_walker(node, graph_program_var_walker, context);
+}
+
+static bool
+graph_program_expression_valid(Node *expression, List *variables,
+							   Bitmapset *claimed)
+{
+	graph_program_var_context context = {
+		.variables = variables,
+		.valid = true
+	};
+
+	(void) graph_program_var_walker(expression, &context);
+	return context.valid && bms_equal(context.required, claimed);
+}
+
+/*
+ * A sidecar is an optional optimization proof.  Validate every scalar mapping
+ * against the rewritten fallback instead of trusting stale parser RTIs.
+ */
+static bool
+graph_program_mapping_valid(GgcFixedProgram *program, List *rtable)
+{
+	Bitmapset  *variable_ids = NULL;
+
+	if (!program || program->semantic_version != GGC_GRAPH_SEMANTIC_VERSION ||
+		program->variables == NIL || program->hops == NIL ||
+		program->outputs == NIL)
+		return false;
+	foreach_node(GgcVariable, variable, program->variables)
+	{
+		RangeTblEntry *rte;
+
+		if (variable->variable_id <= 0 ||
+			bms_is_member(variable->variable_id, variable_ids) ||
+			variable->fallback_rti <= 0 ||
+			variable->fallback_rti > list_length(rtable) ||
+			(variable->identity_attnum <= 0 && variable->identity_attnums == NIL))
+			return false;
+		variable_ids = bms_add_member(variable_ids, variable->variable_id);
+		rte = rt_fetch(variable->fallback_rti, rtable);
+		if (!((rte->rtekind == RTE_RELATION && rte->relid == variable->relation_oid) ||
+			  (program->native_access && rte->rtekind == RTE_SUBQUERY)))
+			return false;
+		if (variable->entity_kind == GGC_EDGE &&
+			((variable->source_attnum <= 0 && variable->source_attnums == NIL) ||
+			 (variable->destination_attnum <= 0 && variable->destination_attnums == NIL)))
+			return false;
+	}
+	foreach_node(GgcFixedHop, hop, program->hops)
+	{
+		GgcVariable *input = find_graph_variable(program->variables,
+											   hop->input_variable);
+		GgcVariable *edge = find_graph_variable(program->variables,
+											  hop->edge_variable);
+		GgcVariable *output = find_graph_variable(program->variables,
+												hop->output_variable);
+
+		if (!input || !edge || !output || input->entity_kind != GGC_VERTEX ||
+			edge->entity_kind != GGC_EDGE || output->entity_kind != GGC_VERTEX ||
+			(hop->direction != GGC_OUT && hop->direction != GGC_IN &&
+			 hop->direction != GGC_UNDIRECTED))
+			return false;
+		foreach_node(GgcQual, qual, hop->quals)
+			if (!graph_program_expression_valid((Node *) qual->expression,
+												program->variables,
+												qual->required_variables))
+				return false;
+	}
+	foreach_node(GgcOutput, output, program->outputs)
+		if (output->result_attnum <= 0 || !output->fallback_expression ||
+			!graph_program_expression_valid((Node *) output->fallback_expression,
+											program->variables,
+											output->required_variables))
+			return false;
+	return true;
+}
+
+static void
+offset_graph_program(GgcFixedProgram *program, int rtoffset)
+{
+	if (program->graph_rti > 0)
+		program->graph_rti += rtoffset;
+	foreach_node(GgcVariable, variable, program->variables)
+		variable->fallback_rti += rtoffset;
+	foreach_node(GgcFixedHop, hop, program->hops)
+		foreach_node(GgcQual, qual, hop->quals)
+			OffsetVarNodes((Node *) qual->expression, rtoffset, 0);
+	foreach_node(GgcOutput, output, program->outputs)
+		OffsetVarNodes((Node *) output->fallback_expression, rtoffset, 0);
+}
+
+static void
+merge_pulled_graph_program(Query *parent, GgcFixedProgram *program,
+						   bool rejected, List *rtable)
+{
+	if (rejected || (program && (parent->graph_program_disabled ||
+									  parent->graph_program != NULL)))
+	{
+		parent->graph_program = NULL;
+		parent->graph_program_disabled = true;
+		return;
+	}
+	if (program)
+	{
+		if (!graph_program_mapping_valid(program, rtable))
+		{
+			parent->graph_program = NULL;
+			parent->graph_program_disabled = true;
+		}
+		else
+			parent->graph_program = program;
+	}
+}
+
 /*
  * pull_up_simple_subquery
  *		Attempt to pull up a single simple subquery.
@@ -1415,6 +1579,8 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 	Query	   *subquery;
 	PlannerInfo *subroot;
 	int			rtoffset;
+	GgcFixedProgram *pulled_graph_program = NULL;
+	bool		rejected_graph_program = false;
 	pullup_replace_vars_context rvcontext;
 	ListCell   *lc;
 
@@ -1553,6 +1719,17 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 		flatten_join_alias_vars(subroot, subroot->parse,
 								(Node *) subquery->targetList);
 
+	if (subquery->graph_program_disabled)
+		rejected_graph_program = true;
+	else if (subquery->graph_program)
+	{
+		if (graph_program_mapping_valid(subquery->graph_program,
+											 subquery->rtable))
+			pulled_graph_program = subquery->graph_program;
+		else
+			rejected_graph_program = true;
+	}
+
 	/*
 	 * Adjust level-0 varnos in subquery so that we can append its rangetable
 	 * to upper query's.  We have to fix the subquery's append_rel_list as
@@ -1561,6 +1738,8 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 	rtoffset = list_length(parse->rtable);
 	OffsetVarNodes((Node *) subquery, rtoffset, 0);
 	OffsetVarNodes((Node *) subroot->append_rel_list, rtoffset, 0);
+	if (pulled_graph_program)
+		offset_graph_program(pulled_graph_program, rtoffset);
 
 	/*
 	 * Upper-level vars in subquery are now one level closer to their parent
@@ -1666,6 +1845,8 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 	 */
 	CombineRangeTables(&parse->rtable, &parse->rteperminfos,
 					   subquery->rtable, subquery->rteperminfos);
+	merge_pulled_graph_program(parse, pulled_graph_program,
+							   rejected_graph_program, parse->rtable);
 
 	/*
 	 * Pull up any FOR UPDATE/SHARE markers, too.  (OffsetVarNodes already
@@ -1767,6 +1948,11 @@ pull_up_simple_union_all(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte)
 	Query	   *subquery = rte->subquery;
 	int			rtoffset = list_length(root->parse->rtable);
 	List	   *rtable;
+
+	/* One fixed program cannot truthfully describe multiple UNION branches. */
+	if (subquery->graph_program_disabled || subquery->graph_program)
+		merge_pulled_graph_program(root->parse, NULL, true,
+								   root->parse->rtable);
 
 	/*
 	 * Make a modifiable copy of the subquery's rtable, so we can adjust
@@ -1960,6 +2146,10 @@ is_simple_subquery(PlannerInfo *root, Query *subquery, RangeTblEntry *rte,
 	if (!IsA(subquery, Query) ||
 		subquery->commandType != CMD_SELECT)
 		elog(ERROR, "subquery is bogus");
+
+	/* A graph planner may need this exact region for a composable Path. */
+	if (GgcGraphKeepSubqueryBoundary(root, subquery))
+		return false;
 
 	/*
 	 * Can't currently pull up a query with setops (unless it's simple UNION

@@ -58,6 +58,7 @@
 
 #include "access/transam.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_graph_statistic_d.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
@@ -106,6 +107,8 @@ static void ScanQueryForLocks(Query *parsetree, bool acquire);
 static bool ScanQueryWalker(Node *node, bool *acquire);
 static TupleDesc PlanCacheComputeResultDesc(List *stmt_list);
 static void PlanCacheRelCallback(Datum arg, Oid relid);
+static void PlanCacheGraphAuthCallback(Datum arg, SysCacheIdentifier cacheid,
+									 uint32 hashvalue);
 static void PlanCacheObjectCallback(Datum arg, SysCacheIdentifier cacheid,
 									uint32 hashvalue);
 static void PlanCacheSysCallback(Datum arg, SysCacheIdentifier cacheid,
@@ -150,6 +153,11 @@ InitPlanCache(void)
 	CacheRegisterRelcacheCallback(PlanCacheRelCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(PROCOID, PlanCacheObjectCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(TYPEOID, PlanCacheObjectCallback, (Datum) 0);
+	CacheRegisterSyscacheCallback(GRAPHSTATISTICOID, PlanCacheObjectCallback,
+							 (Datum) 0);
+	CacheRegisterSyscacheCallback(AUTHOID, PlanCacheGraphAuthCallback, (Datum) 0);
+	CacheRegisterSyscacheCallback(AUTHMEMROLEMEM, PlanCacheGraphAuthCallback,
+								 (Datum) 0);
 	CacheRegisterSyscacheCallback(NAMESPACEOID, PlanCacheSysCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(OPEROID, PlanCacheSysCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(AMOPOPID, PlanCacheSysCallback, (Datum) 0);
@@ -2200,8 +2208,24 @@ PlanCacheRelCallback(Datum arg, Oid relid)
 }
 
 /*
+ * Role membership/attributes can remove complete population visibility while
+ * GetUserId() and the table ACLs stay unchanged. Graph statistics consumers
+ * explicitly depend on pg_graph_statistic, including logical-only and absent
+ * scopes. Reuse that dependency to invalidate only participating plans.
+ *
+ * AUTHMEMROLEMEM covers every pg_auth_members tuple change, including its
+ * inherit option; the inverse-key AUTHMEMMEMROLE callback would be redundant.
+ * Do not broadcast relcache/sinval messages or reset ordinary plans here.
+ */
+static void
+PlanCacheGraphAuthCallback(Datum arg, SysCacheIdentifier cacheid, uint32 hashvalue)
+{
+	PlanCacheRelCallback((Datum) 0, GraphStatisticRelationId);
+}
+
+/*
  * PlanCacheObjectCallback
- *		Syscache inval callback function for PROCOID and TYPEOID caches
+ *		Syscache inval callback for object caches carried by PlanInvalItem
  *
  * Invalidate all plans mentioning the object with the specified hash value,
  * or all plans mentioning any member of this cache if hashvalue == 0.

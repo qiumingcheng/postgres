@@ -1,6 +1,7 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
 backend_sources += files(
+	'graph_fixed.c',
   'execAmi.c',
   'execAsync.c',
   'execCurrent.c',
@@ -19,6 +20,11 @@ backend_sources += files(
   'execTuples.c',
   'execUtils.c',
   'functions.c',
+  'graph_batch.c',
+  'graph_btree_provider.c',
+  'graph_provider.c',
+  'graph_pgq.c',
+  'graph_pgq_plan.c',
   'instrument.c',
   'nodeAgg.c',
   'nodeAppend.c',

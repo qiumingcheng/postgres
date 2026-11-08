@@ -1,0 +1,218 @@
+\pset format unaligned
+\pset tuples_only on
+CREATE TABLE ggc_batch_edge(id bigint PRIMARY KEY,src bigint NOT NULL,dst bigint NOT NULL,payload text) WITH(fillfactor=40);
+CREATE INDEX ggc_batch_out ON ggc_batch_edge(src);
+INSERT INTO ggc_batch_edge VALUES (1,10,20,'a'),(2,10,30,'b'),(3,20,40,'c'),(4,30,50,'d');
+UPDATE ggc_batch_edge SET payload='hot' WHERE id=1;
+CREATE TEMP TABLE ggc_batch_result(d jsonb);
+INSERT INTO ggc_batch_result
+SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[10,10,20,30]::bigint[],ARRAY[20,10,30,40]::bigint[],
+ 2,2,4,368,1048576,false,0,1,true,0,0)::jsonb AS d;
+SELECT d->>'row_count',d->>'qual_calls',d#>>'{instrumentation,endpoint_requests}',
+ d#>>'{instrumentation,shared_parent_requests}',d#>>'{instrumentation,endpoint_batches}',
+ d#>>'{instrumentation,candidate_batches}',d#>>'{instrumentation,tableam_fetches}',
+ d#>>'{instrumentation,visibility_reuses}',d#>>'{instrumentation,restored_bindings}'
+FROM ggc_batch_result;
+6|6|3|1|2|3|4|2|6
+SELECT array_agg(format('%s:%s:%s',r->>'parent_id',r->>'edge_id',r->>'qual_pass')
+ ORDER BY (r->>'parent_ordinal')::bigint,(r->>'candidate_ordinal')::bigint)
+FROM ggc_batch_result,jsonb_array_elements(d->'rows') r;
+{1001:1:true,1001:2:false,1000:1:false,1000:2:true,1002:3:false,1003:4:false}
+SELECT bool_and((r->>'root_tid')<>(r->>'visible_tid')) FILTER (WHERE (r->>'edge_id')::bigint=1),
+ d#>>'{instrumentation,hot_redirects}',
+ (d#>>'{instrumentation,peak_candidate_count}')::int<=2,
+ (d#>>'{instrumentation,peak_candidate_bytes}')::int<=368,
+ (d#>>'{instrumentation,peak_inflight_pages}')::int<=4,
+ (d#>>'{instrumentation,peak_pins}')::int<=4,
+ (d#>>'{instrumentation,peak_restore_bytes}')::bigint<=1048576
+FROM ggc_batch_result,jsonb_array_elements(d->'rows') r GROUP BY d;
+t|1|t|t|t|t|t
+SELECT d#>>'{instrumentation,first_row_batches}',d#>>'{instrumentation,peak_candidate_count}'
+FROM (SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[10]::bigint[],ARRAY[1]::bigint[],2,8,4,1472,1048576,
+ true,0,1,false,0,0)::jsonb d) s;
+1|1
+SELECT d#>>'{instrumentation,small_batches}',d#>>'{instrumentation,peak_candidate_count}'
+FROM (SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[10]::bigint[],ARRAY[1]::bigint[],2,8,4,1472,1048576,
+ false,4,1,false,0,0)::jsonb d) s;
+2|1
+SELECT d->>'row_count',d#>>'{instrumentation,rescan_count}',
+ d#>>'{instrumentation,parent_bindings}'
+FROM (SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[10,20]::bigint[],ARRAY[1,2]::bigint[],2,2,4,368,1048576,
+ false,0,1,false,3,0)::jsonb d) s;
+6|1|4
+SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[10]::bigint[],ARRAY[1]::bigint[],2,2,4,368,1048576,
+ false,0,1,false,1,0);
+ERROR:  graph batch injected provider error
+SELECT test_graph_batch_cleanup_state()::jsonb;
+{"active": 0, "end_calls": 1}
+-- Linear restoration keeps parent/candidate order despite reversed delivery.
+SELECT string_agg(format('%s:%s',r->>'parent_id',r->>'edge_id'),',' ORDER BY n)
+ = '1000:3,1001:1,1001:2,1002:1,1002:2,1003:4'
+FROM (SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[20,10,10,30]::bigint[],ARRAY[1,2,3,4]::bigint[],4,16,4,8192,1048576,
+ false,0,1,false,4,0)::jsonb d) s,
+ jsonb_array_elements(d->'rows') WITH ORDINALITY AS x(r,n);
+t
+-- Duplicate, unsorted parent ordinals use the full ordering contract.
+SELECT string_agg(format('%s:%s',r->>'parent_id',r->>'edge_id'),',' ORDER BY n)
+ = '1003:4,1001:1,1002:1,1001:2,1002:2,1000:3'
+FROM (SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[20,10,10,30]::bigint[],ARRAY[3,1,1,0]::bigint[],4,16,4,8192,1048576,
+ false,0,1,false,4,0)::jsonb d) s,
+ jsonb_array_elements(d->'rows') WITH ORDINALITY AS x(r,n);
+t
+-- Dense candidate identities are stable within a restore group, not across rescans.
+WITH rows AS MATERIALIZED (
+ SELECT r FROM (SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+  ARRAY[10,10,20,30]::bigint[],ARRAY[1,2,3,4]::bigint[],4,2,4,368,1048576,
+  false,0,1,false,3,0)::jsonb d) s,jsonb_array_elements(d->'rows') r
+), identities AS (
+ SELECT r->>'restore_generation' AS generation,r->>'fetched_index' AS candidate,
+  count(DISTINCT (r->>'edge_id',r->>'root_tid',r->>'visible_tid')) AS identities,
+  count(*) AS parents
+ FROM rows GROUP BY 1,2
+)
+SELECT
+ (SELECT bool_and((r->>'restore_generation')::bigint>0
+  AND (r->>'fetched_index')::int>=0
+  AND (r->>'fetched_index')::int<(r->>'fetched_count')::int
+  AND (r->>'candidate_parent_count')::int>=1) FROM rows),
+ (SELECT bool_and(identities=1) AND max(parents)=2 FROM identities),
+ (SELECT max((r->>'restore_generation')::bigint) FILTER (WHERE r->>'phase'='0')
+  < min((r->>'restore_generation')::bigint) FILTER (WHERE r->>'phase'='1') FROM rows);
+t|t|t
+-- Lazy restoration skips empty parents at the beginning, middle and end.
+SELECT string_agg(format('%s:%s',r->>'parent_id',r->>'edge_id'),',' ORDER BY n)
+ = '1001:1,1001:2,1003:3'
+FROM (SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[99,10,100,20,101]::bigint[],ARRAY[1,2,3,4,5]::bigint[],8,16,4,8192,1048576,
+ false,0,1,false,4,0)::jsonb d) s,
+ jsonb_array_elements(d->'rows') WITH ORDINALITY AS x(r,n);
+t
+-- Ordered restoration saves the Cartesian map without dropping duplicates.
+WITH results AS MATERIALIZED (
+ SELECT ordered,test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ array_fill(10::bigint,ARRAY[128]),
+ CASE WHEN ordered THEN ARRAY(SELECT generate_series(1,128)::bigint)
+      ELSE array_fill(1::bigint,ARRAY[128]) END,
+ 4,16,4,8192,1048576,false,0,1,false,0,0)::jsonb d
+ FROM (VALUES(true),(false)) flags(ordered)
+)
+SELECT bool_and((d->>'row_count')::int=256
+ AND (d#>>'{instrumentation,tableam_fetches}')::int=2
+ AND (d#>>'{instrumentation,restored_bindings}')::int=256),
+ max((d#>>'{instrumentation,peak_restore_bytes}')::bigint) FILTER (WHERE ordered)
+ < max((d#>>'{instrumentation,peak_restore_bytes}')::bigint) FILTER (WHERE NOT ordered),
+ count(DISTINCT (SELECT string_agg(format('%s:%s',r->>'parent_id',r->>'edge_id'),','
+  ORDER BY (r->>'parent_id')::bigint,(r->>'edge_id')::bigint)
+  FROM jsonb_array_elements(d->'rows') r))=1
+FROM results;
+t|t|t
+-- Actual allocated parent capacity is charged before request deduplication.
+SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ array_fill(10::bigint,ARRAY[128]),ARRAY(SELECT generate_series(1,128)::bigint),
+ 4,16,4,8192,1024,false,0,1,false,0,0);
+ERROR:  graph parent restore map exceeds byte budget
+-- Slot, borrowed view and bulk delivery must share one result contract.
+WITH results AS MATERIALIZED (
+ SELECT base,ordered,mode,test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+  ARRAY[20,10,10,30]::bigint[],
+  CASE WHEN ordered THEN ARRAY[1,2,3,4]::bigint[]
+       ELSE ARRAY[3,1,1,0]::bigint[] END,
+  4,2,4,368,1048576,false,0,1,false,mode,0)::jsonb d
+ FROM (VALUES (0,0),(0,5),(0,10),(0,11),(0,17),(0,22),
+              (3,3),(3,8),(3,14),(3,20),(4,4),(4,9),(4,15),(4,21)) modes(base,mode)
+ CROSS JOIN (VALUES (true),(false)) flags(ordered)
+), compared AS (
+ SELECT base,ordered,count(DISTINCT (d->'rows'))=1 AS same_rows,
+  bool_and((d->>'row_count')::int=CASE WHEN base=3 THEN 12 ELSE 6 END
+   AND (d->>'qual_calls')::int=(d->>'row_count')::int) AS same_counts
+ FROM results GROUP BY base,ordered
+)
+SELECT count(*)=6,bool_and(same_rows),bool_and(same_counts) FROM compared;
+t|t|t
+-- The first-row policy returns one view; later batches stay within capacity.
+SELECT (d->>'row_count')::int=8,
+ (d->>'first_view_count')::int=1,(d->>'max_view_count')::int=3,
+ (d#>>'{instrumentation,first_row_batches}')::int=1
+FROM (SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[10,10,10,10]::bigint[],ARRAY[1,2,3,4]::bigint[],
+ 4,8,4,1472,1048576,true,0,1,false,11,0)::jsonb d) s;
+t|t|t|t
+-- Both new entry points release the provider on ERROR.
+SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[10]::bigint[],ARRAY[1]::bigint[],2,2,4,368,1048576,
+ false,0,1,false,6,0);
+ERROR:  graph batch injected provider error
+SELECT (test_graph_batch_cleanup_state()::jsonb->>'active')::int=0;
+t
+SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[10]::bigint[],ARRAY[1]::bigint[],2,2,4,368,1048576,
+ false,0,1,false,12,0);
+ERROR:  graph batch injected provider error
+SELECT (test_graph_batch_cleanup_state()::jsonb->>'active')::int=0;
+t
+-- Rescan scope is exact; a new instrumentation interval counts only phase 1.
+SELECT d->>'row_count',d#>>'{instrumentation,parent_bindings}',
+ d#>>'{instrumentation,candidates_received}',d#>>'{instrumentation,rescan_count}',
+ (SELECT max((r->>'restore_generation')::bigint) FILTER (WHERE r->>'phase'='0')
+  < min((r->>'restore_generation')::bigint) FILTER (WHERE r->>'phase'='1')
+  FROM jsonb_array_elements(d->'rows') r)
+FROM (SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[10,20]::bigint[],ARRAY[1,2]::bigint[],2,2,4,368,1048576,
+ false,0,1,false,16,0)::jsonb d) s;
+6|2|3|1|t
+-- Opposite keys from cached visible tuples match lazy slots, in both directions.
+-- Updating dst without an IN index also exercises an OUT HOT redirect.
+UPDATE ggc_batch_edge SET dst=21,payload=NULL WHERE id=1;
+CREATE INDEX ggc_batch_in ON ggc_batch_edge(dst);
+WITH results AS MATERIALIZED (
+ SELECT direction,repeated,test_graph_batch('ggc_batch_edge',
+  CASE WHEN direction=1 THEN 'ggc_batch_out'::regclass ELSE 'ggc_batch_in'::regclass END,
+  direction,CASE WHEN direction=1 THEN
+   CASE WHEN repeated THEN ARRAY[10,10,20] ELSE ARRAY[10,20] END
+   ELSE CASE WHEN repeated THEN ARRAY[21,21,50] ELSE ARRAY[21,50] END END::bigint[],
+  CASE WHEN repeated THEN ARRAY[1,2,3] ELSE ARRAY[1,2] END::bigint[],
+  4,16,4,8192,1048576,false,0,1,false,mode,0)::jsonb d
+ FROM (VALUES(1),(2)) directions(direction)
+ CROSS JOIN (VALUES(true),(false)) flags(repeated)
+ CROSS JOIN (VALUES(0),(5),(10),(11),(17),(22)) modes(mode)
+)
+SELECT count(*)=24,
+ bool_and((d->>'row_count')::int=CASE WHEN direction=1
+  THEN CASE WHEN repeated THEN 5 ELSE 3 END ELSE CASE WHEN repeated THEN 3 ELSE 2 END END),
+ bool_and(NOT EXISTS(SELECT 1 FROM jsonb_array_elements(d->'rows') r
+  LEFT JOIN ggc_batch_edge e ON e.id=(r->>'edge_id')::bigint
+  WHERE e.id IS NULL OR (r->>'opposite')::bigint IS DISTINCT FROM
+   CASE WHEN direction=1 THEN e.dst ELSE e.src END)),
+ bool_and((d->>'qual_calls')::int=(d->>'row_count')::int)
+FROM results;
+t|t|t|t
+-- Compact delivery has the same first-row and capacity boundaries.
+SELECT (d->>'row_count')::int=8,
+ (d->>'first_view_count')::int=1,(d->>'max_view_count')::int=3,
+ (d#>>'{instrumentation,first_row_batches}')::int=1
+FROM (SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[10,10,10,10]::bigint[],ARRAY[1,2,3,4]::bigint[],
+ 4,8,4,1472,1048576,true,0,1,false,17,0)::jsonb d) s;
+t|t|t|t
+-- Provider ERROR and restore-budget errors release the compact cursor too.
+SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ ARRAY[10]::bigint[],ARRAY[1]::bigint[],2,2,4,368,1048576,
+ false,0,1,false,18,0);
+ERROR:  graph batch injected provider error
+SELECT (test_graph_batch_cleanup_state()::jsonb->>'active')::int=0;
+t
+SELECT test_graph_batch('ggc_batch_edge','ggc_batch_out',1,
+ array_fill(10::bigint,ARRAY[1024]),ARRAY(SELECT generate_series(1,1024)::bigint),
+ 2,2,4,368,181000,
+ false,0,1,false,21,0);
+ERROR:  one graph candidate parent map exceeds restore budget
+SELECT (test_graph_batch_cleanup_state()::jsonb->>'active')::int=0;
+t
+DROP TABLE ggc_batch_edge;

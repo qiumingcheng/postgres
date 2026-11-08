@@ -1840,6 +1840,7 @@ setup_privileges(FILE *cmdfd)
 				  escape_quotes(username));
 	PG_CMD_PUTS("GRANT USAGE ON SCHEMA pg_catalog, public TO PUBLIC;\n\n");
 	PG_CMD_PUTS("REVOKE ALL ON pg_largeobject FROM PUBLIC;\n\n");
+	PG_CMD_PUTS("REVOKE ALL ON pg_graph_statistic, pg_graph_statistic_data FROM PUBLIC;\n\n");
 	PG_CMD_PUTS("INSERT INTO pg_init_privs "
 				"  (objoid, classoid, objsubid, initprivs, privtype)"
 				"    SELECT"

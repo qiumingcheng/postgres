@@ -4108,6 +4108,38 @@ create_foreignscan_plan(PlannerInfo *root, ForeignPath *best_path,
 }
 
 /*
+ * Build native access plans for an ordered graph binding program.  Unlike a
+ * nestloop Plan, the graph node owns all these children and PARAM_EXEC slots.
+ * Keep parameter allocation, exact scan targets and PHV handling in the core
+ * planner; never plan SQL recursively at executor startup.
+ */
+List *
+create_graph_stage_plans(PlannerInfo *root, List *paths, List **stage_params)
+{
+	Relids saved_outer = root->curOuterRels;
+	Relids bound = NULL;
+	List *plans = NIL;
+
+	*stage_params = NIL;
+	foreach_ptr(Path, path, paths)
+	{
+		List *params;
+		Plan *plan;
+
+		root->curOuterRels = bms_union(saved_outer, bound);
+		plan = create_plan_recurse(root, path, CP_EXACT_TLIST);
+		bms_free(root->curOuterRels);
+		root->curOuterRels = saved_outer;
+		params = identify_current_nestloop_params(root, bound, saved_outer);
+		plans = lappend(plans, plan);
+		*stage_params = lappend(*stage_params, params);
+		bound = bms_add_members(bound, path->parent->relids);
+	}
+	bms_free(bound);
+	return plans;
+}
+
+/*
  * create_customscan_plan
  *
  * Transform a CustomPath into a Plan.
@@ -4159,7 +4191,7 @@ create_customscan_plan(PlannerInfo *root, CustomPath *best_path,
 
 	/*
 	 * Replace any outer-relation variables with nestloop params in the qual
-	 * and custom_exprs expressions.  We do this last so that the custom-plan
+	 * and custom expressions/parameter sources.  We do this last so the custom-plan
 	 * provider doesn't have to be involved.  (Note that parts of custom_exprs
 	 * could have come from join clauses, so doing this beforehand on the
 	 * scan_clauses wouldn't work.)  We assume custom_scan_tlist contains no
@@ -4171,6 +4203,8 @@ create_customscan_plan(PlannerInfo *root, CustomPath *best_path,
 			replace_nestloop_params(root, (Node *) cplan->scan.plan.qual);
 		cplan->custom_exprs = (List *)
 			replace_nestloop_params(root, (Node *) cplan->custom_exprs);
+		cplan->custom_param_exprs = (List *)
+			replace_nestloop_params(root, (Node *) cplan->custom_param_exprs);
 	}
 
 	return cplan;

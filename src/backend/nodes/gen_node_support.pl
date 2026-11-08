@@ -53,6 +53,7 @@ sub elem
 my @all_input_files = qw(
   nodes/nodes.h
   nodes/primnodes.h
+  nodes/graphnodes.h
   nodes/parsenodes.h
   nodes/pathnodes.h
   nodes/plannodes.h

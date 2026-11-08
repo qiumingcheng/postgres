@@ -17,6 +17,10 @@ OBJS = \
 	dependencies.o \
 	extended_stats.o \
 	extended_stats_funcs.o \
+	graph_stats_collect.o \
+	graph_stats_feedback.o \
+	graph_stats_path_collect.o \
+	graph_stats_store.o \
 	mcv.o \
 	mvdistinct.o \
 	relation_stats.o \

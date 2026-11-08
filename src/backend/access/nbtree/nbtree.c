@@ -23,6 +23,7 @@
 #include "access/stratnum.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
+#include "executor/graph_btree_provider.h"
 #include "nodes/execnodes.h"
 #include "pgstat.h"
 #include "storage/bulk_write.h"
@@ -37,6 +38,23 @@
 #include "utils/index_selfuncs.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
+
+/*
+ * Reuse only the raw private storage of scans that have ended normally.  The
+ * scan must first release all pins, keys, array state, and graph hints.  No
+ * relation, snapshot, or live scan survives in this cache.
+ *
+ * An active workspace is a child of the caller's scan-lifespan context and
+ * is absent from this array.  ERROR/reset therefore frees it in the ordinary
+ * way, without a cache callback or a second resource owner.  Only btendscan
+ * reparents a fully released workspace to TopMemoryContext.  This also keeps
+ * nested scans independent.  Bound idle storage even for nondefault BLCKSZ.
+ */
+#define BT_SCAN_WORKSPACE_CACHE_SIZE 4
+#define BT_SCAN_WORKSPACE_MAX_BYTES (64 * 1024)
+
+static BTScanOpaque bt_scan_workspaces[BT_SCAN_WORKSPACE_CACHE_SIZE];
+static int bt_num_scan_workspaces;
 
 
 /*
@@ -119,6 +137,7 @@ bthandler(PG_FUNCTION_ARGS)
 {
 	static const IndexAmRoutine amroutine = {
 		.type = T_IndexAmRoutine,
+		.amgetgraphprovider = GetGgcBtreeAdjProvider,
 		.amstrategies = BTMaxStrategyNumber,
 		.amsupport = BTNProcs,
 		.amoptsprocnum = BTOPTIONS_PROC,
@@ -347,8 +366,26 @@ btbeginscan(Relation rel, int nkeys, int norderbys)
 	/* get the scan */
 	scan = RelationGetIndexScan(rel, nkeys, norderbys);
 
-	/* allocate private workspace */
-	so = palloc_object(BTScanOpaqueData);
+	/* Acquire private storage; cached storage has no live scan state. */
+	if (bt_num_scan_workspaces > 0)
+	{
+		so = bt_scan_workspaces[--bt_num_scan_workspaces];
+		bt_scan_workspaces[bt_num_scan_workspaces] = NULL;
+		MemoryContextSetParent(GetMemoryChunkContext(so), CurrentMemoryContext);
+	}
+	else
+	{
+		MemoryContext context;
+
+		context = AllocSetContextCreate(CurrentMemoryContext,
+										"BTree scan workspace", ALLOCSET_SMALL_SIZES);
+		so = MemoryContextAlloc(context, sizeof(BTScanOpaqueData));
+		so->tupleWorkspace = NULL;
+	}
+	so->graph_seek_hints = NULL;
+	so->graph_routes = NULL;
+	so->graph_route_enabled = false;
+	so->graph_int8_enabled = false;
 	BTScanPosInvalidate(so->currPos);
 	BTScanPosInvalidate(so->markPos);
 	if (scan->numberOfKeys > 0)
@@ -430,18 +467,28 @@ btrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
 	/*
 	 * Allocate tuple workspace arrays, if needed for an index-only scan and
 	 * not already done in a previous rescan call.  To save on palloc
-	 * overhead, both workspaces are allocated as one palloc block; only this
-	 * function and btendscan know that.
+	 * overhead, both workspaces are allocated as one palloc block.  Keep the
+	 * raw allocation with the opaque workspace, but expose it as currTuples
+	 * and markTuples only for index-only scans.
 	 */
 	if (scan->xs_want_itup && so->currTuples == NULL)
 	{
-		so->currTuples = (char *) palloc(BLCKSZ * 2);
+		if (so->tupleWorkspace == NULL)
+			so->tupleWorkspace = MemoryContextAlloc(GetMemoryChunkContext(so),
+													   BLCKSZ * 2);
+		so->currTuples = so->tupleWorkspace;
 		so->markTuples = so->currTuples + BLCKSZ;
 	}
 
 	/*
 	 * Reset the scan keys
 	 */
+	if (so->graph_seek_hints)
+		memset(so->graph_seek_hints, 0, sizeof(*so->graph_seek_hints));
+	if (so->graph_routes)
+		so->graph_routes->count = so->graph_routes->cursor = 0;
+	so->graph_route_enabled = false;
+	so->graph_int8_enabled = false;
 	if (scankey && scan->numberOfKeys > 0)
 		memcpy(scan->keyData, scankey, scan->numberOfKeys * sizeof(ScanKeyData));
 	so->numberOfKeys = 0;		/* until _bt_preprocess_keys sets it */
@@ -455,6 +502,7 @@ void
 btendscan(IndexScanDesc scan)
 {
 	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+	MemoryContext context = GetMemoryChunkContext(so);
 
 	/* we aren't holding any read locks, but gotta drop the pins */
 	if (BTScanPosIsValid(so->currPos))
@@ -468,7 +516,9 @@ btendscan(IndexScanDesc scan)
 	so->markItemIndex = -1;
 	BTScanPosUnpinIfPinned(so->markPos);
 
-	/* No need to invalidate positions, the RAM is about to be freed. */
+	/* No saved position or pin may survive in reusable storage. */
+	BTScanPosInvalidate(so->currPos);
+	BTScanPosInvalidate(so->markPos);
 
 	/* Release storage */
 	if (so->keyData != NULL)
@@ -478,10 +528,58 @@ btendscan(IndexScanDesc scan)
 		MemoryContextDelete(so->arrayContext);
 	if (so->killedItems != NULL)
 		pfree(so->killedItems);
-	if (so->currTuples != NULL)
-		pfree(so->currTuples);
-	/* so->markTuples should not be pfree'd, see btrescan */
-	pfree(so);
+	if (so->graph_seek_hints)
+		pfree(so->graph_seek_hints);
+	if (so->graph_routes)
+		pfree(so->graph_routes);
+
+	/* Retain only the fixed workspace, never pointers into the finished scan. */
+	so->keyData = NULL;
+	so->arrayContext = NULL;
+	so->arrayKeys = NULL;
+	so->orderProcs = NULL;
+	so->killedItems = NULL;
+	so->numKilled = 0;
+	so->currTuples = so->markTuples = NULL;
+	so->graph_seek_hints = NULL;
+	so->graph_routes = NULL;
+	so->graph_route_enabled = so->graph_int8_enabled = false;
+	scan->opaque = NULL;
+	if (bt_num_scan_workspaces < BT_SCAN_WORKSPACE_CACHE_SIZE &&
+		MemoryContextMemAllocated(context, true) <= BT_SCAN_WORKSPACE_MAX_BYTES)
+	{
+		MemoryContextSetParent(context, TopMemoryContext);
+		bt_scan_workspaces[bt_num_scan_workspaces++] = so;
+	}
+	else
+		MemoryContextDelete(context);
+}
+
+/* Explicit opt-in by graph readers; ordinary SQL never allocates hints. */
+void
+btgraphseekhint(IndexScanDesc scan)
+{
+	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+
+	/* Call only after index_rescan has initialized keyData. Range/scalar
+	 * scans cannot use positioning hints and must not allocate them. */
+	if (scan->numberOfKeys != 1 || !(scan->keyData[0].sk_flags & SK_SEARCHARRAY))
+		return;
+	if (!so->graph_seek_hints)
+		so->graph_seek_hints = palloc0(sizeof(BTGraphSeekHints));
+}
+
+/* Only graph readers opt in, after index_rescan initializes the keys. */
+void
+btgraphbatchopts(IndexScanDesc scan, bool routes, bool int8cmp)
+{
+	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+
+	so->graph_int8_enabled = int8cmp;
+	so->graph_route_enabled = routes && scan->numberOfKeys == 1 &&
+		(scan->keyData[0].sk_flags & SK_SEARCHARRAY) != 0;
+	if (so->graph_route_enabled && !so->graph_routes)
+		so->graph_routes = palloc0(sizeof(BTGraphRoutes));
 }
 
 /*

@@ -22,6 +22,7 @@
 
 #include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
+#include "optimizer/graphpath.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/orclauses.h"
 #include "optimizer/pathnode.h"
@@ -239,7 +240,8 @@ query_planner(PlannerInfo *root,
 	/*
 	 * Remove self joins on a unique column.
 	 */
-	joinlist = remove_useless_self_joins(root, joinlist);
+	if (!GgcGraphKeepVariableBindings(root))
+		joinlist = remove_useless_self_joins(root, joinlist);
 
 	/*
 	 * Now distribute "placeholders" to base rels as needed.  This has to be

@@ -308,5 +308,7 @@
   opfmethod => 'hash', opfname => 'multirange_ops' },
 { oid => '6158',
   opfmethod => 'gist', opfname => 'multirange_ops' },
+{ oid => '8466', oid_symbol => 'GRAPH_ADJ_INT8_FAM_OID',
+  opfmethod => 'graph_adj', opfname => 'int8_graph_adj_ops' },
 
 ]

@@ -35,6 +35,7 @@
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/geqo.h"
+#include "optimizer/graphpath.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -2750,6 +2751,7 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	 * push down a pushable qual, because it'd result in a worse plan?
 	 */
 	if (rel->baserestrictinfo != NIL &&
+		!GgcGraphKeepSubqueryBoundary(root, subquery) &&
 		subquery_is_pushdown_safe(subquery, subquery, &safetyInfo))
 	{
 		/* OK to consider pushing down individual quals */

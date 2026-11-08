@@ -2,6 +2,7 @@
 
 subdir('brin')
 subdir('common')
+subdir('graphadj')
 subdir('gin')
 subdir('gist')
 subdir('hash')

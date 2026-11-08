@@ -61,6 +61,7 @@
 #include "catalog/pg_publication_rel.h"
 #include "catalog/pg_rewrite.h"
 #include "catalog/pg_statistic_ext.h"
+#include "catalog/pg_graph_statistic.h"
 #include "catalog/pg_subscription.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_transform.h"
@@ -87,6 +88,7 @@
 #include "parser/parsetree.h"
 #include "rewrite/rewriteRemove.h"
 #include "storage/lmgr.h"
+#include "statistics/graph_stats.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -1484,6 +1486,10 @@ doDeletion(const ObjectAddress *object, int flags)
 
 		case StatisticExtRelationId:
 			RemoveStatisticsById(object->objectId);
+			break;
+
+		case GraphStatisticRelationId:
+			RemoveGraphStatisticsById(object->objectId);
 			break;
 
 		case TSConfigRelationId:

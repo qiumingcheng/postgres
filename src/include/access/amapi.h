@@ -226,6 +226,10 @@ typedef void (*aminitparallelscan_function) (void *target);
 /* (re)start parallel index scan */
 typedef void (*amparallelrescan_function) (IndexScanDesc scan);
 
+/* Optional graph adjacency interface; the AM owns the static callback table. */
+struct GgcAdjProviderV2;
+typedef const struct GgcAdjProviderV2 *(*amgetgraphprovider_function) (void);
+
 /*
  * API struct for an index AM.  Note we expect index AMs to allocate these
  * structs statically; the core code never copies nor frees them.
@@ -323,6 +327,9 @@ typedef struct IndexAmRoutine
 	/* interface functions to support planning */
 	amtranslate_strategy_function amtranslatestrategy;	/* can be NULL */
 	amtranslate_cmptype_function amtranslatecmptype;	/* can be NULL */
+
+	/* NULL for AMs which do not provide graph adjacency access. */
+	amgetgraphprovider_function amgetgraphprovider;
 } IndexAmRoutine;
 
 

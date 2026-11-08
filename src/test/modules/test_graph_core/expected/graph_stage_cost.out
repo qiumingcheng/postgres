@@ -1,0 +1,2 @@
+\set ECHO none
+graph stage filtering, cycle estimates, and startup: ok

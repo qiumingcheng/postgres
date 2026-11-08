@@ -1731,6 +1731,27 @@ set_customscan_references(PlannerInfo *root,
 						  int rtoffset)
 {
 	ListCell   *lc;
+	Bitmapset  *paramids = NULL;
+
+	/* Every locally supplied parameter needs exactly one visible source.
+	 * Do not accept a bitmap that merely suppresses dependency errors while
+	 * leaving PARAM_EXEC without a referent in the saved Plan. */
+	if ((cscan->custom_param_ids && !IsA(cscan->custom_param_ids, IntList)) ||
+		(cscan->custom_param_exprs && !IsA(cscan->custom_param_exprs, List)) ||
+		list_length(cscan->custom_param_ids) != list_length(cscan->custom_param_exprs))
+		elog(ERROR, "invalid custom scan parameter source lists");
+	foreach_int(paramid, cscan->custom_param_ids)
+	{
+		if (paramid < 0 || bms_is_member(paramid, paramids))
+			elog(ERROR, "invalid or duplicate custom scan parameter id");
+		paramids = bms_add_member(paramids, paramid);
+	}
+	if (!bms_equal(paramids, cscan->custom_params))
+		elog(ERROR, "custom scan parameter sources do not match locally supplied parameters");
+	bms_free(paramids);
+	foreach_ptr(Node, expression, cscan->custom_param_exprs)
+		if (expression == NULL)
+			elog(ERROR, "custom scan parameter has no source expression");
 
 	/* Adjust scanrelid if it's valid */
 	if (cscan->scan.scanrelid > 0)
@@ -1765,6 +1786,14 @@ set_customscan_references(PlannerInfo *root,
 						   rtoffset,
 						   NRM_EQUAL,
 						   NUM_EXEC_QUAL((Plan *) cscan));
+		cscan->custom_param_exprs = (List *)
+			fix_upper_expr(root,
+						   (Node *) cscan->custom_param_exprs,
+						   itlist,
+						   INDEX_VAR,
+						   rtoffset,
+						   NRM_EQUAL,
+						   NUM_EXEC_TLIST((Plan *) cscan));
 		pfree(itlist);
 		/* custom_scan_tlist itself just needs fix_scan_list() adjustments */
 		cscan->custom_scan_tlist =
@@ -1783,6 +1812,9 @@ set_customscan_references(PlannerInfo *root,
 		cscan->custom_exprs =
 			fix_scan_list(root, cscan->custom_exprs,
 						  rtoffset, NUM_EXEC_QUAL((Plan *) cscan));
+		cscan->custom_param_exprs =
+			fix_scan_list(root, cscan->custom_param_exprs,
+						  rtoffset, NUM_EXEC_TLIST((Plan *) cscan));
 	}
 
 	/* Adjust child plan-nodes recursively, if needed */

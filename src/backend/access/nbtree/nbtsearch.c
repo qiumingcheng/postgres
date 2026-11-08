@@ -18,12 +18,15 @@
 #include "access/nbtree.h"
 #include "access/relscan.h"
 #include "access/xact.h"
+#include "catalog/pg_type_d.h"
 #include "executor/instrument_node.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/predicate.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/fmgroids.h"
+#include "utils/snapmgr.h"
 
 
 static inline void _bt_drop_lock_and_maybe_pin(Relation rel, BTScanOpaque so);
@@ -31,6 +34,13 @@ static Buffer _bt_moveright(Relation rel, Relation heaprel, BTScanInsert key,
 							Buffer buf, bool forupdate, BTStack stack,
 							int access);
 static OffsetNumber _bt_binsrch(Relation rel, BTScanInsert key, Buffer buf);
+static OffsetNumber _bt_binsrch_hint(Relation rel, BTScanInsert key, Buffer buf,
+									BTGraphSeekHints *hints);
+static BTStack _bt_search_hint(Relation rel, Relation heaprel, BTScanInsert key,
+								  Buffer *bufP, int access, bool returnstack,
+								  BTGraphSeekHints *hints, IndexScanDesc graphscan);
+static void _bt_graph_routes(IndexScanDesc scan, BTScanInsert key, Buffer buf,
+							 OffsetNumber off);
 static int	_bt_binsrch_posting(BTScanInsert key, Page page,
 								OffsetNumber offnum);
 static inline void _bt_returnitem(IndexScanDesc scan, BTScanOpaque so);
@@ -100,12 +110,43 @@ BTStack
 _bt_search(Relation rel, Relation heaprel, BTScanInsert key, Buffer *bufP,
 		   int access, bool returnstack)
 {
+	return _bt_search_hint(rel, heaprel, key, bufP, access, returnstack, NULL, NULL);
+}
+
+static BTStack
+_bt_search_hint(Relation rel, Relation heaprel, BTScanInsert key, Buffer *bufP,
+				int access, bool returnstack, BTGraphSeekHints *hints,
+				IndexScanDesc graphscan)
+{
 	BTStack		stack_in = NULL;
 	int			page_access = BT_READ;
 
 	/* heaprel must be set whenever _bt_allocbuf is reachable */
 	Assert(access == BT_READ || access == BT_WRITE);
 	Assert(access == BT_READ || heaprel != NULL);
+
+	if (graphscan)
+	{
+		BTScanOpaque so = (BTScanOpaque) graphscan->opaque;
+		BTGraphRoutes *routes = so->graph_routes;
+		int64 value = DatumGetInt64(key->scankeys[0].sk_argument);
+
+		Assert(access == BT_READ && !returnstack);
+		while (routes->cursor < routes->count &&
+			   routes->routes[routes->cursor].key < value)
+			routes->cursor++;
+		if (routes->cursor < routes->count &&
+			routes->routes[routes->cursor].key == value)
+		{
+			/* A saved downlink may now lead to a split/deleted page.  The
+			 * active MVCC snapshot prevents block recycling, NOT splitting.
+			 * Always use normal right-link correction and leaf processing. */
+			*bufP = _bt_getbuf(rel, routes->routes[routes->cursor].child, BT_READ);
+			*bufP = _bt_moveright(rel, NULL, key, *bufP, false, NULL, BT_READ);
+			Assert(P_ISLEAF(BTPageGetOpaque(BufferGetPage(*bufP))));
+			return NULL;
+		}
+	}
 
 	/* Get the root page to start with */
 	*bufP = _bt_getroot(rel, heaprel, access);
@@ -150,11 +191,14 @@ _bt_search(Relation rel, Relation heaprel, BTScanInsert key, Buffer *bufP,
 		 * Find the appropriate pivot tuple on this page.  Its downlink points
 		 * to the child page that we're about to descend to.
 		 */
-		offnum = _bt_binsrch(rel, key, *bufP);
+		offnum = hints ? _bt_binsrch_hint(rel, key, *bufP, hints) :
+			_bt_binsrch(rel, key, *bufP);
 		itemid = PageGetItemId(page, offnum);
 		itup = (IndexTuple) PageGetItem(page, itemid);
 		Assert(BTreeTupleIsPivot(itup) || !key->heapkeyspace);
 		child = BTreeTupleGetDownLink(itup);
+		if (graphscan && opaque->btpo_level == 1)
+			_bt_graph_routes(graphscan, key, *bufP, offnum);
 
 		/*
 		 * We need to save the location of the pivot tuple we chose in a new
@@ -205,6 +249,100 @@ _bt_search(Relation rel, Relation heaprel, BTScanInsert key, Buffer *bufP,
 	}
 
 	return stack_in;
+}
+
+/*
+ * Route a bounded suffix of this SAOP batch while its level-1 parent is
+ * locked once.  Keys before the current search key are not routed: only that
+ * key's normal descent proves the left boundary.  Stop at the parent's high
+ * key, so this also works for trees with multiple internal levels.  No locks
+ * or pins survive the ordinary descent, and no pointers into the page escape.
+ *
+ * A saved leaf downlink is precisely a delayed read descent. nbtree's page
+ * deletion drain protocol keeps its right links intact until all snapshots
+ * existing at deletion are gone (README: Placing deleted pages in the FSM).
+ * Admission requires a live registered/active MVCC snapshot; rescan clears
+ * every route. No reuse between snapshots, executor scans or transactions.
+ */
+static void
+_bt_graph_routes(IndexScanDesc scan, BTScanInsert key, Buffer buf,
+				 OffsetNumber off)
+{
+	BTScanOpaque so = (BTScanOpaque) scan->opaque;
+	BTGraphRoutes *routes = so->graph_routes;
+	BTArrayKeyInfo *array = &so->arrayKeys[0];
+	Relation rel = scan->indexRelation;
+	Page page = BufferGetPage(buf);
+	BTPageOpaque opaque = BTPageGetOpaque(page);
+	Datum saved = key->scankeys[0].sk_argument;
+	int64 current = DatumGetInt64(saved);
+	int64 previous = current;
+	OffsetNumber maxoff = PageGetMaxOffsetNumber(page);
+
+	Assert(!P_ISLEAF(opaque) && opaque->btpo_level == 1);
+	Assert(!key->nextkey && !key->backward);
+	Assert(off >= P_FIRSTDATAKEY(opaque) && off <= maxoff);
+
+	routes->count = routes->cursor = 0;
+	for (int i = array->cur_elem; i < array->num_elems &&
+		 routes->count < BT_GRAPH_ROUTE_KEYS; i++)
+	{
+		IndexTuple itup;
+		int64 value = DatumGetInt64(array->elem_values[i]);
+
+		if (value < current)
+			continue;
+		key->scankeys[0].sk_argument = array->elem_values[i];
+		if (!P_RIGHTMOST(opaque) && _bt_compare(rel, key, page, P_HIKEY) >= 1)
+			break;
+
+		/*
+		 * Unlike a cross-lock seek hint, off is an exact lower bound here:
+		 * the parent stays read-locked and these array keys are ascending.
+		 * The caller already located current, and subsequent keys cannot
+		 * move left.  Gallop from the preceding pivot, then binary-search
+		 * the remaining interval using the ordinary pivot comparison rules.
+		 * This proof is local to this lock; saved downlinks still require
+		 * the normal leaf-page checks when they are used later.
+		 */
+		Assert(value >= previous);
+		if (value != previous)
+		{
+			OffsetNumber low = off + 1;
+			OffsetNumber high = maxoff + 1;
+			uint32 step = 1;
+
+			while (low < high)
+			{
+				OffsetNumber probe = Min((uint32) off + step,
+										 (uint32) high - 1);
+
+				if (_bt_compare(rel, key, page, probe) < 1)
+				{
+					high = probe;
+					break;
+				}
+				low = probe + 1;
+				step *= 2;
+			}
+			while (low < high)
+			{
+				OffsetNumber mid = low + ((high - low) / 2);
+
+				if (_bt_compare(rel, key, page, mid) >= 1)
+					low = mid + 1;
+				else
+					high = mid;
+			}
+			off = OffsetNumberPrev(low);
+		}
+		Assert(off == _bt_binsrch(rel, key, buf));
+		previous = value;
+		itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, off));
+		routes->routes[routes->count].key = value;
+		routes->routes[routes->count++].child = BTreeTupleGetDownLink(itup);
+	}
+	key->scankeys[0].sk_argument = saved;
 }
 
 /*
@@ -321,6 +459,51 @@ _bt_moveright(Relation rel,
 	return buf;
 }
 
+/* A non-NULL first bigint attribute has this layout after graph admission. */
+static inline int32
+_bt_compare_int8_tuple(int64 value, IndexTuple itup)
+{
+	int64		attribute;
+
+	Assert(!IndexTupleHasNulls(itup));
+	memcpy(&attribute, (char *) itup + MAXALIGN(sizeof(IndexTupleData)),
+		   sizeof(attribute));
+	return value > attribute ? 1 : (value < attribute ? -1 : 0);
+}
+
+/*
+ * The admitted forward graph scan has one builtin bigint key and no scan
+ * TID.  Leaf data tuples need no pivot truncation or attribute iteration.
+ * Keep the invariant key value outside the loop; NULL tuples retain the
+ * general comparator, including the index's NULL ordering.
+ */
+static OffsetNumber
+_bt_binsrch_int8_leaf(Relation rel, BTScanInsert key, Page page,
+					 OffsetNumber low, OffsetNumber high)
+{
+	int64		value = DatumGetInt64(key->scankeys[0].sk_argument);
+
+	Assert(P_ISLEAF(BTPageGetOpaque(page)));
+	Assert(key->graphint8 && key->keysz == 1);
+	Assert(!key->backward && !key->nextkey && key->scantid == NULL);
+	while (low < high)
+	{
+		OffsetNumber mid = low + ((high - low) / 2);
+		IndexTuple	itup;
+		int32		result;
+
+		Assert(_bt_check_natts(rel, key->heapkeyspace, page, mid));
+		itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, mid));
+		result = IndexTupleHasNulls(itup) ? _bt_compare(rel, key, page, mid) :
+			_bt_compare_int8_tuple(value, itup);
+		if (result >= 1)
+			low = mid + 1;
+		else
+			high = mid;
+	}
+	return low;
+}
+
 /*
  *	_bt_binsrch() -- Do a binary search for a key on a particular page.
  *
@@ -387,6 +570,22 @@ _bt_binsrch(Relation rel,
 	 */
 	high++;						/* establish the loop invariant for high */
 
+	/* Ordinary scans keep the original binary-search loop unchanged. */
+	if (key->graphint8 && P_ISLEAF(opaque))
+	{
+		OffsetNumber result = _bt_binsrch_int8_leaf(rel, key, page, low, high);
+
+#ifdef USE_ASSERT_CHECKING
+		BTScanInsertData reference;
+
+		/* The source can be a variable-sized allocation: copy only one key. */
+		memcpy(&reference, key, offsetof(BTScanInsertData, scankeys[1]));
+		reference.graphint8 = false;
+		Assert(result == _bt_binsrch(rel, &reference, buf));
+#endif
+		return result;
+	}
+
 	cmpval = key->nextkey ? 0 : 1;	/* select comparison value */
 
 	while (high > low)
@@ -447,6 +646,71 @@ _bt_binsrch(Relation rel,
 	Assert(low > P_FIRSTDATAKEY(opaque));
 
 	return OffsetNumberPrev(low);
+}
+
+/* An old offset is only a probe position, never an accepted search result.
+ * A fresh comparison establishes the same bounds as ordinary binary search;
+ * galloping right favors sorted batches. Stale offsets after split/deletion,
+ * descending keys and non-monotone requests remain safe. No LSN-based proof,
+ * cached page contents, extra pins, or cross-scan lifetime is introduced. */
+static OffsetNumber
+_bt_binsrch_hint(Relation rel, BTScanInsert key, Buffer buf,
+				 BTGraphSeekHints *hints)
+{
+	Page page = BufferGetPage(buf);
+	BTPageOpaque opaque = BTPageGetOpaque(page);
+	OffsetNumber low = P_FIRSTDATAKEY(opaque);
+	OffsetNumber high = PageGetMaxOffsetNumber(page) + 1;
+	OffsetNumber result;
+	BTGraphSeekHint *hint;
+	int32 cmpval = key->nextkey ? 0 : 1;
+	BlockNumber block = BufferGetBlockNumber(buf);
+
+	Assert(!P_ISLEAF(opaque));
+	if (opaque->btpo_level >= BT_GRAPH_HINT_LEVELS)
+		return _bt_binsrch(rel, key, buf);
+	hint = &hints->levels[opaque->btpo_level];
+	if (!hint->valid || hint->block != block || hint->offset < low || hint->offset >= high)
+		result = _bt_binsrch(rel, key, buf);
+	else
+	{
+		OffsetNumber probe = hint->offset;
+
+		if (_bt_compare(rel, key, page, probe) < cmpval)
+			high = probe;
+		else
+		{
+			uint32 step = 1;
+
+			low = probe + 1;
+			while (low < high)
+			{
+				probe = Min((uint32) hint->offset + step, (uint32) high - 1);
+				if (_bt_compare(rel, key, page, probe) < cmpval)
+				{
+					high = probe;
+					break;
+				}
+				low = probe + 1;
+				step *= 2;
+			}
+		}
+		while (low < high)
+		{
+			OffsetNumber mid = low + ((high - low) / 2);
+
+			if (_bt_compare(rel, key, page, mid) >= cmpval)
+				low = mid + 1;
+			else
+				high = mid;
+		}
+		Assert(low > P_FIRSTDATAKEY(opaque));
+		result = OffsetNumberPrev(low);
+	}
+	hint->block = block;
+	hint->offset = result;
+	hint->valid = true;
+	return result;
 }
 
 /*
@@ -712,6 +976,23 @@ _bt_compare(Relation rel,
 		return 1;
 
 	itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));
+	/* Admission proved one builtin ascending bigint key and no scan TID.
+	 * NULL tuples use the general comparator.  Leaf posting tuples compare
+	 * just like ordinary tuples; pivot truncation must still be respected. */
+	if (key->graphint8 && !IndexTupleHasNulls(itup))
+	{
+		bool leafitem = P_ISLEAF(opaque) && offnum >= P_FIRSTDATAKEY(opaque);
+
+		if (!leafitem && BTreeTupleGetNAtts(itup, rel) == 0)
+			return 1;
+		result = _bt_compare_int8_tuple(DatumGetInt64(key->scankeys[0].sk_argument),
+										 itup);
+		if (result != 0)
+			return result;
+		if (!leafitem && BTreeTupleGetHeapTID(itup) == NULL)
+			return 1;
+		return 0;
+	}
 	ntupatts = BTreeTupleGetNAtts(itup, rel);
 
 	/*
@@ -1443,6 +1724,7 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	inskey.anynullkeys = false; /* unused */
 	inskey.scantid = NULL;
 	inskey.keysz = keysz;
+	inskey.graphint8 = false;
 	switch (strat_total)
 	{
 		case BTLessStrategyNumber:
@@ -1510,7 +1792,36 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	 * position ourselves on the target leaf page.
 	 */
 	Assert(ScanDirectionIsBackward(dir) == inskey.backward);
-	_bt_search(rel, NULL, &inskey, &so->currPos.buf, BT_READ, false);
+	/* Keep all ordinary, custom-opclass, DESC, NULL and multi-column scans
+	 * on the generic path. Range scans can use comparison but not routing. */
+	if ((so->graph_int8_enabled || so->graph_route_enabled) &&
+		keysz == 1 && IndexRelationGetNumberOfAttributes(rel) == 1 &&
+		TupleDescAttr(RelationGetDescr(rel), 0)->atttypid == INT8OID &&
+		inskey.heapkeyspace && !inskey.backward && !inskey.nextkey &&
+		inskey.scantid == NULL && inskey.scankeys[0].sk_attno == 1 &&
+		!(inskey.scankeys[0].sk_flags & (SK_ISNULL | SK_BT_DESC)) &&
+		inskey.scankeys[0].sk_func.fn_oid == F_BTINT8CMP &&
+		scan->parallel_scan == NULL)
+	{
+		inskey.graphint8 = so->graph_int8_enabled;
+		if (so->graph_route_enabled && so->numArrayKeys == 1 && !so->skipScan &&
+			so->arrayKeys[0].scan_key == 0 &&
+			IsMVCCSnapshot(scan->xs_snapshot) &&
+			(scan->xs_snapshot->active_count > 0 || scan->xs_snapshot->regd_count > 0))
+		{
+			_bt_search_hint(rel, NULL, &inskey, &so->currPos.buf, BT_READ, false,
+							so->graph_seek_hints, scan);
+			goto graph_search_done;
+		}
+	}
+	if (so->graph_seek_hints && so->numArrayKeys && !so->skipScan &&
+		scan->parallel_scan == NULL && ScanDirectionIsForward(dir))
+		_bt_search_hint(rel, NULL, &inskey, &so->currPos.buf, BT_READ, false,
+						so->graph_seek_hints, NULL);
+	else
+		_bt_search(rel, NULL, &inskey, &so->currPos.buf, BT_READ, false);
+
+graph_search_done:
 
 	if (!BufferIsValid(so->currPos.buf))
 	{

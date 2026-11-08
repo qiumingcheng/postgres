@@ -57,6 +57,7 @@
 #include "catalog/pg_publication_rel.h"
 #include "catalog/pg_rewrite.h"
 #include "catalog/pg_statistic_ext.h"
+#include "catalog/pg_graph_statistic.h"
 #include "catalog/pg_subscription.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_transform.h"
@@ -123,6 +124,20 @@ typedef struct
 
 static const ObjectPropertyType ObjectProperty[] =
 {
+	{
+		"graph statistics object",
+		GraphStatisticRelationId,
+		GraphStatisticOidIndexId,
+		GRAPHSTATISTICOID,
+		SYSCACHEID_INVALID,
+		Anum_pg_graph_statistic_oid,
+		InvalidAttrNumber,
+		InvalidAttrNumber,
+		Anum_pg_graph_statistic_gstowner,
+		InvalidAttrNumber,
+		-1,
+		false
+	},
 	{
 		"access method",
 		AccessMethodRelationId,
@@ -3567,6 +3582,22 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 				break;
 			}
 
+		case GraphStatisticRelationId:
+			{
+				HeapTuple tuple = SearchSysCache1(GRAPHSTATISTICOID,
+												 ObjectIdGetDatum(object->objectId));
+
+				if (!HeapTupleIsValid(tuple))
+				{
+					if (!missing_ok)
+						elog(ERROR, "cache lookup failed for graph statistics object %u", object->objectId);
+					break;
+				}
+				appendStringInfo(&buffer, _("graph statistics object %u"), object->objectId);
+				ReleaseSysCache(tuple);
+				break;
+			}
+
 		case StatisticExtRelationId:
 			{
 				HeapTuple	stxTup;
@@ -4836,6 +4867,10 @@ getObjectTypeDescription(const ObjectAddress *object, bool missing_ok)
 			appendStringInfoString(&buffer, "schema");
 			break;
 
+		case GraphStatisticRelationId:
+			appendStringInfoString(&buffer, "graph statistics object");
+			break;
+
 		case StatisticExtRelationId:
 			appendStringInfoString(&buffer, "statistics object");
 			break;
@@ -5677,6 +5712,24 @@ getObjectIdentityParts(const ObjectAddress *object,
 									   quote_identifier(nspname));
 				if (objname)
 					*objname = list_make1(nspname);
+				break;
+			}
+
+		case GraphStatisticRelationId:
+			{
+				HeapTuple tuple = SearchSysCache1(GRAPHSTATISTICOID,
+												 ObjectIdGetDatum(object->objectId));
+
+				if (!HeapTupleIsValid(tuple))
+				{
+					if (!missing_ok)
+						elog(ERROR, "cache lookup failed for graph statistics object %u", object->objectId);
+					break;
+				}
+				appendStringInfo(&buffer, "%u", object->objectId);
+				if (objname)
+					*objname = list_make1(psprintf("%u", object->objectId));
+				ReleaseSysCache(tuple);
 				break;
 			}
 

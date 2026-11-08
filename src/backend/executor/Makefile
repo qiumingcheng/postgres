@@ -13,6 +13,7 @@ top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
 OBJS = \
+	graph_fixed.o \
 	execAmi.o \
 	execAsync.o \
 	execCurrent.o \
@@ -31,6 +32,11 @@ OBJS = \
 	execTuples.o \
 	execUtils.o \
 	functions.o \
+	graph_batch.o \
+	graph_btree_provider.o \
+	graph_provider.o \
+	graph_pgq.o \
+	graph_pgq_plan.o \
 	instrument.o \
 	nodeAgg.o \
 	nodeAppend.o \

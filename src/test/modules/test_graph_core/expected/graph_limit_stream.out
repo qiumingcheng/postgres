@@ -1,0 +1,2 @@
+\set ECHO none
+graph partial retrieval, native startup, and cached LIMIT: ok

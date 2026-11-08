@@ -93,6 +93,7 @@ _bt_mkscankey(Relation rel, IndexTuple itup)
 	key->anynullkeys = false;	/* initial assumption */
 	key->nextkey = false;		/* usual case, required by btinsert */
 	key->backward = false;		/* usual case, required by btinsert */
+	key->graphint8 = false;
 	key->keysz = Min(indnkeyatts, tupnatts);
 	key->scantid = key->heapkeyspace && itup ?
 		BTreeTupleGetHeapTID(itup) : NULL;
