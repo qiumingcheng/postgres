@@ -1619,6 +1619,16 @@ pg_graph_statistic_collect_path(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("fixed-path collection requires an active MVCC snapshot")));
 	estate = CreateExecutorState();
+	/*
+	 * CTAS can advance the command counter when it creates its destination,
+	 * while the enclosing query still holds the earlier active snapshot.
+	 * Other calls in the same query can also publish statistics and advance
+	 * the counter.  Keep the caller's MVCC horizon, but use a private snapshot
+	 * with the current command ID for both the heap scans and the provider.
+	 * Never update the enclosing executor's borrowed snapshot in place.
+	 */
+	PushCopiedSnapshot(GetActiveSnapshot());
+	UpdateActiveSnapshotCommandId();
 	snapshot = RegisterSnapshot(GetActiveSnapshot());
 	estate->es_snapshot = snapshot;
 	collection_context = AllocSetContextCreate(estate->es_query_cxt,
@@ -1670,6 +1680,7 @@ pg_graph_statistic_collect_path(PG_FUNCTION_ARGS)
 			population, seed_count, scan_pages, examined, peak, NULL, 0);
 		MemoryContextDelete(collection_context);
 		UnregisterSnapshot(snapshot);
+		PopActiveSnapshot();
 		FreeExecutorState(estate);
 		index_close(index, NoLock);
 		table_close(edge, NoLock);
@@ -1725,6 +1736,7 @@ pg_graph_statistic_collect_path(PG_FUNCTION_ARGS)
 			stages, recorded_stages);
 		MemoryContextDelete(collection_context);
 		UnregisterSnapshot(snapshot);
+		PopActiveSnapshot();
 		FreeExecutorState(estate);
 		index_close(index, NoLock);
 		table_close(edge, NoLock);
@@ -1742,6 +1754,7 @@ pg_graph_statistic_collect_path(PG_FUNCTION_ARGS)
 		stages, recorded_stages);
 	MemoryContextDelete(collection_context);
 	UnregisterSnapshot(snapshot);
+	PopActiveSnapshot();
 	FreeExecutorState(estate);
 	index_close(index, NoLock);
 	table_close(edge, NoLock);
